@@ -65,10 +65,13 @@ try {
     $ok('metadata DB', false, $e->getMessage());
 }
 
-// Master key.
-$mk = (string)Core\Config::get('security.master_key', '');
-$ok('security.master_key is a real 64-hex key',
-    preg_match('/^[0-9a-f]{64}$/', $mk) === 1 && strspn($mk, '0') !== 64);
+// Master key (format + placeholder/retired rejection).
+try {
+    \Services\Encryption::assertUsableKey((string)Core\Config::get('security.master_key', ''));
+    $ok('security.master_key is a real, non-placeholder 64-hex key', true);
+} catch (\Throwable $e) {
+    $ok('security.master_key is a real, non-placeholder 64-hex key', false, $e->getMessage());
+}
 
 // Storage dirs.
 $storage = Core\Filesystem::storageDir();

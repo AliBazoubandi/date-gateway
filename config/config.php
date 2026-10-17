@@ -13,10 +13,11 @@ return [
         // Everything (PHP + MySQL session) runs in Tehran time (+03:30, no DST).
         'timezone' => 'Asia/Tehran',
         // NEVER enable on a live system; shows errors to the browser.
-        'debug' => false,
+        // Override with GATEWAY_DEBUG=1 in config/.env for development.
+        'debug' => (string)\Core\Env::get('GATEWAY_DEBUG', '0') === '1',
         // Public base URL used to build download links, e.g. 'http://gw.internal'.
-        // Empty = build from the incoming Host header.
-        'base_url' => '',
+        // Empty = build from the incoming Host header. (config/.env: GATEWAY_BASE_URL)
+        'base_url' => (string)\Core\Env::get('GATEWAY_BASE_URL', ''),
     ],
 
     // Metadata database (the MariaDB/MySQL that ships with XAMPP).
@@ -28,15 +29,16 @@ return [
         'port' => 3306,
         'database' => 'data_gateway',
         'user' => 'root',
-        'password' => '',
+        'password' => (string)\Core\Env::get('GATEWAY_DB_PASSWORD', ''),
     ],
 
     'security' => [
-        // AES-256-GCM master key used to encrypt connection passwords.
-        // MUST be 64 hex chars (32 bytes). Generate once with:
-        //   php -r "echo bin2hex(random_bytes(32));"
-        // Changing it later makes every stored connection password unreadable.
-        'master_key' => '5122ef88ce33eaf8ca8b79c157aa0241f17ccc4b419f7d1346d8514402bf755f',
+        // AES-256-GCM master key used to encrypt connection passwords and
+        // per-call download tokens. MUST be 64 hex chars (32 bytes) and must
+        // never be committed: set it in config/.env as GATEWAY_MASTER_KEY.
+        // Generate once with:  php -r "echo bin2hex(random_bytes(32));"
+        // Changing it later makes every stored secret unreadable.
+        'master_key' => (string)\Core\Env::get('GATEWAY_MASTER_KEY', str_repeat('0', 64)),
     ],
 
     'storage' => [

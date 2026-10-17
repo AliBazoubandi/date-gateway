@@ -24,8 +24,12 @@ spl_autoload_register(static function (string $class): void {
 });
 
 // ---- Configuration -----------------------------------------------------------
+\Core\Env::load(BASE_PATH . '/config/.env');
 try {
     Config::load(BASE_PATH . '/config/config.php');
+    // Refuse to run with a placeholder/retired master key: nothing may
+    // encrypt or decrypt until a real key is configured.
+    \Services\Encryption::assertUsableKey((string)Config::get('security.master_key', ''));
 } catch (\Throwable $e) {
     // Fail loudly and clearly before anything else happens.
     fwrite(STDERR, 'Data Gateway cannot start: ' . $e->getMessage() . PHP_EOL);
