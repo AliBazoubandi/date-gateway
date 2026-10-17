@@ -30,7 +30,7 @@ final class Http
         return isset($parts[$n]) ? rawurldecode($parts[$n]) : '';
     }
 
-    public static function param(string $key, string $source = 'r'): ?string
+    public static function param(string $key, string $source = 'g'): ?string
     {
         $arr = $source === 'g' ? $_GET : ($source === 'p' ? $_POST : $_REQUEST);
         return isset($arr[$key]) ? (string)$arr[$key] : null;
