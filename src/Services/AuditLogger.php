@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Services;
 
 use Core\Db;
+use Core\Session;
 use Core\Str;
 use Core\Time;
 
@@ -19,15 +20,22 @@ final class AuditLogger
         ?int $entityId,
         ?string $entityName,
         ?array $before,
-        ?array $after
+        ?array $after,
+        ?int $adminId = null
     ): void {
+        // Explicit parameter wins; otherwise fall back to the session
+        // (CLI/test callers may have no session and record admin_user_id NULL).
+        if ($adminId === null) {
+            Session::start();
+            $adminId = isset($_SESSION['admin_user_id']) ? (int)$_SESSION['admin_user_id'] : null;
+        }
         Db::instance()->execute(
             'INSERT INTO admin_audit_log
                 (timestamp, admin_user_id, entity_type, entity_id, entity_name, action, before_json, after_json)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
             [
                 Time::now(),
-                (int)($_SESSION['admin_user_id'] ?? 0) ?: null,
+                $adminId !== null && $adminId > 0 ? $adminId : null,
                 $entityType,
                 $entityId,
                 $entityName,
