@@ -85,12 +85,6 @@ final class Db
         return (int)$this->conn()->affected_rows;
     }
 
-    public function lastError(): string
-    {
-        $m = $this->m;
-        return $m ? ('[' . $m->errno . '] ' . $m->error) : 'not connected';
-    }
-
     // ------------------------------------------------------------------------
     // Prepared-statement helpers
     // ------------------------------------------------------------------------
