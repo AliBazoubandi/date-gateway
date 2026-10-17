@@ -31,6 +31,19 @@ CREATE TABLE IF NOT EXISTS `admin_users` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
+-- Login attempts by client IP (admin panel throttle): >=3 failures from one
+-- address inside the 5-minute window are refused before the password check.
+-- Rows are purged opportunistically once the window passes.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `login_attempts` (
+  `ip`              VARCHAR(45)  NOT NULL,
+  `failed_count`    INT          NOT NULL DEFAULT 0,
+  `window_start`    DATETIME     NOT NULL,
+  `last_attempt_at` DATETIME     NOT NULL,
+  PRIMARY KEY (`ip`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
 -- Target database connections (SQL Server / PostgreSQL / MySQL)
 -- password_encrypted: AES-256-GCM blob "gcm:v1:<iv_b64>:<tag_b64>:<ct_b64>"
 -- ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ try {
     $tz = db()->value('SELECT @@session.time_zone');
     echo '     session time_zone = ', (string)$tz, ', now = ', (string)db()->value('SELECT NOW()'), PHP_EOL;
 
-    $tables = ['admin_users', 'connections', 'requests', 'clients', 'client_request_permissions',
+    $tables = ['admin_users', 'login_attempts', 'connections', 'requests', 'clients', 'client_request_permissions',
         'executions', 'calls', 'request_logs', 'admin_audit_log', 'webhook_deliveries'];
     $found = 0;
     foreach ($tables as $t) {

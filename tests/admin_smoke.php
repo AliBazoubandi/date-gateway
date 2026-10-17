@@ -18,6 +18,7 @@ foreach ([
     'DELETE FROM executions',
     'DELETE FROM client_request_permissions',
     "DELETE FROM clients WHERE name LIKE 'smoke%'",
+    'DELETE FROM login_attempts',
     "DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
         WHERE r.code LIKE 'smoke%' OR c.name LIKE 'local mariadb%'",
     "DELETE FROM connections WHERE name LIKE 'local mariadb%'",
