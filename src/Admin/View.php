@@ -13,6 +13,12 @@ final class View
      */
     public static function render(string $template, array $vars = [], string $title = ''): void
     {
+        if (PHP_SAPI !== 'cli' && !headers_sent()) {
+            header('X-Frame-Options: DENY');
+            header('X-Content-Type-Options: nosniff');
+            header('Referrer-Policy: no-referrer');
+            header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'");
+        }
         // $title/$csrf/$admin are pinned by the explicit writes below, but
         // $template (include path) and $content are read after extract() —
         // caller vars must never be able to rename the template or inject
