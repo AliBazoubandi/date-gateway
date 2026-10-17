@@ -1,0 +1,96 @@
+/* Data Gateway admin - plain CSS, no build step */
+:root {
+  --bg: #f3f5f8; --card: #ffffff; --text: #1c2733; --muted: #67788a;
+  --line: #dde4ec; --accent: #14538c; --accent-2: #0e3a61;
+  --ok: #1e7b48; --error: #b23a3a; --warn: #8a6d1a; --code-bg: #f6f8fa;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 "Segoe UI", system-ui, -apple-system, Arial, sans-serif; }
+.wrap { max-width: 1100px; margin: 0 auto; padding: 0 16px 32px; }
+.topbar { background: var(--accent); color: #fff; padding: 10px 0; }
+.topbar .wrap { display: flex; align-items: center; gap: 22px; padding-bottom: 0; padding-top: 0; }
+.brand { font-weight: 700; letter-spacing: .3px; }
+.topbar nav { display: flex; gap: 4px; flex: 1; }
+.topbar nav a { color: #dbe8f5; text-decoration: none; padding: 6px 10px; border-radius: 6px; }
+.topbar nav a:hover { background: rgba(255,255,255,.12); color: #fff; }
+.topbar nav a.on { background: rgba(255,255,255,.16); color: #fff; }
+.topbar .who { display: flex; gap: 10px; align-items: center; font-size: 13px; }
+h1 { font-size: 20px; margin: 18px 0 10px; }
+h2 { font-size: 15px; margin: 0 0 8px; color: var(--accent-2); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px; margin: 12px 0; }
+.card.slim { max-width: 720px; }
+.cols { display: flex; gap: 12px; flex-wrap: wrap; }
+.cols .card { flex: 1 1 300px; margin: 0 0 0; }
+.flash { padding: 9px 12px; border-radius: 8px; margin: 10px 0; font-weight: 500; }
+.flash.ok { background: #e5f4eb; color: var(--ok); border: 1px solid #bfe3cd; }
+.flash.error { background: #fbeaea; color: var(--error); border: 1px solid #ecc8c8; }
+.actions { margin: 12px 0; }
+.btn { display: inline-block; background: var(--accent); border: none; color: #fff; padding: 7px 14px;
+  border-radius: 7px; text-decoration: none; font-size: 13px; cursor: pointer; }
+.btn:hover { background: var(--accent-2); }
+.btn.sm { padding: 3px 9px; font-size: 12px; }
+.btn.danger { background: var(--error); }
+.btn.danger:hover { background: #8f2c2c; }
+.btn.link { background: none; color: #dbe8f5; padding: 0; }
+.link { background: none; border: none; color: #dbe8f5; cursor: pointer; text-decoration: underline; font: inherit; }
+.form label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
+.form label small { font-weight: 400; color: var(--muted); margin-left: 6px; }
+.form input[type=text], .form input[type=password], .form input:not([type]),
+.form select, .form textarea {
+  width: 100%; max-width: 720px; padding: 7px 10px; border: 1px solid var(--line);
+  border-radius: 7px; font: inherit; background: #fff; color: var(--text);
+}
+.form textarea { font-family: Consolas, "Courier New", monospace; white-space: pre; }
+.form fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
+.form .mode .chk { display: block; margin-top: 6px; font-weight: 400; }
+.form .chk { font-weight: 400; display: flex; align-items: center; gap: 8px; }
+.form .form-ops { margin: 14px 0 4px; display: flex; gap: 10px; align-items: center; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 18px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0 18px; }
+.row, .rows { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.rows th { text-align: left; color: var(--muted); font-size: 12px; text-transform: uppercase;
+  letter-spacing: .4px; border-bottom: 1px solid var(--line); padding: 6px 8px; }
+table.rows td { border-bottom: 1px solid #edf1f6; padding: 7px 8px; vertical-align: top; }
+table.rows tr:hover td { background: #f8fafc; }
+table.meta td { padding: 3px 10px 3px 0; }
+td.msg, .msg { font-size: 12.5px; color: #44505c; max-width: 430px; overflow-wrap: anywhere; }
+code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px;
+  padding: 1px 5px; font-size: 12.5px; }
+code.key { font-size: 15px; padding: 8px 12px; display: inline-block; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11.5px;
+  background: #eef2f7; color: var(--muted); border: 1px solid var(--line); }
+.b-ok, .b-ready, .b-succeeded, .b-downloaded, .b-shared, .b-instant_executed, .b-instant_cache_hit,
+.b-webhook_sent { color: var(--ok); background: #e7f3ec; border-color: #c4e2d0; }
+.b-off, .b-expired { color: var(--muted); background: #eef1f4; }
+.b-delayed { color: var(--accent-2); background: #e8f0f9; border-color: #c8d9ec; }
+.b-instant { color: #7a3ea1; background: #f1e8f7; border-color: #ddc9ec; }
+.b-error, .b-fail, .b-failed, .b-denied, .b-webhook_failed { color: var(--error); background: #faecec;
+  border-color: #edcece; }
+.b-timeout { color: var(--warn); background: #f7f1df; border-color: #eadfbe; }
+.b-submitted { color: #2b5f8a; }
+.b-started { color: #55606b; }
+.b-rate_limited { color: var(--warn); }
+.div-sqlserver:before, .div-pgsql:before, .div-mysql:before { content: ""; }
+.foot { padding-top: 10px; color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; }
+.hint { color: var(--muted); font-size: 12.5px; max-width: 820px; }
+.inline { display: inline; }
+.ops { white-space: nowrap; }
+.ops form { margin: 0 2px; }
+details summary { cursor: pointer; color: var(--accent); }
+pre.diff { background: var(--code-bg); border: 1px solid var(--line); padding: 8px;
+  border-radius: 6px; white-space: pre-wrap; max-width: 100%; }
+del { background: #fbeaea; color: var(--error); padding: 0 2px; }
+ins { background: #e5f4eb; color: var(--ok); padding: 0 2px; text-decoration: none; }
+
+/* log + audit viewers */
+form.filters { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: flex-end; }
+form.filters label { margin: 0; font-size: 12px; }
+form.filters select, form.filters input { width: auto; min-width: 130px; }
+form.filters .form-ops { margin: 0; }
+.nowrap { white-space: nowrap; }
+.pager { border-top: 1px solid var(--line); padding-top: 10px; }
+details.audit-row { border-bottom: 1px solid #edf1f6; padding: 7px 2px; }
+details.audit-row > summary { padding: 2px 0; }
+details.audit-row table.diff { margin: 8px 0 4px 16px; max-width: 940px; }

@@ -1,0 +1,11 @@
+<?php /** @var array $client @var string $api_key @var bool|null $regenerated */
+?>
+<h1>API key</h1>
+<section class="card slim">
+  <h2><?= $regenerated ? 'API key regenerated — ' : 'API key created — ' ?>for “<?= e((string)$client['name']) ?>”</h2>
+  <p class="hint key-line"><?= $regenerated ? 'The previous key stopped working immediately.' : 'This key is shown exactly once and cannot be recovered.' ?></p>
+  <p><code class="key"><?= e($api_key) ?></code></p>
+  <div class="form-ops">
+    <a class="btn" href="/admin/clients">Back to clients</a>
+  </div>
+</section>

@@ -1,0 +1,14 @@
+<IfModule mod_authz_core.c>
+    Require all granted
+</IfModule>
+Options -Indexes
+DirectoryIndex index.php
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Serve existing files/directories (e.g. /assets/...) directly.
+    RewriteCond %{REQUEST_FILENAME} -f [OR]
+    RewriteCond %{REQUEST_FILENAME} -d
+    RewriteRule ^ - [L]
+    # Everything else goes to the front controller.
+    RewriteRule ^ index.php [QSA,L]
+</IfModule>
