@@ -1,0 +1,26 @@
+{
+    "name": "internal/data-gateway",
+    "description": "Data Gateway - SQL access gateway with delayed execution and webhook delivery",
+    "type": "project",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.1",
+        "ext-mysqli": "*",
+        "ext-mbstring": "*",
+        "ext-json": "*",
+        "ext-openssl": "*",
+        "ext-curl": "*"
+    },
+    "suggest": {
+        "ext-sqlsrv": "Required for SQL Server target connections",
+        "ext-pgsql": "Required for PostgreSQL target connections"
+    },
+    "autoload": {
+        "psr-4": {
+            "": "src/"
+        }
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}

@@ -14,7 +14,12 @@ if (!defined('BASE_PATH')) {
     define('BASE_PATH', str_replace('\\', '/', dirname(__DIR__, 2)));
 }
 
-// ---- Autoloader: \Core\Db -> src/Core/Db.php ---------------------------------
+// ---- Autoloader --------------------------------------------------------------
+// Prefer Composer's autoloader when present (composer dump-autoload); the SPL
+// fallback below maps \Core\Db -> src/Core/Db.php and works with no tooling.
+if (is_file(BASE_PATH . '/vendor/autoload.php')) {
+    require BASE_PATH . '/vendor/autoload.php';
+}
 spl_autoload_register(static function (string $class): void {
     $class = ltrim($class, '\\');
     $file = BASE_PATH . '/src/' . str_replace('\\', '/', $class) . '.php';
