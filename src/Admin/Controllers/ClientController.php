@@ -57,12 +57,17 @@ final class ClientController
 
         if ($id > 0) {
             $before = $db->one('SELECT * FROM clients WHERE id = ?', [$id]);
+            // The form never renders the stored secret, so an empty field
+            // means "keep it"; only a non-empty value rotates the secret.
+            $keepSecret = $in['webhook_secret'] === '';
             $db->execute(
                 'UPDATE clients SET name=?, type=?, webhook_url=?, webhook_secret=?, is_active=? WHERE id=?',
-                [$in['name'], $in['type'], $in['webhook_url'], $in['webhook_secret'], $in['is_active'], $id]
+                [$in['name'], $in['type'], $in['webhook_url'],
+                    $keepSecret ? (string)($before['webhook_secret'] ?? '') : $in['webhook_secret'],
+                    $in['is_active'], $id]
             );
             $after = $db->one('SELECT * FROM clients WHERE id = ?', [$id]);
-            $secretChanged = (string)$in['webhook_secret'] !== (string)($before['webhook_secret'] ?? '');
+            $secretChanged = !$keepSecret;
             $afterAudit = self::mask($after, false, $secretChanged);
             AuditLogger::record('client', 'update', $id, $in['name'], self::mask($before, false, false), $afterAudit);
             Flashes::set('ok', 'Client updated.');
@@ -80,7 +85,10 @@ final class ClientController
         $newId = $db->insertId();
         $after = self::mask($db->one('SELECT * FROM clients WHERE id = ?', [$newId]), true, false);
         AuditLogger::record('client', 'create', $newId, $in['name'], null, $after);
-        View::render('clients/key_reveal', ['client' => $in, 'api_key' => $apiKey], 'API key created');
+        // An auto-generated secret must be shown once, or nobody can ever
+        // configure the client's signature verification with it.
+        View::render('clients/key_reveal', ['client' => $in, 'api_key' => $apiKey,
+            'webhook_secret' => $in['webhook_secret'] !== '' ? null : $secret], 'API key created');
     }
 
     public static function delete(int $id): void
@@ -119,10 +127,11 @@ final class ClientController
             'regenerated' => true], 'New API key');
     }
 
+    /** Rotate the webhook secret; the new value is shown exactly once. */
     public static function newSecret(int $id): void
     {
         $db = Db::instance();
-        $row = $db->one('SELECT id, name, webhook_secret FROM clients WHERE id = ?', [$id]);
+        $row = $db->one('SELECT id, name FROM clients WHERE id = ?', [$id]);
         if ($row === null) {
             Flashes::set('error', 'Client not found.');
             Http::redirect('/admin/clients');
@@ -131,9 +140,9 @@ final class ClientController
         $db->execute('UPDATE clients SET webhook_secret = ? WHERE id = ?', [$secret, $id]);
         AuditLogger::record('client', 'update', $id, (string)$row['name'],
             ['webhook_secret' => '(stored value)'],
-            ['webhook_secret' => '(changed to a new value; stored as is)']);
-        Flashes::set('ok', 'New webhook secret stored. Share it with the client.');
-        Http::redirect('/admin/clients/' . $id);
+            ['webhook_secret' => '(rotated; shown once)']);
+        View::render('clients/secret_reveal', ['client' => $row, 'webhook_secret' => $secret],
+            'New webhook secret');
     }
 
     /** Grant/revoke request permissions for one client; audited as a summary diff. */

@@ -19,9 +19,10 @@
       <input name="webhook_url" value="<?= e((string)$row['webhook_url']) ?>" placeholder="https://client-systems.example/hook/gw">
     </label>
     <label>Webhook secret (HMAC-SHA256 key the client verifies)
-      <input name="webhook_secret" value="<?= e((string)$row['webhook_secret']) ?>" placeholder="reveal/rotate below">
+      <input name="webhook_secret" value="" placeholder="stored — leave empty to keep" autocomplete="new-password">
     </label>
   </div>
+  <?php if (!$isNew): ?><p class="hint">The stored secret is never shown. Leave the field empty to keep it; rotate with the button below — the new secret is then shown exactly once.</p><?php endif; ?>
   <div class="form-ops">
     <label class="chk"><input type="checkbox" name="is_active" <?= !empty($row['is_active']) ? 'checked' : '' ?>> Active</label>
     <button type="submit">Save</button>
