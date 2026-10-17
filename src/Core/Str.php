@@ -46,9 +46,10 @@ final class Str
         if (strlen($s) <= $limit) {
             return $s;
         }
-        // Byte-bounded so DB column limits still hold; strip a partial UTF-8
-        // sequence from the cut point (invalid bytes only, <=3 per char).
-        $cut = substr($s, 0, $limit);
+        // Byte-bounded so DB column limits still hold; reserve 3 bytes for the
+        // '…' suffix and strip a partial UTF-8 sequence from the cut point
+        // (invalid bytes only, <=3 per char).
+        $cut = substr($s, 0, max(0, $limit - 3));
         while ($cut !== '' && preg_match('//u', $cut) === false) {
             $cut = substr($cut, 0, -1);
         }
