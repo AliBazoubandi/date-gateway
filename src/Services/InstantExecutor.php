@@ -69,8 +69,11 @@ final class InstantExecutor
         $sql = (string)$request['sql_text'];
         $timeout = max(1, (int)$request['timeout_seconds']);
         // PHP's own max_execution_time (XAMPP default 30s) must never kill
-        // the request before the driver-level statement timeout does.
-        @set_time_limit($timeout + 10);
+        // the request before the driver-level statement timeout does. Some
+        // SAPIs (e.g. safe-mode-era builds) disable the function entirely.
+        if (function_exists('set_time_limit')) {
+            @set_time_limit($timeout + 10);
+        }
         $rows = [];
         $result = QueryRunner::run(
             $connection,
