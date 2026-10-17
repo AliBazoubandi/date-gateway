@@ -13,6 +13,11 @@ final class View
      */
     public static function render(string $template, array $vars = [], string $title = ''): void
     {
+        // $title/$csrf/$admin are pinned by the explicit writes below, but
+        // $template (include path) and $content are read after extract() —
+        // caller vars must never be able to rename the template or inject
+        // output, so strip those keys before extraction.
+        unset($vars['template'], $vars['content']);
         $vars['title'] = $title !== '' ? $title : 'Admin';
         $vars['csrf'] = \Core\Csrf::field();
         $vars['admin'] = \Admin\Auth::current();
