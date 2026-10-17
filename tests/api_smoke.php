@@ -73,13 +73,18 @@ $db->execute(
 // Random port: a stale or sibling server must never answer instead of us.
 $port = rand(20000, 60000);
 chdir(BASE_PATH);
-$proc = proc_open('php -S 127.0.0.1:' . $port . ' -t public tests/dev_router.php',
+// Array command form: no cmd.exe wrapper, so proc_terminate() really kills
+// php -S (string form orphans the server, which then wedges later runs).
+$proc = proc_open(['php', '-S', '127.0.0.1:' . $port, '-t', 'public', 'tests/dev_router.php'],
     [1 => ['file', 'php://temp', 'w'], 2 => ['file', 'php://temp', 'w']], $pipes);
 if (!is_resource($proc)) {
     fwrite(STDERR, "cannot start php -S" . PHP_EOL);
     exit(2);
 }
-register_shutdown_function(static fn() => proc_terminate($proc));
+register_shutdown_function(static function () use ($proc): void {
+    proc_terminate($proc);
+    proc_close($proc);
+});
 usleep(500000);
 
 function api(string $method, string $path, ?string $key = null, bool $tailHeaders = false): array

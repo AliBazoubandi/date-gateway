@@ -27,10 +27,10 @@ foreach ([
 ] as $sql) {
     db()->execute($sql);
 }
-// Windows proc_open + paths-with-spaces mangles extra args; chdir keeps the
-// command line space-free.
 chdir($root);
-$proc = proc_open('php -S 127.0.0.1:' . $port . ' -t public tests/dev_router.php',
+// Array command form: no cmd.exe wrapper, so proc_terminate() really kills
+// php -S (string form orphans the server, which then wedges later runs).
+$proc = proc_open(['php', '-S', '127.0.0.1:' . $port, '-t', 'public', 'tests/dev_router.php'],
     [1 => ['file', 'php://temp', 'w'], 2 => ['file', 'php://temp', 'w']], $pipes);
 if (!is_resource($proc)) {
     fwrite(STDERR, "cannot start php -S\n");
@@ -38,6 +38,7 @@ if (!is_resource($proc)) {
 }
 register_shutdown_function(static function () use ($proc): void {
     proc_terminate($proc);
+    proc_close($proc);
 });
 usleep(500000);
 
