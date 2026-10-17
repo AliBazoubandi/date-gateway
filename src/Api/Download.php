@@ -87,6 +87,7 @@ final class Download
         $fh = fopen($absolute, 'rb');
         if ($fh === false) {
             Errors::emit(500, 'internal_error', 'Cannot open result file.');
+            exit; // explicit: emit() exits, keep the streaming path unreachable
         }
         while (!feof($fh)) {
             $buf = fread($fh, $chunk);
