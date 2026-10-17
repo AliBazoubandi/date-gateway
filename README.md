@@ -190,8 +190,11 @@ a signed POST when its execution turns `ready` (and on retry after
 failures). Headers:
 
 - `Content-Type: application/json`
-- `X-Gateway-Signature: sha256=<hex>` — HMAC-SHA256 of the exact raw body,
-  keyed with the client's webhook secret
+- `X-Gateway-Signature: sha256=<hex>` — HMAC-SHA256 of
+  `<unix timestamp>.<exact raw body bytes>`, keyed with the client's
+  webhook secret
+- `X-Gateway-Timestamp: <unix epoch>` — refuse timestamps older than
+  ~5 minutes (replay protection)
 - `X-Gateway-Call: <call_id>`
 - `X-Gateway-Attempt: <n>` (1-based)
 
@@ -213,7 +216,9 @@ Receiver-side verification (PHP example):
 ```php
 $raw  = file_get_contents('php://input');
 $sig  = $_SERVER['HTTP_X_GATEWAY_SIGNATURE'] ?? '';
-$good = 'sha256=' . hash_hmac('sha256', $raw, $WEBHOOK_SECRET);
+$ts   = $_SERVER['HTTP_X_GATEWAY_TIMESTAMP'] ?? '';
+if ($ts === '' || abs(time() - (int)$ts) > 300) { http_response_code(401); exit; }
+$good = 'sha256=' . hash_hmac('sha256', $ts . '.' . $raw, $WEBHOOK_SECRET);
 if (!hash_equals($good, $sig)) { http_response_code(401); exit; }
 ```
 
@@ -253,6 +258,14 @@ ALTER TABLE `calls`
 Old calls keep `token_enc = NULL`: they simply get no `link` in webhook
 payloads; everything else keeps working. `php cli\check.php` flags the
 missing column if you forget.
+
+**Breaking webhook change (2026-10):** signatures are now computed over
+`"<unix timestamp>.<raw body>"` and every delivery carries an
+`X-Gateway-Timestamp` header. If you built a receiver against the old
+`HMAC(body)` scheme it must be updated: verify against
+`$timestamp . '.' . $rawBody` and reject requests whose timestamp is older
+than ~5 minutes (replay protection). Signatures from the old scheme will
+no longer verify.
 
 ## 8. Tests
 

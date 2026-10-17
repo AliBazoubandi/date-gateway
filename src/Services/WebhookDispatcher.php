@@ -16,8 +16,11 @@ use Core\Time;
  *  - Payload (exact bytes are what gets signed):
  *      {"call_id":..., "request_code":..., "status":"ready", "link":...,
  *       "expires_at":"...+03:30", "row_count":N}
- *  - Headers: X-Gateway-Signature: sha256=<HMAC-SHA256 of the body with the
- *    client's webhook_secret>, X-Gateway-Call: <call_id>, X-Gateway-Attempt: <n>.
+ *  - Headers: X-Gateway-Signature: sha256=<HMAC-SHA256 of
+ *    "<unix timestamp>.<raw body>" with the client's webhook_secret>,
+ *    X-Gateway-Timestamp: <unix timestamp — receivers must refuse timestamps
+ *    older than ~5 minutes (replay protection)>, X-Gateway-Call: <call_id>,
+ *    X-Gateway-Attempt: <n>.
  *  - Any 2xx acknowledges. Everything else (transport error or 4xx/5xx) is a
  *    failed attempt: retried up to config webhook.max_attempts times with the
  *    configured backoff, then the row goes to state='exhausted'.
@@ -103,10 +106,14 @@ final class WebhookDispatcher
             'expires_at' => Time::iso((string)$exec['expires_at']),
             'row_count' => (int)($exec['row_count'] ?? 0),
         ]);
-        $signature = 'sha256=' . hash_hmac('sha256', $payload, $secret);
+        $timestamp = (string)time();
+        // Sign over "<unix timestamp>.<raw body>" so a captured request
+        // cannot be replayed later; receivers must refuse timestamps older
+        // than a few minutes (see README, Webhooks).
+        $signature = 'sha256=' . hash_hmac('sha256', $timestamp . '.' . $payload, $secret);
 
         $t0 = microtime(true);
-        [$httpCode, $transportError] = self::post($url, $payload, $signature, $callId, $attempt + 1);
+        [$httpCode, $transportError] = self::post($url, $payload, $signature, $callId, $attempt + 1, $timestamp);
         $durationMs = (int)round((microtime(true) - $t0) * 1000);
 
         if ($httpCode >= 200 && $httpCode < 300) {
@@ -160,7 +167,7 @@ final class WebhookDispatcher
      * POST the payload. @return array{0:int,1:string} HTTP code (0 = transport
      * failure) and a short transport-error string ('' when the server answered).
      */
-    private static function post(string $url, string $payload, string $signature, string $callId, int $sendNo): array
+    private static function post(string $url, string $payload, string $signature, string $callId, int $sendNo, string $timestamp): array
     {
         if (!function_exists('curl_init')) {
             return [0, 'the curl extension is not enabled in php.ini'];
@@ -177,6 +184,7 @@ final class WebhookDispatcher
             CURLOPT_HTTPHEADER => [
                 'Content-Type: application/json',
                 'X-Gateway-Signature: ' . $signature,
+                'X-Gateway-Timestamp: ' . $timestamp,
                 'X-Gateway-Call: ' . $callId,
                 'X-Gateway-Attempt: ' . (string)$sendNo,
             ],

@@ -203,7 +203,10 @@ $check('call id header matches', ($reqHeaders['x-gateway-call'] ?? '') === $call
     (string)($reqHeaders['x-gateway-call'] ?? '-'));
 
 $sig = (string)($reqHeaders['x-gateway-signature'] ?? '');
-$check('HMAC-SHA256 signature valid', $sig !== '' && hash_equals('sha256=' . hash_hmac('sha256', $reqBody, $secret), $sig),
+$tsHeader = (string)($reqHeaders['x-gateway-timestamp'] ?? '');
+$check('timestamp header fresh', $tsHeader !== '' && abs(time() - (int)$tsHeader) <= 300, $tsHeader);
+$check('HMAC-SHA256 signature valid (timestamp-bound)', $sig !== '' && $tsHeader !== ''
+    && hash_equals('sha256=' . hash_hmac('sha256', $tsHeader . '.' . $reqBody, $secret), $sig),
     $sig !== '' ? 'prefix ' . substr($sig, 0, 20) . '…' : 'missing');
 $payload = json_decode($reqBody, true);
 $check('payload fields', is_array($payload)
@@ -241,7 +244,8 @@ $d = $deliveryRow($callB);
 $check('second send succeeds, state sent', ($d['state'] ?? '') === 'sent' && (int)($d['attempt'] ?? 0) === 1,
     'state=' . (string)($d['state'] ?? '-'));
 $check('retry webhook also correctly signed', $req !== null
-    && hash_equals('sha256=' . hash_hmac('sha256', (string)$req[3], $secret),
+    && ($rTs = (string)($req[2]['x-gateway-timestamp'] ?? '')) !== ''
+    && hash_equals('sha256=' . hash_hmac('sha256', $rTs . '.' . (string)$req[3], $secret),
         (string)($req[2]['x-gateway-signature'] ?? 'x')));
 
 // =================== 3) exhaustion after max_attempts ========================
