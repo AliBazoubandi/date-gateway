@@ -26,7 +26,7 @@ final class LogController
     {
         $db = Db::instance();
 
-        $f = self::filters($db);
+        $f = self::filters();
         [$where, $params] = self::where($f);
 
         $total = (int)$db->value("SELECT COUNT(*) FROM request_logs l $where", $params);
@@ -67,7 +67,7 @@ final class LogController
     }
 
     /** @return array<string,mixed> validated filter inputs */
-    private static function filters(Db $db): array
+    private static function filters(): array
     {
         $event = strtolower(trim((string)(Http::param('event', 'g') ?? '')));
         $mode = strtolower(trim((string)(Http::param('mode', 'g') ?? '')));
