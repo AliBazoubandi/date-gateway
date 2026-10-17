@@ -98,4 +98,10 @@ return [
 
     // Optional: connections used by tests/driver_test.php (see that file).
     'test_connections' => [],
+
+    'connections' => [
+        // SQL Server encryption: true = accept self-signed certificates (typical
+        // intranet setups), false = enforce certificate validation.
+        'sqlsrv_trust_server_certificate' => true,
+    ],
 ];

@@ -26,7 +26,9 @@ final class SqlServerDriver implements DriverInterface
             'UID' => $o['user'],
             'PWD' => $o['password'],
             'ReturnDatesAsStrings' => true, // DateTime objects must not leak into JSON rows
-            'TrustServerCertificate' => true, // intranet servers with self-signed TLS
+            // Intranet servers with self-signed TLS; set
+            // connections.sqlsrv_trust_server_certificate = false to enforce validation.
+            'TrustServerCertificate' => (bool)($o['trust_server_certificate'] ?? true),
             'LoginTimeout' => max(10, (int)$o['timeout']),
         ];
         $conn = @sqlsrv_connect($server, $options);

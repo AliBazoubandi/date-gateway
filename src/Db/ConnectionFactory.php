@@ -15,7 +15,8 @@ final class ConnectionFactory
 
     /**
      * @param array{db_type:string,host:string,port?:int|null,db:string,
-     *              user:string,password:string,timeout?:int} $p
+     *              user:string,password:string,timeout?:int,
+     *              trust_server_certificate?:bool} $p
      */
     public static function fromParams(array $p): DriverInterface
     {
@@ -47,6 +48,7 @@ final class ConnectionFactory
             'user' => (string)$row['username'],
             'password' => $password,
             'timeout' => $timeoutSeconds ?? (int)($row['timeout_seconds'] ?? 30),
+            'trust_server_certificate' => (bool)\Core\Config::get('connections.sqlsrv_trust_server_certificate', true),
         ]);
     }
 
@@ -69,6 +71,7 @@ final class ConnectionFactory
             'user' => (string)$p['user'],
             'password' => (string)($p['password'] ?? ''),
             'timeout' => max(1, (int)($p['timeout'] ?? 30)),
+            'trust_server_certificate' => (bool)($p['trust_server_certificate'] ?? true),
         ];
     }
 }
