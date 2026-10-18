@@ -16,22 +16,31 @@
 .PARAMETER Prefix
     Task-name prefix (use it to run a second gateway instance side by side).
 
+.PARAMETER RunAs
+    System      (default) - tasks run as NT AUTHORITY\SYSTEM: no console window
+    ever appears (session 0) and they run whether a user is logged on or not.
+    Requires an elevated PowerShell. Recommended for servers.
+
+    CurrentUser - tasks run under the current account. Console-mode would flash
+    a window every minute, so these runs go through deployment\run_hidden.vbs
+    (wscript, GUI subsystem => completely silent, exit code still forwarded).
+    Only valid while that user is logged on.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1
 
 .EXAMPLE
-    powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1 -PhpExe "C:\php\php.exe"
+    powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1 -RunAs CurrentUser
 
-.NOTES
-    Registers the tasks under the CURRENT user (runs only while logged on).
-    For an unattended service account, register them as a scheduled task that
-    runs whether the user is logged on or not, or move them to a Windows
-    Service. Run this from an elevated shell if your policy requires it.
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1 -PhpExe "C:\php\php.exe"
 #>
 [CmdletBinding()]
 param(
     [string]$PhpExe = "C:\xampp\php\php.exe",
-    [string]$Prefix = "DataGateway"
+    [string]$Prefix = "DataGateway",
+    [ValidateSet('System', 'CurrentUser')]
+    [string]$RunAs = 'System'
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,12 +51,42 @@ if (-not (Test-Path -LiteralPath $PhpExe -PathType Leaf)) {
     throw "PHP CLI not found at '$PhpExe'. Pass -PhpExe with the correct path."
 }
 
-# The three tasks: script name, repetition minutes, human label.
+# --- Elevation is required to register SYSTEM -------------------------------
+if ($RunAs -eq 'System') {
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+        ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $elevated) {
+        throw "Registering tasks as SYSTEM requires an elevated PowerShell. `n" +
+              "Run: powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1 (as administrator)`n" +
+              "or use: -RunAs CurrentUser"
+    }
+}
+
+# --- Tasks: script name, repetition minutes, human label --------------------
 $tasks = @(
     @{ Script = "worker.php";   Minutes = 1; Label = "delayed executions" },
     @{ Script = "cleanup.php";  Minutes = 5; Label = "expiry + recovery" },
     @{ Script = "webhooks.php"; Minutes = 1; Label = "webhook delivery" }
 )
+
+# --- Hidden launcher for the CurrentUser mode -------------------------------
+if ($RunAs -eq 'CurrentUser') {
+    $vbs = Join-Path $PSScriptRoot "run_hidden.vbs"
+    @'
+' usage: wscript.exe //B run_hidden.vbs "<php.exe>" "<script.php>"
+' Window style 0 (invisible) + synchronous, so the true PHP exit code is
+' forwarded to Task Scheduler. wscript itself is GUI-subsystem: NO console
+' window flashes when tasks fire every minute.
+If WScript.Arguments.Count < 2 Then WScript.Quit 1
+Dim phpExe, phpScript, sh, exitCode
+phpExe    = WScript.Arguments(0)
+phpScript = WScript.Arguments(1)
+Set sh = CreateObject("WScript.Shell")
+sh.CurrentDirectory = Mid(phpScript, 1, InStrRev(phpScript, "\") - 1)
+exitCode = sh.Run(Chr(34) & phpExe & Chr(34) & " " & Chr(34) & phpScript & Chr(34), 0, True)
+WScript.Quit exitCode
+'@ | Set-Content -LiteralPath $vbs -Encoding ASCII
+}
 
 foreach ($t in $tasks) {
     $scriptPath = Join-Path $projectRoot ("cli\" + $t.Script)
@@ -57,7 +96,6 @@ foreach ($t in $tasks) {
 
     $taskName = "$Prefix-$($t.Script -replace '\.php$','')"
 
-    $action = New-ScheduledTaskAction -Execute $PhpExe -Argument "`"$scriptPath`"" -WorkingDirectory $projectRoot
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes $t.Minutes) `
         -RepetitionDuration (New-TimeSpan -Days 3650)
@@ -66,15 +104,35 @@ foreach ($t in $tasks) {
         -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes ([Math]::Max(10, $t.Minutes + 5))) `
         -MultipleInstances IgnoreNew
 
-    # Idempotent: replace any prior registration with the same name.
-    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+    if ($RunAs -eq 'System') {
+        $action = New-ScheduledTaskAction -Execute $PhpExe -Argument "`"$scriptPath`"" -WorkingDirectory $projectRoot
+        # SYSTEM runs in session 0: invisible, survives logoff/reboot.
+        $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel Highest
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        }
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+            -Settings $settings -Principal $principal | Out-Null
     }
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings | Out-Null
+    else {
+        $vbs = Join-Path $PSScriptRoot "run_hidden.vbs"
+        # wscript is GUI-subsystem: firing every minute shows no window.
+        $action = New-ScheduledTaskAction -Execute "$($env:SystemRoot)\System32\wscript.exe" `
+            -Argument "//B `"$vbs`" `"$PhpExe`" `"$scriptPath`"" -WorkingDirectory $projectRoot
+        if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+        }
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings | Out-Null
+    }
 
-    Write-Host "Registered '$taskName' -> $PhpExe $($t.Script) (every $($t.Minutes) min: $($t.Label))"
+    Write-Host "Registered '$taskName' ($RunAs) -> $($t.Script) (every $($t.Minutes) min: $($t.Label))"
 }
 
 Write-Host ""
-Write-Host "Done. Verify with:  Get-ScheduledTask -TaskName '$Prefix-*'"
-Write-Host "The tasks run as the current user, only while logged on."
+Write-Host "Done. Verify with:  Get-ScheduledTask -TaskName '$Prefix-*' | Format-Table TaskName, State"
+if ($RunAs -eq 'System') {
+    Write-Host "Tasks run as SYSTEM: invisible, and whether a user is logged on or not."
+}
+else {
+    Write-Host "Tasks run as the current user while logged on, fully via the hidden VBS launcher."
+}
