@@ -16,7 +16,14 @@ final class Str
 
     public static function json($value, int $flags = 0): string
     {
-        return json_encode($value, $flags | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        // JSON_INVALID_UTF8_SUBSTITUTE guarantees a string even when data
+        // contains malformed UTF-8 (mismatched driver charset): json_encode
+        // would otherwise return false and any `: string` caller would blow
+        // up with an uncaught TypeError (500 + stuck 'running' executions).
+        return json_encode(
+            $value,
+            $flags | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
+        );
     }
 
     // ---- Input validators (path params must pass these) ---------------------

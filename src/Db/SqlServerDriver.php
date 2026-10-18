@@ -26,6 +26,11 @@ final class SqlServerDriver implements DriverInterface
             'UID' => $o['user'],
             'PWD' => $o['password'],
             'ReturnDatesAsStrings' => true, // DateTime objects must not leak into JSON rows
+            // Required for non-ASCII data (e.g. Persian in VARCHAR columns): the
+            // driver converts varchar data/column names through the CLIENT
+            // codepage unless this is set, which corrupts them to '?' and
+            // produces invalid UTF-8 that breaks JSON encoding downstream.
+            'CharacterSet' => 'UTF-8',
             // Intranet servers with self-signed TLS; set
             // connections.sqlsrv_trust_server_certificate = false to enforce validation.
             'TrustServerCertificate' => (bool)($o['trust_server_certificate'] ?? true),

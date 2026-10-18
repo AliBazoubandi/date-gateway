@@ -106,18 +106,57 @@ final class ResultWriter
         try {
             return json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         } catch (\JsonException) {
+            // Repair BOTH values and keys: column names (aliases) can arrive
+            // mojibake'd from the driver exactly like values can, and a broken
+            // key fails every json_encode afterwards.
             array_walk_recursive($row, function (&$v): void {
-                if (is_string($v) && preg_match('//u', $v) !== 1) {
-                    $fixed = @iconv('UTF-8', 'UTF-8//IGNORE', $v);
-                    if ($fixed === false || preg_match('//u', $fixed) !== 1) {
-                        // Last resort: drop every non-ASCII byte.
-                        $fixed = preg_replace('/[\x80-\xFF]/s', '?', $v) ?? '';
-                    }
-                    $v = $fixed;
-                    $this->sanitized = true;
-                }
+                self::repairString($v);
+                $this->sanitized = true;
             });
-            return json_encode($row, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '{}';
+            $row = self::repairKeys($row);
+            $this->sanitized = true;
+            return json_encode(
+                $row,
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE
+            ) ?: '{}';
         }
+    }
+
+    /**
+     * Rebuild a row so string keys are valid UTF-8. Unrepairable or empty keys
+     * become positional col_N names; collisions get an underscore suffix (the
+     * same marker SQL Server itself uses for duplicate aliases).
+     * @param array<string,mixed> $row
+     * @return array<string,mixed>
+     */
+    private static function repairKeys(array $row): array
+    {
+        $out = [];
+        foreach ($row as $k => $v) {
+            if (is_string($k)) {
+                self::repairString($k);
+                if ($k === '' || preg_match('//u', $k) !== 1) {
+                    $k = 'col_' . count($out);
+                }
+                while (array_key_exists($k, $out)) {
+                    $k .= '_';
+                }
+            }
+            $out[$k] = $v;
+        }
+        return $out;
+    }
+
+    /** In-place UTF-8 repair of one string (iconv, then ASCII-collapse). */
+    private static function repairString(string &$v): void
+    {
+        if (preg_match('//u', $v) === 1) {
+            return;
+        }
+        $fixed = @iconv('UTF-8', 'UTF-8//IGNORE', $v);
+        if ($fixed === false || preg_match('//u', $fixed) !== 1) {
+            $fixed = preg_replace('/[\x80-\xFF]/s', '?', $v) ?? '';
+        }
+        $v = $fixed;
     }
 }

@@ -1,4 +1,5 @@
 <?php /** @var array $client @var string $api_key @var bool|null $regenerated @var string|null $webhook_secret */
+$regenerated = (bool)($regenerated ?? false);
 ?>
 <h1>API key</h1>
 <section class="card slim">
