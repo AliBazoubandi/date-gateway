@@ -30,10 +30,17 @@ $db = db();
 
 // ------------------- self-cleaning fixtures, FK-safe order -------------------
 $wipe = static function () use ($db): void {
-    $db->execute('DELETE FROM webhook_deliveries');
-    $db->execute('DELETE FROM request_logs');
-    $db->execute('DELETE FROM calls');
-    $db->execute('DELETE FROM executions');
+    // Smoke-scoped only: a live gateway's real calls/logs/executions and
+    // permission grants must never be wiped by a test run.
+    $clients = "SELECT id FROM clients WHERE name LIKE 'worker smk%'";
+    $requests = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
+                 WHERE r.code LIKE 'swk.%' OR c.name LIKE 'worker smk%'";
+    $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls
+                  WHERE client_id IN ($clients) OR request_id IN ($requests))");
+    $db->execute("DELETE FROM request_logs WHERE client_id IN ($clients) OR request_id IN ($requests)");
+    $db->execute("DELETE FROM calls WHERE client_id IN ($clients) OR request_id IN ($requests)");
+    $db->execute("DELETE FROM executions WHERE request_id IN ($requests)");
+    $db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($clients)");
     $db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
                   WHERE r.code LIKE 'swk.%' OR c.name LIKE 'worker smk%'");
     $db->execute("DELETE FROM connections WHERE name LIKE 'worker smk%'");

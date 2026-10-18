@@ -4,7 +4,8 @@
 // then drives /api/v1/* over php -S with curl, asserting:
 //   auth failures (401/403/404 + 'denied' logs), delayed cache rule 1 (share),
 //   status polling (owner-only), rule 2 attach with fresh call token,
-//   chunked download, 410 expiry, instant run / cache hit / 504 / 502 / 429.
+//   chunked download, 410 expiry, instant run + result file + link +
+//   ?download=1 file delivery / cache hit / 504 / 502 / 429.
 // Usage: php tests\api_smoke.php
 
 use Services\Encryption;
@@ -14,13 +15,23 @@ require __DIR__ . '/../src/Core/Filesystem.php';
 
 // ----------------- self-cleaning fixtures (FK-safe order) -----------------
 $db = db();
-// Smoke markers only — never touches rows the smoke fixtures don't own.
-$db->execute('DELETE FROM webhook_deliveries');
-$db->execute('DELETE FROM request_logs');
-$db->execute('DELETE FROM admin_audit_log');
-$db->execute('DELETE FROM calls');
-$db->execute('DELETE FROM executions');
-$db->execute('DELETE FROM client_request_permissions');
+// Smoke-scoped only: a run against a live gateway must not wipe real
+// grants/calls/logs/executions, so every delete carries a marker filter.
+$smokeClientIds = "SELECT id FROM clients WHERE name LIKE 'smoke api%'";
+$smokeRequestIds = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
+                    WHERE c.name LIKE 'local mariadb%' OR c.name LIKE '%smoke%' OR r.code LIKE 'smk.%'";
+$db->execute("DELETE FROM webhook_deliveries WHERE call_id IN ($smokeClientIds)
+              OR call_id IN (SELECT id FROM calls WHERE request_id IN ($smokeRequestIds))");
+$db->execute("DELETE FROM request_logs WHERE client_id IN ($smokeClientIds) OR request_id IN ($smokeRequestIds)");
+// admin_audit_log is the admin smoke's fixture — not touched here.
+$db->execute("DELETE FROM calls WHERE client_id IN ($smokeClientIds) OR request_id IN ($smokeRequestIds)");
+$db->execute("DELETE FROM executions WHERE request_id IN ($smokeRequestIds)");
+$db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($smokeClientIds) OR request_id IN ($smokeRequestIds)");
+// requests+connections are FK-paired; clear them together by smoke markers.
+$db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
+              WHERE c.name LIKE 'local mariadb%' OR c.name LIKE '%smoke%' OR r.code LIKE 'smk.%'");
+$db->execute("DELETE FROM connections WHERE name LIKE 'local mariadb%' OR name LIKE '%smoke%'");
+$db->execute("DELETE FROM clients WHERE name LIKE 'smoke api%'");
 // requests+connections are FK-paired; clear them together by smoke markers.
 $db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
               WHERE c.name LIKE 'local mariadb%' OR c.name LIKE '%smoke%' OR r.code LIKE 'smk.%'");
@@ -50,6 +61,7 @@ $reqInst = $addRequest('smk.instant', 'instant', 30, 100, 60, 'SELECT 1 AS ping'
 $reqBad = $addRequest('smk.instant_bad', 'instant', 30, 100, 0, 'SELECT * FROM _table_that_does_not_exist');
 $reqSlow = $addRequest('smk.instant_slow', 'instant', 1, 100, 0, 'SELECT SLEEP(5) AS slow');
 $reqRl = $addRequest('smk.instant_rl', 'instant', 30, 100, 0, 'SELECT 1 AS ping');
+$reqInstDl = $addRequest('smk.instant_dl', 'instant', 30, 100, 0, 'SELECT 1 AS ping');
 
 $mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
@@ -65,8 +77,8 @@ $B = $mkClient('smoke api B');
 $C = $mkClient('smoke api C (inactive)', false);
 $db->execute('INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?)', [$A['id'], $reqDelayed, $now]);
 $db->execute(
-    'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
-    [$A['id'], $reqInst, $now, $A['id'], $reqBad, $now, $A['id'], $reqSlow, $now]
+    'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+    [$A['id'], $reqInst, $now, $A['id'], $reqBad, $now, $A['id'], $reqSlow, $now, $A['id'], $reqInstDl, $now]
 );
 
 // ----------------- dev server + curl harness -----------------
@@ -228,12 +240,41 @@ $check('instant executes synchronously', $code === 200
     && str_contains((string)($inst['executed_at'] ?? ''), '+03:30'), $body);
 $check('instant execution row ready',
     (int)$db->value("SELECT COUNT(*) FROM executions WHERE request_id = ? AND mode = 'instant' AND status = 'ready' AND row_count = 1", [$reqInst]) === 1);
+$check('instant response carries a download link', is_string($inst['link'] ?? null)
+    && str_contains((string)$inst['link'], '/api/v1/results/'), (string)($inst['link'] ?? ''));
 
+$instExec = $db->one("SELECT * FROM executions WHERE request_id = ? AND mode = 'instant' ORDER BY id DESC LIMIT 1", [$reqInst]);
+$check('instant result file written with TTL', $instExec !== null
+    && (string)$instExec['result_path'] === 'results/' . (int)$instExec['id'] . '.json'
+    && $instExec['expires_at'] !== null
+    && is_file(\Core\Filesystem::absoluteFromRelative((string)$instExec['result_path'])));
+$fileData = json_decode((string)file_get_contents(\Core\Filesystem::absoluteFromRelative((string)$instExec['result_path'])), true);
+$check('instant file envelope matches delayed shape', ($fileData['meta']['mode'] ?? '') === 'instant'
+    && (int)($fileData['meta']['execution_id'] ?? 0) === (int)$instExec['id']
+    && ($fileData['data'][0]['ping'] ?? null) === '1');
+
+$linkToken = basename((string)parse_url((string)($inst['link'] ?? ''), PHP_URL_PATH));
+[$code, $body] = api('GET', '/api/v1/results/' . $linkToken, $A['key']);
+$dled = json_decode($body, true);
+$check('instant link downloads the file', $code === 200
+    && (int)($dled['meta']['execution_id'] ?? 0) === (int)$instExec['id']
+    && ($dled['data'][0]['ping'] ?? null) === '1');
+
+[$code, $body] = api('GET', '/api/v1/calls/' . (string)$inst['call_id'], $A['key']);
+$stInst = json_decode($body, true);
+$check('status for instant call carries link', $code === 200 && ($stInst['status'] ?? '') === 'ready'
+    && is_string($stInst['link'] ?? null));
+
+[$code, $body, , $hdrs] = api('POST', '/api/v1/request/smk.instant_dl?download=1', $A['key'], true);
+$direct = json_decode($body, true);
+$check('?download=1 returns the file directly', $code === 200
+    && (bool)preg_match('/^content-disposition:\s*attachment/im', $hdrs)
+    && ($direct['data'][0]['ping'] ?? null) === '1'
+    && (($direct['meta']['mode'] ?? '') === 'instant'), $body);
 [$code, $body] = api('POST', '/api/v1/request/smk.instant', $A['key']);
 $inst2 = json_decode($body, true);
 $check('instant cache hit replays same data', $code === 200 && ($inst2['data'] ?? null) === $inst['data']
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'instant_cache_hit'") >= 1);
-$check('cache copy stored', count(glob(\Core\Filesystem::cacheDir() . '/*.json')) >= 1);
 
 [$code, $body] = api('POST', '/api/v1/request/smk.instant_bad', $A['key']);
 $check('query failure -> 502 generic', $code === 502 && $getErr($body) === 'execution_failed'

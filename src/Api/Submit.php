@@ -67,6 +67,10 @@ final class Submit
     private static function instantFlow(array $request, array $client, string $callId, string $ip): void
     {
         $db = Db::instance();
+        // ?download=1: the POST response is the result FILE itself
+        // (Content-Disposition attachment) instead of the JSON envelope.
+        $asFile = (string)\Core\Http::param('download', 'g') === '1';
+
         $cacheSeconds = (int)$request['instant_cache_seconds'];
         if ($cacheSeconds > 0) {
             $cached = $db->one(
@@ -79,18 +83,21 @@ final class Submit
                 [$request['id'], $cacheSeconds]
             );
             if ($cached !== null) {
-                // The call attaches to the cached execution (was_shared = true).
+                // The call attaches to the cached execution (was_shared = true)
+                // and gets its own download token, same as delayed rule 2.
+                $token = \Core\Str::hex(24); // 48 hex chars
                 $db->execute(
-                    'INSERT INTO calls (id, client_id, request_id, execution_id, created_at, ip, was_shared) VALUES (?, ?, ?, ?, ?, ?, 1)',
-                    [$callId, $client['id'], $request['id'], $cached['id'], Time::now(), $ip]
+                    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)',
+                    [$callId, $client['id'], $request['id'], $cached['id'], hash('sha256', $token),
+                        Encryption::encrypt($token), Time::now(), $ip]
                 );
                 Logger::event('submitted', (int)$client['id'], (int)$request['id'], $callId, (int)$cached['id'], $ip);
-                InstantExecutor::emitFromCache($request, (int)$client['id'], $callId, $cached, $ip);
+                InstantExecutor::emitFromCache($request, (int)$client['id'], $callId, $cached, $ip, $asFile);
                 return;
             }
         }
         $connection = $db->one('SELECT * FROM connections WHERE id = ?', [$request['connection_id']]);
-        InstantExecutor::handle($request, $connection, $client, $callId, $ip);
+        InstantExecutor::handle($request, $connection, $client, $callId, $ip, $asFile);
     }
 
     /**

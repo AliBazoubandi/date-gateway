@@ -2,17 +2,29 @@
 declare(strict_types=1);
 namespace Services;
 
+use Api\Download;
 use Api\Errors;
 use Api\Links;
+use Core\Config;
 use Core\Db;
 use Core\Filesystem;
 use Core\Str;
 use Core\Time;
+use Services\Encryption;
+use Services\Logger;
+use Worker\ResultWriter;
 
 /**
  * Synchronous execution for response_mode = 'instant'.
  * Respects the per-connection cap with a metadata-DB named lock + counter;
  * returns 429 + Retry-After when the cap is busy (never queues).
+ *
+ * Results live in BOTH shapes, like delayed executions do: the POST response
+ * carries the rows inline (backward compatible), AND the run is streamed to
+ * storage/results/{id}.json via ResultWriter so the response can include a
+ * per-call download link (and ?download=1 delivers the file directly). The
+ * file lifetime is limits.instant.result_ttl_minutes; sweep/cleanup handles
+ * expiry exactly as for delayed results.
  */
 final class InstantExecutor
 {
@@ -22,7 +34,8 @@ final class InstantExecutor
         array $connection,
         array $client,
         string $callId,
-        string $ip
+        string $ip,
+        bool $asFile = false
     ): void {
         $db = Db::instance();
         $connId = (int)$connection['id'];
@@ -60,11 +73,31 @@ final class InstantExecutor
         $execId = $db->insertId();
         $db->unlock($lockName);
 
+        // The call gets a download token like every delayed call, so Status
+        // polling and the response envelope can expose a stable result link.
+        $token = Str::hex(24); // 48 hex chars
         $db->execute(
-            'INSERT INTO calls (id, client_id, request_id, execution_id, created_at, ip, was_shared) VALUES (?, ?, ?, ?, ?, ?, 0)',
-            [$callId, $client['id'], $request['id'], $execId, $now, $ip]
+            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+            [$callId, $client['id'], $request['id'], $execId, hash('sha256', $token),
+                Encryption::encrypt($token), $now, $ip]
         );
         Logger::event('submitted', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip);
+
+        // Open the result file BEFORE the query and stream rows as they come
+        // (no extra memory beyond the inline copy we keep for the response).
+        // A storage problem must never fail a successful query: it only
+        // leaves the execution without a downloadable file.
+        $writer = new ResultWriter();
+        $fileOk = true;
+        $fileError = '';
+        try {
+            Filesystem::prepare();
+            $writer->open(Filesystem::resultsDir() . '/' . $execId . '.json');
+        } catch (\RuntimeException $e) {
+            $fileOk = false;
+            $fileError = Str::truncate($e->getMessage(), 1800);
+        }
 
         $sql = (string)$request['sql_text'];
         $timeout = max(1, (int)$request['timeout_seconds']);
@@ -80,46 +113,27 @@ final class InstantExecutor
             $sql,
             $timeout,
             (int)$request['max_rows'],
-            static function (array $row) use (&$rows): void {
+            static function (array $row) use (&$rows, $writer, &$fileOk, &$fileError): void {
                 $rows[] = $row;
+                if ($fileOk) {
+                    try {
+                        $writer->writeRow($row);
+                    } catch (\RuntimeException $e) {
+                        $fileOk = false; // keep serving inline; drop the file
+                        $fileError = Str::truncate($e->getMessage(), 1800);
+                    }
+                }
             }
         );
 
         if ($result['ok']) {
-            $readyAt = Time::now();
-            $expiresAt = null;
-            $resultPath = null;
-            $resultSize = null;
-            $cacheSeconds = ((int)$request['instant_cache_seconds'] > 0 && (string)$request['response_mode'] === 'instant')
-                ? (int)$request['instant_cache_seconds']
-                : 0;
-            if ($cacheSeconds > 0) {
-                try {
-                    Filesystem::prepare();
-                    $path = Filesystem::cacheDir() . '/' . $execId . '.json';
-                    $json = Str::json($rows);
-                    if (file_put_contents($path, $json, LOCK_EX) !== false) {
-                        $resultPath = Filesystem::relative($path);
-                        $resultSize = filesize($path) ?: null;
-                        $expiresAt = Time::mysql(Time::addSeconds(new \DateTimeImmutable($now, Time::timezone()), $cacheSeconds));
-                    }
-                } catch (\RuntimeException) {
-                    // cache write failed; serve without cache copy
-                }
-            }
-            $db->execute(
-                'UPDATE executions SET status = ?, finished_at = ?, ready_at = ?, expires_at = ?,
-                        result_path = ?, result_size_bytes = ?, row_count = ?, truncated = ?
-                 WHERE id = ?',
-                ['ready', $readyAt, $readyAt, $expiresAt, $resultPath, $resultSize,
-                    $result['row_count'], $result['truncated'] ? 1 : 0, $execId]
-            );
-            Logger::event('instant_executed', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
-                $result['duration_ms'], $result['row_count'],
-                $result['truncated'] ? 'truncated at max_rows' : 'ok');
-
-            self::emitReady($callId, $readyAt, $result['row_count'], $result['truncated'], $rows);
+            self::finalizeReady($request, $callId, $token, $execId, $writer, $result, $rows,
+                $fileOk, $fileError, $asFile, (int)$client['id'], $ip);
             return;
+        }
+
+        if ($writer->touched()) {
+            $writer->discard(); // remove the partial file
         }
 
         if ($result['timed_out']) {
@@ -143,23 +157,124 @@ final class InstantExecutor
             'The query failed on the gateway. Details were recorded in the gateway logs.');
     }
 
+    /**
+     * Marks a successful instant run ready, writes the result envelope file
+     * and emits the response (inline JSON, or the file itself for ?download=1).
+     *
+     * @param array{ok:bool,row_count:int,truncated:bool,duration_ms:int,error:string,timed_out:bool} $result
+     * @param list<array<string,mixed>> $rows
+     */
+    private static function finalizeReady(
+        array $request,
+        string $callId,
+        string $token,
+        int $execId,
+        ResultWriter $writer,
+        array $result,
+        array $rows,
+        bool $fileOk,
+        string $fileError,
+        bool $asFile,
+        int $clientId,
+        string $ip
+    ): void {
+        $db = Db::instance();
+        $readyAt = Time::now();
+
+        if ($fileOk) {
+            try {
+                $writer->finish([
+                    'mode' => 'instant',
+                    'execution_id' => $execId,
+                    'request_code' => (string)$request['code'],
+                    'row_count' => $result['row_count'],
+                    'truncated' => (bool)$result['truncated'],
+                    'duration_ms' => $result['duration_ms'],
+                    'executed_at' => Time::iso($readyAt),
+                ]);
+            } catch (\RuntimeException $e) {
+                $writer->discard();
+                $fileOk = false;
+                $fileError = Str::truncate($e->getMessage(), 1800);
+            }
+        }
+
+        $resultPath = null;
+        $resultSize = null;
+        $expiresAt = null;
+        if ($fileOk) {
+            $resultPath = 'results/' . $execId . '.json';
+            $resultSize = (@filesize(Filesystem::resultsDir() . '/' . $execId . '.json') ?: null);
+            $ttl = max(1, (int)Config::get('limits.instant.result_ttl_minutes', 60));
+            $expiresAt = Time::mysql(Time::addMinutes(new \DateTimeImmutable($readyAt, Time::timezone()), $ttl));
+        }
+
+        $db->execute(
+            'UPDATE executions SET status = ?, finished_at = ?, ready_at = ?, expires_at = ?,
+                    result_path = ?, result_size_bytes = ?, row_count = ?, truncated = ?
+             WHERE id = ?',
+            ['ready', $readyAt, $readyAt, $expiresAt, $resultPath, $resultSize,
+                $result['row_count'], $result['truncated'] ? 1 : 0, $execId]
+        );
+        $message = $result['truncated'] ? 'truncated at max_rows' : 'ok';
+        if ($fileError !== '') {
+            $message .= '; result file unavailable: ' . $fileError;
+        }
+        Logger::event('instant_executed', $clientId, (int)$request['id'], $callId, $execId, $ip,
+            $result['duration_ms'], $result['row_count'], $message);
+
+        if ($asFile) {
+            if (!$fileOk) {
+                Errors::emit(502, 'result_unavailable',
+                    'The gateway could not store the result file. Retry without ?download=1.');
+            }
+            $exec = $db->one('SELECT * FROM executions WHERE id = ?', [$execId]);
+            if ($exec !== null) {
+                Download::streamResult($exec, $callId, $ip, 'result delivered (direct via ?download=1)');
+            }
+            return;
+        }
+
+        self::emitReady($callId, $readyAt, $result['row_count'], $result['truncated'], $rows,
+            $fileOk ? Links::download($token) : null);
+    }
+
     /** Replays a cached instant execution (fresh enough; not yet expired). */
-    public static function emitFromCache(array $request, int $clientId, string $callId, array $execution, string $ip): void
+    public static function emitFromCache(array $request, int $clientId, string $callId, array $execution, string $ip, bool $asFile = false): void
     {
         $path = Filesystem::absoluteFromRelative((string)$execution['result_path']);
         $rows = [];
-        if (is_file($path)) {
+        $hasFile = is_file($path);
+        if ($hasFile) {
             $decoded = json_decode((string)file_get_contents($path), true);
-            if (is_array($decoded)) {
+            // Newer executions store the standard {"data":[...],"meta":{...}}
+            // envelope; older ones (pre-file era) stored a bare rows array.
+            if (is_array($decoded) && isset($decoded['data']) && is_array($decoded['data'])) {
+                $rows = $decoded['data'];
+            } elseif (is_array($decoded)) {
                 $rows = $decoded;
             }
         }
+
+        if ($asFile) {
+            if (!$hasFile) {
+                Logger::event('failed', $clientId, (int)$request['id'], $callId, (int)$execution['id'], $ip,
+                    null, null, 'cache replay with ?download=1 but no stored file');
+                Errors::emit(502, 'result_unavailable',
+                    'The gateway could not provide the result file. Retry without ?download=1.');
+            }
+            Download::streamResult($execution, $callId, $ip, 'result delivered (direct via ?download=1, cached run)');
+            return;
+        }
+
         Logger::event('instant_cache_hit', $clientId, (int)$request['id'], $callId, (int)$execution['id'], $ip,
             null, (int)$execution['row_count'], 'replayed cached instant result');
-        self::emitReady($callId, null, (int)$execution['row_count'], (int)$execution['truncated'] === 1, $rows);
+
+        $link = $hasFile ? Links::forCall($callId) : null;
+        self::emitReady($callId, null, (int)$execution['row_count'], (int)$execution['truncated'] === 1, $rows, $link);
     }
 
-    private static function emitReady(string $callId, ?string $executedAt, int $rowCount, bool $truncated, array $rows): void
+    private static function emitReady(string $callId, ?string $executedAt, int $rowCount, bool $truncated, array $rows, ?string $link): void
     {
         json_out([
             'call_id' => $callId,
@@ -168,6 +283,7 @@ final class InstantExecutor
             'executed_at' => $executedAt === null ? null : Time::iso($executedAt),
             'row_count' => $rowCount,
             'truncated' => $truncated,
+            'link' => $link,
             'data' => $rows,
         ]);
     }

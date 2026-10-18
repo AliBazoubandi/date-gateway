@@ -58,6 +58,12 @@ return [
             'max_timeout_seconds' => 60,
             'max_rows' => 20000,
             'defaults' => ['timeout_seconds' => 30, 'max_rows' => 5000],
+            // How long a successful instant result FILE stays downloadable
+            // (via ?download=1 on the submission or the link in the JSON
+            // response). The inline data in the POST response is unaffected;
+            // instant requests always use this value (requests.ttl_minutes is
+            // 0 by design for instant). Swept to 'expired' by cleanup.
+            'result_ttl_minutes' => 60,
         ],
         // Default max_rows suggested for new DELAYED requests (admin form).
         'default' => ['max_rows' => 100000],

@@ -10,20 +10,26 @@ require __DIR__ . '/../src/Core/bootstrap.php';
 $port = rand(20000, 60000);
 $root = BASE_PATH;
 
-// Self-cleaning: wipe smoke leftovers so the run is repeatable.
+// Self-cleaning: wipe smoke leftovers so the run is repeatable — scoped to
+// smoke markers only, so real grants/logs/calls/executions/audit survive.
+$smokeClients = "SELECT id FROM clients WHERE name LIKE 'smoke%'";
+$smokeRequests = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
+                  WHERE r.code LIKE 'smoke%' OR c.name LIKE 'local mariadb%'";
 foreach ([
-    'DELETE FROM webhook_deliveries',
-    'DELETE FROM request_logs',
-    'DELETE FROM calls',
-    'DELETE FROM executions',
-    'DELETE FROM client_request_permissions',
+    "DELETE FROM webhook_deliveries WHERE call_id IN ($smokeClients)
+      OR call_id IN (SELECT id FROM calls WHERE request_id IN ($smokeRequests))",
+    "DELETE FROM request_logs WHERE client_id IN ($smokeClients) OR request_id IN ($smokeRequests)",
+    "DELETE FROM calls WHERE client_id IN ($smokeClients) OR request_id IN ($smokeRequests)",
+    "DELETE FROM executions WHERE request_id IN ($smokeRequests)",
+    "DELETE FROM client_request_permissions WHERE client_id IN ($smokeClients) OR request_id IN ($smokeRequests)",
     "DELETE FROM clients WHERE name LIKE 'smoke%'",
     'DELETE FROM login_attempts',
     "DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
         WHERE r.code LIKE 'smoke%' OR c.name LIKE 'local mariadb%'",
     "DELETE FROM connections WHERE name LIKE 'local mariadb%'",
+    // audit scoped to the smoke admin, BEFORE the user itself is removed
+    "DELETE FROM admin_audit_log WHERE admin_user_id IN (SELECT id FROM admin_users WHERE username = 'smoke_admin')",
     "DELETE FROM admin_users WHERE username = 'smoke_admin'",
-    'DELETE FROM admin_audit_log',
 ] as $sql) {
     db()->execute($sql);
 }

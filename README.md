@@ -183,14 +183,34 @@ expired link.
 ### Instant mode
 
 ```
+:: submit — the result comes back inline (backward compatible) AND a
+::         downloadable file is stored; the response now includes `link`
 curl -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/request/sales.lookup
 -> 200 {"call_id":"...","mode":"instant","status":"ready","executed_at":"...",
-        "row_count":2,"truncated":false,"data":[{"col":"val"},...]}
+        "row_count":2,"truncated":false,
+        "link":"http://gw.internal/api/v1/results/TOKEN",
+        "data":[{"col":"val"},...]}
+
+:: one-call file delivery — add ?download=1 to the SAME POST and the body is
+:: the result file itself (Content-Disposition: attachment, same {"data":..,
+:: "meta":{..}} shape as delayed result files); no inline envelope is sent
+curl -X POST -H "Authorization: Bearer CLIENT_KEY" -o result.json \
+     "http://gw.internal/api/v1/request/sales.lookup?download=1"
+
+:: or download later with the link from the response / status endpoint
+curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 ```
 
-If the request has `instant_cache_seconds > 0`, an identical re-submit
-within the window replays the cached copy instantly (`instant_cache_hit`
-logged). If the target connection is at its concurrency cap the call gets
+Every successful instant run also writes its result file
+(`storage/results/{execution_id}.json`) and the call receives a download
+token, exactly like delayed executions: the status endpoint (`GET
+/api/v1/calls/CALL_ID`) returns the link once ready, and the file stays
+downloadable until cleanup expires it (`limits.instant.result_ttl_minutes`,
+default 60 minutes — instant requests ignore requests.ttl_minutes by
+design). If the request has `instant_cache_seconds > 0`, an identical
+re-submit within the window replays the cached copy instantly
+(`instant_cache_hit` logged, with its own link; `?download=1` also works). If
+the target connection is at its concurrency cap the call gets
 `429 rate_limited` + `Retry-After` instead of queuing.
 
 ### Per-client submit throttle

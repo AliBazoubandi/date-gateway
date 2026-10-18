@@ -18,7 +18,9 @@ use Services\Logger;
  *     clear result_path.
  *  3. Instant executions stuck 'running' (web request died mid-query) older
  *     than the request timeout + grace -> mark failed, log 'failed'.
- *  4. Optional: when cleanup.log_retention_days > 0, prune request_logs rows
+ *  4. Result/cache files whose executions row no longer exists (manual row
+ *     deletes, crashed inserts) -> delete the orphan file.
+ *  5. Optional: when cleanup.log_retention_days > 0, prune request_logs rows
  *     older than that window (batched). 0 (default) keeps the documented
  *     append-only behavior. Deliveries and the audit log are never deleted.
  */
@@ -30,7 +32,7 @@ final class Cleanup
         Filesystem::prepare();
         return [
             'expired' => self::expireReady(),
-            'files_removed' => self::clearFailedFiles(),
+            'files_removed' => self::clearFailedFiles() + self::sweepOrphanFiles(),
             'stale_instant' => self::failStaleInstant(),
             'logs_removed' => self::pruneLogs(),
         ];
@@ -111,8 +113,35 @@ final class Cleanup
         return $n;
     }
 
+    /** 4) Files whose executions row no longer exists -> delete the orphan. */
+    private static function sweepOrphanFiles(): int
+    {
+        $db = Db::instance();
+        $n = 0;
+        foreach (['results', 'cache'] as $sub) {
+            $files = glob(Filesystem::absoluteFromRelative($sub . '/*.json')) ?: [];
+            foreach ($files as $absolute) {
+                // Only the documented per-execution layout, ids are numeric.
+                if (preg_match('#/([0-9]+)\.json$#', $absolute, $m) !== 1) {
+                    continue;
+                }
+                $count = (int)$db->value('SELECT COUNT(*) FROM executions WHERE id = ?', [(int)$m[1]]);
+                if ($count !== 0) {
+                    continue; // still referenced
+                }
+                $relative = $sub . '/' . $m[1] . '.json';
+                if (self::safeUnlink($relative)) {
+                    $n++;
+                    Logger::event('expired', null, null, null, (int)$m[1], null, null, null,
+                        "orphaned {$relative} removed (no executions row)");
+                }
+            }
+        }
+        return $n;
+    }
+
     /**
-     * 4) Optional request_logs retention (cleanup.log_retention_days; 0 = keep
+     * 5) Optional request_logs retention (cleanup.log_retention_days; 0 = keep
      *     everything). Deletes in batches of 1000 so a large first run cannot
      *     hold one long-running statement.
      */
