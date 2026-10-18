@@ -6,6 +6,8 @@
 
 require __DIR__ . '/../src/Core/bootstrap.php';
 
+test_guard();
+
 // Random port: a stale or sibling server must never answer instead of us.
 $port = rand(20000, 60000);
 $root = BASE_PATH;

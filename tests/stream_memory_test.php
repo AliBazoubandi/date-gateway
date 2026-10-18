@@ -8,6 +8,8 @@
 
 require __DIR__ . '/../src/Core/bootstrap.php';
 
+test_guard();
+
 $rows = max(1000, (int)($argv[1] ?? 200000));
 
 $params = [

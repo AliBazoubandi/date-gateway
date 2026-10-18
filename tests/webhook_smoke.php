@@ -15,6 +15,8 @@ use Services\Encryption;
 
 require __DIR__ . '/../src/Core/bootstrap.php';
 
+test_guard();
+
 $failures = 0;
 $check = static function (string $label, bool $pass, string $detail = '') use (&$failures): void {
     echo str_pad($pass ? ' OK ' : 'FAIL', 4, ' '), $label,

@@ -4,6 +4,8 @@
 
 require __DIR__ . '/../src/Core/bootstrap.php';
 
+test_guard();
+
 $expect = [
     'requests' => ['code', 'sql_text', 'response_mode', 'instant_cache_seconds',
         'delay_minutes', 'ttl_minutes', 'timeout_seconds', 'max_rows'],

@@ -105,6 +105,19 @@ function client_ip(): string
     return (string)($_SERVER['REMOTE_ADDR'] ?? '');
 }
 
+// Guard for destructive test scripts (smoke tests): refuse to run unless the
+// dedicated throwaway environment is active. tests\run_all.ps1 sets both.
+function test_guard(): void
+{
+    $dbName = (string)Core\Config::get('metadata_db.database', '');
+    if (getenv('GATEWAY_TEST_MODE') !== '1' || stripos($dbName, '_test') === false) {
+        fwrite(STDERR,
+            'REFUSING to run: this test needs GATEWAY_TEST_MODE=1 and a metadata DB whose name'
+            . ' contains "_test" (configured DB: ' . $dbName . ')' . PHP_EOL);
+        exit(2);
+    }
+}
+
 // JSON response + exit.
 function json_out(array $payload, int $status = 200): never
 {

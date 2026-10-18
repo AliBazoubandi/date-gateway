@@ -15,6 +15,8 @@ use Core\Time;
 use Services\Encryption;
 
 require __DIR__ . '/../src/Core/bootstrap.php';
+
+test_guard();
 require __DIR__ . '/../src/Core/Filesystem.php';
 
 $failures = 0;
