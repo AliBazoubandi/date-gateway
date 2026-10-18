@@ -422,3 +422,31 @@ longer supported — the guards above refuse it on purpose.
 6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
    includes a set, valid, https `GATEWAY_BASE_URL` — the check FAILS while
    it is missing) **and** all four smoke tests pass.
+
+## 11. Filesystem ACLs (Windows)
+
+The gateway stores its own code, `config/.env` (secrets), and the writable
+`storage/` tree under one directory — exactly the layout that makes a PHP
+runtime compromise expensive when permissions are left at XAMPP defaults.
+`deployment\harden_acl.ps1` enforces the least-privilege split (idempotent,
+run it again after any reinstall or move):
+
+- **Administrators + SYSTEM** — Full Control on the whole tree.
+- **PHP identity** (`-WebUser`, default `NT AUTHORITY\SYSTEM` as XAMPP runs
+  Apache) — Read&Execute everywhere, including `config/` so `.env` stays
+  readable, but **no write** outside `storage/`; `storage/` gets Modify for
+  result files, cache and lock files. A rogue worker cannot rewrite its own
+  code, `.env`, or the CLI/deployment scripts.
+- **Everyone else** — `BUILTIN\Users` and `Authenticated Users` grants are
+  stripped; nothing re-inherits broad rights from the volume root.
+
+Run from an **elevated** PowerShell (it refuses otherwise):
+
+```
+powershell -ExecutionPolicy Bypass -File deployment\harden_acl.ps1
+```
+
+Pass `-WebUser "IIS AppPool\gateway"` (or your dedicated service account)
+when PHP does not run as SYSTEM. Afterwards verify the app end to end: a
+read-only code/config tree must not affect submissions, downloads, worker
+passes, or webhook delivery.
