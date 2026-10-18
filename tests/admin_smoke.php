@@ -74,8 +74,9 @@ function csrf(string $html): string {
 }
 
 $pass = 0;
-$check = static function (string $label, bool $ok, string $detail = '') use (&$pass): void {
-    $pass += $ok ? 1 : 0;
+$fail = 0;
+$check = static function (string $label, bool $ok, string $detail = '') use (&$pass, &$fail): void {
+    $ok ? $pass++ : $fail++;
     echo str_pad($ok ? ' OK ' : 'FAIL', 4, ' '), $label, $detail === '' ? '' : "   ({$detail})", PHP_EOL;
 };
 
@@ -200,6 +201,27 @@ curl_exec($ch);
 $check('POST without CSRF -> 419', curl_getinfo($ch, CURLINFO_RESPONSE_CODE) == 419);
 curl_close($ch);
 
+// Logout requires POST + CSRF; a plain GET must not log anyone out -----------
+// Discriminator: the logout form (action="/admin/logout") renders only when
+// authenticated ($admin !== null in header.php); "Admin login" only on the
+// login page. The nav "Dashboard" link appears on both, so it is not usable.
+[, $body] = http('GET', '/admin/logout');
+$check('GET logout does not log out (link CSRF safe)', str_contains($body, 'action="/admin/logout"'));
+
+$ch = curl_init('http://127.0.0.1:' . $port . '/admin/logout');
+curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_COOKIEFILE => $cookie,
+    CURLOPT_RETURNTRANSFER => true]);
+curl_exec($ch);
+$check('POST logout without CSRF -> 419', curl_getinfo($ch, CURLINFO_RESPONSE_CODE) == 419);
+curl_close($ch);
+[, $body] = http('GET', '/admin');
+$check('still logged in after CSRF-less logout POST', str_contains($body, 'action="/admin/logout"'));
+
+[, $body] = http('POST', '/admin/logout', ['_csrf' => csrf($body)]);
+$check('POST logout with CSRF lands on login page', str_contains($body, 'Admin login') && !str_contains($body, 'action="/admin/logout"'));
+[, $body] = http('GET', '/admin');
+$check('session is gone after CSRF logout', str_contains($body, 'Admin login') && !str_contains($body, 'action="/admin/logout"'));
+
 // Audit rows exist for actions -------------------------------------------
 $auditKinds = db()->rows('SELECT entity_type, action, COUNT(*) c FROM admin_audit_log GROUP BY entity_type, action');
 $flat = [];
@@ -212,5 +234,5 @@ $check('audit covers connection/request/client/test_run/permission',
     && in_array('request.test_run', $flat, true) && in_array('permission.update', $flat, true),
     implode(', ', $flat));
 
-echo $pass >= 14 ? '=== ADMIN SMOKE PASS ===' : "=== ADMIN SMOKE: {$pass} OK ===", PHP_EOL;
-exit(0);
+echo $fail === 0 ? "=== ADMIN SMOKE PASS ({$pass} checks) ===" : "=== ADMIN SMOKE FAIL: {$fail} failed, {$pass} OK ===", PHP_EOL;
+exit($fail === 0 ? 0 : 1);

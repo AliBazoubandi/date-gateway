@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Api;
 
 use Api\Errors;
+use Core\Config;
 use Core\Db;
 use Core\Http;
 use Core\Str;
@@ -49,6 +50,8 @@ final class Submit
             Logger::event('denied', $clientId, $requestId, null, null, $ip, null, null, 'permission missing');
             Errors::forbidden('This client has no permission for this request.');
         }
+
+        self::enforceClientSubmitRate($clientId, $requestId, $ip);
 
         $callId = self::newCallId();
 
@@ -203,6 +206,31 @@ final class Submit
             [$callId, $client['id'], $request['id'], $exec !== null ? $exec['id'] : null,
                 hash('sha256', $token), Encryption::encrypt($token), Time::now(), $ip, $wasShared]
         );
+    }
+
+    /**
+     * Optional per-client submit throttle (limits.client_submit_max; 0 = off).
+     * Counts this client's own recent 'submitted'/'shared' log rows in a
+     * sliding window; at/over the cap the submission is refused with 429.
+     */
+    private static function enforceClientSubmitRate(int $clientId, int $requestId, string $ip): void
+    {
+        $cap = (int)Config::get('limits.client_submit_max', 0);
+        if ($cap <= 0) {
+            return;
+        }
+        $window = max(1, (int)Config::get('limits.client_submit_window_seconds', 60));
+        $recent = (int)Db::instance()->value(
+            "SELECT COUNT(*) FROM request_logs
+             WHERE client_id = ? AND event IN ('submitted','shared')
+               AND `timestamp` >= DATE_SUB(NOW(), INTERVAL ? SECOND)",
+            [$clientId, $window]
+        );
+        if ($recent >= $cap) {
+            Logger::event('rate_limited', $clientId, $requestId, null, null, $ip, null, null,
+                "client submit cap reached ({$recent} in {$window}s)");
+            Errors::rateLimited($window);
+        }
     }
 
     private static function newCallId(): string

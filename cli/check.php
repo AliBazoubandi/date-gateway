@@ -12,6 +12,9 @@ $ok = static function (string $label, bool $pass, string $detail = '') use (&$fa
         $failures++;
     }
 };
+$warn = static function (string $label, string $detail = ''): void {
+    echo 'WARN ', $label, $detail === '' ? '' : "   ({$detail})", PHP_EOL;
+};
 
 echo '=== Data Gateway system check ===', PHP_EOL;
 
@@ -27,6 +30,10 @@ try {
 
 $ok('Time zone is Asia/Tehran', date_default_timezone_get() === 'Asia/Tehran', date_default_timezone_get());
 echo '     now = ', now_str(), '  (ISO: ', iso8601(now_str()) ?? '-', ')', PHP_EOL;
+
+if (trim((string)Core\Config::get('app.base_url', '')) === '') {
+    $warn('app.base_url is empty', 'links are built from the incoming Host header; set GATEWAY_BASE_URL in config/.env for production');
+}
 
 foreach (['mysqli' => 'metadata DB driver', 'openssl' => 'AES-256-GCM', 'curl' => 'webhooks'] as $ext => $why) {
     $ok("extension {$ext} ({$why})", extension_loaded($ext));
@@ -61,6 +68,18 @@ try {
     );
     $ok('calls.token_enc present (webhook links)', $hasTokenEnc === 1,
         'run the ALTER at the end of sql\\schema.sql if missing');
+
+    // A delayed timeout at or above the stale-running threshold means the worker
+    // could fail a legitimately-running query; the admin UI caps at 1800s (30min).
+    $staleMinutes = max(1, (int)Core\Config::get('worker.stale_running_minutes', 90));
+    $overlap = (int)db()->value(
+        'SELECT COUNT(*) FROM requests WHERE timeout_seconds >= ?',
+        [$staleMinutes * 60]
+    );
+    if ($overlap > 0) {
+        $warn("{$overlap} request(s) have timeout_seconds >= worker.stale_running_minutes",
+            'lower the timeout or raise stale_running_minutes');
+    }
 } catch (\Throwable $e) {
     $ok('metadata DB', false, $e->getMessage());
 }

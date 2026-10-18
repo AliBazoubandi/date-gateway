@@ -21,14 +21,14 @@ return [
     ],
 
     // Metadata database (the MariaDB/MySQL that ships with XAMPP).
-    // Defaults below are XAMPP's; for production create a dedicated user, e.g.
-    //   CREATE USER 'gateway'@'localhost' IDENTIFIED BY 'strong-password';
-    //   GRANT SELECT,INSERT,UPDATE,DELETE,LOCK TABLES ON data_gateway.* TO 'gateway'@'localhost';
+    // Production: create the dedicated user with sql/create_user.sql (SELECT,
+    // INSERT, UPDATE, DELETE, LOCK TABLES on data_gateway only) and set its
+    // password as GATEWAY_DB_PASSWORD in config/.env. Do NOT ship with root.
     'metadata_db' => [
         'host' => '127.0.0.1',
         'port' => 3306,
         'database' => 'data_gateway',
-        'user' => 'root',
+        'user' => (string)\Core\Env::get('GATEWAY_DB_USER', 'gateway'),
         'password' => (string)\Core\Env::get('GATEWAY_DB_PASSWORD', ''),
     ],
 
@@ -59,8 +59,22 @@ return [
             'max_rows' => 20000,
             'defaults' => ['timeout_seconds' => 30, 'max_rows' => 5000],
         ],
+        // Default max_rows suggested for new DELAYED requests (admin form).
+        'default' => ['max_rows' => 100000],
+        // Optional per-client submit throttle. 0 = disabled. When enabled, a
+        // client may start at most N submissions ('submitted'/'shared') per
+        // window; extra ones get 429 + Retry-After (logged as 'rate_limited').
+        'client_submit_window_seconds' => 60,
+        'client_submit_max' => 0,
         // 429 response for instant mode when the per-connection cap is busy.
         'rate_limited_retry_after' => 5,
+    ],
+
+    // Optional housekeeping. log_retention_days 0 = keep request_logs forever
+    // (the documented append-only behavior); N > 0 prunes rows older than N
+    // days during each cleanup pass, in batches.
+    'cleanup' => [
+        'log_retention_days' => 0,
     ],
 
     'worker' => [
@@ -69,8 +83,9 @@ return [
         'max_per_run' => 50,
         // A delayed 'running' execution older than this is treated as a crashed
         // worker's leftover and is failed by the next pass. Must comfortably
-        // exceed the longest request timeout you allow.
-        'stale_running_minutes' => 60,
+        // exceed the LONGEST request timeout the admin UI allows (delayed is
+        // capped at 1800s = 30 min, so 90 min leaves 3x headroom).
+        'stale_running_minutes' => 90,
     ],
 
     'downloads' => [

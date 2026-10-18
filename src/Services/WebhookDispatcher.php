@@ -26,10 +26,13 @@ use Core\Time;
  *    configured backoff, then the row goes to state='exhausted'.
  *  - Every attempt is logged (webhook_sent / webhook_failed).
  *
- * Rows are left untouched (state stays 'pending', no attempt is burned) when
- * there is nothing sensible to send yet: client inactive, URL/secret empty,
- * or the attached execution still not ready. A result that EXPIRED before it
- * could be delivered is exhausted immediately (its link would 410 anyway).
+ * Deliveries of clients that cannot receive anything (inactive, or empty
+ * webhook_url/webhook_secret) are NOT selected at all - they stay pending and
+ * invisible until an admin fixes the client, without consuming the per-pass
+ * LIMIT. Rows are still skipped in place (state stays 'pending', no attempt is
+ * burned) when the attached execution is not ready yet. A result that EXPIRED
+ * before it could be delivered is exhausted immediately (its link would 410
+ * anyway).
  *
  * Only one process dispatches at a time: cli/worker.php and cli/webhooks.php
  * both hold the 'gw_cli_webhooks' metadata-DB named lock around this call.
@@ -41,10 +44,17 @@ final class WebhookDispatcher
     {
         $db = Db::instance();
         $limit = $maxPerPass ?? max(1, (int)Config::get('webhook.max_per_pass', 10));
+        // Only deliveries that can actually be sent are selected: an inactive
+        // client (or one with no webhook_url/webhook_secret) stays pending
+        // forever, and would otherwise eat the whole per-pass LIMIT.
         $due = $db->rows(
-            "SELECT id, call_id, attempt FROM webhook_deliveries
-             WHERE state = 'pending' AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-             ORDER BY id
+            "SELECT d.id, d.call_id, d.attempt
+             FROM webhook_deliveries d
+             JOIN calls c ON c.id = d.call_id
+             JOIN clients cl ON cl.id = c.client_id
+             WHERE d.state = 'pending' AND (d.next_retry_at IS NULL OR d.next_retry_at <= NOW())
+               AND cl.is_active = 1 AND cl.webhook_url <> '' AND cl.webhook_secret <> ''
+             ORDER BY d.id
              LIMIT " . $limit
         );
         $stats = ['sent' => 0, 'failed' => 0, 'exhausted' => 0, 'skipped' => 0];

@@ -2,6 +2,7 @@
 declare(strict_types=1);
 namespace Worker;
 
+use Core\Config;
 use Core\Db;
 use Core\Filesystem;
 use Core\Str;
@@ -17,12 +18,13 @@ use Services\Logger;
  *     clear result_path.
  *  3. Instant executions stuck 'running' (web request died mid-query) older
  *     than the request timeout + grace -> mark failed, log 'failed'.
- *
- *  Deliveries, logs and the audit log are never deleted (append-only).
+ *  4. Optional: when cleanup.log_retention_days > 0, prune request_logs rows
+ *     older than that window (batched). 0 (default) keeps the documented
+ *     append-only behavior. Deliveries and the audit log are never deleted.
  */
 final class Cleanup
 {
-    /** @return array{expired:int, files_removed:int, stale_instant:int} */
+    /** @return array{expired:int, files_removed:int, stale_instant:int, logs_removed:int} */
     public static function run(): array
     {
         Filesystem::prepare();
@@ -30,6 +32,7 @@ final class Cleanup
             'expired' => self::expireReady(),
             'files_removed' => self::clearFailedFiles(),
             'stale_instant' => self::failStaleInstant(),
+            'logs_removed' => self::pruneLogs(),
         ];
     }
 
@@ -106,6 +109,30 @@ final class Cleanup
                 'cleanup recovered a stale instant execution (interrupted web process)');
         }
         return $n;
+    }
+
+    /**
+     * 4) Optional request_logs retention (cleanup.log_retention_days; 0 = keep
+     *     everything). Deletes in batches of 1000 so a large first run cannot
+     *     hold one long-running statement.
+     */
+    private static function pruneLogs(): int
+    {
+        $days = (int)Config::get('cleanup.log_retention_days', 0);
+        if ($days <= 0) {
+            return 0;
+        }
+        $db = Db::instance();
+        $cutoff = Time::mysql(Time::addSeconds(Time::nowDt(), -$days * 86400));
+        $removed = 0;
+        do {
+            $n = $db->execute(
+                'DELETE FROM request_logs WHERE `timestamp` < ? LIMIT 1000',
+                [$cutoff]
+            );
+            $removed += $n;
+        } while ($n > 0);
+        return $removed;
     }
 
     /**

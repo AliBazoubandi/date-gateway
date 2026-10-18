@@ -45,8 +45,13 @@ final class Router
             return;
         }
         if ($page === 'logout') {
-            Auth::logout();
-            Http::redirect('/admin/login');
+            // POST + CSRF only (verified above by Csrf::check() for every POST);
+            // a plain GET must never log anyone out (link/image CSRF).
+            if (Http::isPost()) {
+                Auth::logout();
+                Http::redirect('/admin/login');
+            }
+            Http::redirect('/admin');
         }
 
         // All other admin pages need a live session.

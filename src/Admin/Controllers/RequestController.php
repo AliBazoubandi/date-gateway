@@ -189,7 +189,9 @@ final class RequestController
                 $maxRows = 20000;
             }
         } else {
-            $maxTimeout = 3600;
+            // 30 min max: must stay well under worker.stale_running_minutes (90)
+            // so a legitimately long query is never mistaken for a crashed one.
+            $maxTimeout = 1800;
             $maxRows = 10000000;
         }
         $int = static function (string $key, ?string $src, int $min, int $max, int $default): int {
