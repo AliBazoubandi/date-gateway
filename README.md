@@ -193,15 +193,15 @@ within the window replays the cached copy instantly (`instant_cache_hit`
 logged). If the target connection is at its concurrency cap the call gets
 `429 rate_limited` + `Retry-After` instead of queuing.
 
-### Optional per-client submit throttle
+### Per-client submit throttle
 
-`limits.client_submit_max` (default `0` = off) caps how many submissions one
-client may start per `limits.client_submit_window_seconds` (default `60`).
-It counts that client's own `submitted`/`shared` log rows in a sliding
-window; once the cap is reached, further submits return `429 rate_limited` +
-`Retry-After` and are logged as `rate_limited`. This is independent of the
-per-connection concurrency cap above. Enable it by setting
-`client_submit_max` to a positive number in `config/config.php`.
+`limits.client_submit_max` caps how many submissions one client may start per
+`limits.client_submit_window_seconds`. It counts that client's own
+`submitted`/`shared` log rows in a sliding window; once the cap is reached,
+further submits return `429 rate_limited` + `Retry-After` and are logged as
+`rate_limited`. This is independent of the per-connection concurrency cap
+above. **Currently enabled at 60 submissions per 60s window** in
+`config/config.php`; set `client_submit_max` back to `0` to disable.
 
 ## 5. Webhooks
 
@@ -317,13 +317,16 @@ php tests\admin_smoke.php    REM admin panel flows over php -S with curl
    (e.g. `https://gw.internal`). Never serve download links built from the
    incoming `Host` header in production — `cli/check.php` warns when it is
    empty.
-4. **Decide HTTPS on or off.** The session cookie `secure` flag auto-detects
-   from `HTTPS`/the base URL scheme. TLS is recommended even with a
-   self-signed cert. XAMPP quick setup: run `C:\xampp\apache\makecert.bat` to
-   generate a self-signed cert, enable `mod_ssl`/`mod_socache_shmcb` in
-   `httpd.conf`, uncomment the `LoadModule ssl_module` + `Include
-   conf/extra/httpd-ssl.conf` lines, then restart Apache and browse
-   `https://localhost` to accept the warning.
+4. **HTTPS/TLS: enabled (decided).** This deployment serves over TLS. The
+   session cookie `secure` flag and the download-link scheme auto-detect from
+   `HTTPS`/the base URL scheme, so once Apache terminates TLS the app sets
+   secure cookies and builds `https://` links with no code change. When you set
+   `GATEWAY_BASE_URL` (item 3), use the `https://` scheme so links and secure
+   cookies stay correct even behind a TLS-terminating proxy. XAMPP quick setup:
+   run `C:\xampp\apache\makecert.bat` to generate a self-signed cert, enable
+   `mod_ssl`/`mod_socache_shmcb` in `httpd.conf`, uncomment the `LoadModule
+   ssl_module` + `Include conf/extra/httpd-ssl.conf` lines, then restart Apache
+   and browse `https://localhost` to accept the warning.
 5. **Register the scheduled tasks:** run `deployment\register_tasks.ps1`
    (§3). For a headless server, register them to run whether the user is
    logged on or not, or move them to a Windows Service.
