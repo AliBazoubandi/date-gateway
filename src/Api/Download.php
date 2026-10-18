@@ -9,6 +9,7 @@ use Core\Filesystem;
 use Core\Str;
 use Core\Time;
 use Services\Logger;
+use Worker\Cleanup;
 
 /**
  * GET /api/v1/results/{token} — chunked, time-limited JSON delivery.
@@ -73,6 +74,7 @@ final class Download
         $status = (string)$exec['status'];
 
         if ($status === 'expired') {
+            self::purgeExpiredFile($exec); // the row may predate cleanup's expiry pass
             Logger::event('expired', $clientId, (int)$exec['request_id'], $callId, (int)$exec['id'], $ip,
                 null, (int)($exec['row_count'] ?? 0), 'download after expiry');
             Errors::gone('This result has expired.');
@@ -81,7 +83,9 @@ final class Download
             Errors::notFound('Unknown token.');
         }
         if (!empty($exec['expires_at']) && $exec['expires_at'] <= Time::now()) {
-            $db->execute("UPDATE executions SET status = 'expired' WHERE id = ?", [$exec['id']]);
+            // Expired between cleanup passes: delete the file BEFORE the 410
+            // so no expired result survives on disk waiting for the sweeper.
+            self::purgeExpiredFile($exec, true);
             Logger::event('expired', $clientId, (int)$exec['request_id'], $callId,
                 (int)$exec['id'], $ip, null, (int)($exec['row_count'] ?? 0), 'expired during download');
             Errors::gone('This result has expired.');
@@ -122,5 +126,24 @@ final class Download
         }
         fclose($fh);
         exit;
+    }
+
+    /**
+     * Delete the on-disk result of an execution that is being refused as
+     * expired: unlink first, then clear the stored reference (and mark the
+     * row expired when it was caught by the TTL race). A racing re-read then
+     * self-heals to 410 and no expired file survives on disk.
+     * @param array<string,mixed> $exec a full executions row
+     */
+    private static function purgeExpiredFile(array $exec, bool $markExpired = false): void
+    {
+        if (!empty($exec['result_path'])) {
+            Cleanup::safeUnlink((string)$exec['result_path']);
+        }
+        $sql = "UPDATE executions SET result_path = NULL, result_size_bytes = NULL";
+        if ($markExpired) {
+            $sql .= ", status = 'expired'";
+        }
+        Db::instance()->execute($sql . ' WHERE id = ?', [(int)$exec['id']]);
     }
 }

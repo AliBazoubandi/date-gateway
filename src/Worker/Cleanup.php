@@ -14,8 +14,8 @@ use Services\Logger;
  *
  *  1. Ready executions whose expires_at passed -> delete the result/cache
  *     file, mark the execution 'expired', log 'expired'.
- *  2. Failed executions that still reference a file -> delete the leftover,
- *     clear result_path.
+ *  2. Failed or expired executions that still reference a file -> delete the
+ *     leftover, clear result_path.
  *  3. Instant executions stuck 'running' (web request died mid-query) older
  *     than the request timeout + grace -> mark failed, log 'failed'.
  *  4. Result/cache files whose executions row no longer exists (manual row
@@ -32,7 +32,7 @@ final class Cleanup
         Filesystem::prepare();
         return [
             'expired' => self::expireReady(),
-            'files_removed' => self::clearFailedFiles() + self::sweepOrphanFiles(),
+            'files_removed' => self::clearFailedFiles() + self::clearExpiredFiles() + self::sweepOrphanFiles(),
             'stale_instant' => self::failStaleInstant(),
             'logs_removed' => self::pruneLogs(),
         ];
@@ -87,6 +87,31 @@ final class Cleanup
                 $n++;
             }
             if (self::safeUnlink("results/{$row['id']}.json.tmp")) {
+                $n++;
+            }
+            $db->execute(
+                'UPDATE executions SET result_path = NULL, result_size_bytes = NULL WHERE id = ?',
+                [$row['id']]
+            );
+        }
+        return $n;
+    }
+
+    /**
+     * 2b) Executions already marked 'expired' (e.g. by a racing download that
+     *     hit the TTL before this pass ran) that still reference a file:
+     *     delete the leftover and clear the path.
+     */
+    private static function clearExpiredFiles(): int
+    {
+        $db = Db::instance();
+        $rows = $db->rows(
+            "SELECT id, result_path FROM executions
+             WHERE status = 'expired' AND result_path IS NOT NULL"
+        );
+        $n = 0;
+        foreach ($rows as $row) {
+            if (self::safeUnlink((string)$row['result_path'])) {
                 $n++;
             }
             $db->execute(
