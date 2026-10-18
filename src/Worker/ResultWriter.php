@@ -5,30 +5,35 @@ namespace Worker;
 /**
  * Incremental JSON writer for delayed execution results.
  *
- * Streams rows one by one into storage/results/{execution_id}.json as
- *   {"data":[row,row,...],"meta":{...}}
+ * Streams rows one by one into a temporary file next to the final
+ * storage/results/{execution_id}.json as {"data":[row,row,...],"meta":{...}}
  * so hundreds of thousands of rows never exist in memory. Rows are written
  * while the query streams (comma-separated); the meta block is appended once
- * the run finishes. The file is only valid JSON after finish() — anything else
- * is a partial leftover and the caller deletes it on failure.
+ * the run finishes, and only then is the temp file renamed over the final
+ * name — a crashed run can never leave a half-written file visible at the
+ * documented path. Anything left at {id}.json.tmp is a partial leftover and
+ * cleanup reclaims it.
  */
 final class ResultWriter
 {
     /** @var resource|null */
     private $fh = null;
     private string $path = '';
+    private string $tmpPath = '';
     private bool $firstRow = true;
     private bool $sanitized = false;
 
     public function open(string $absolutePath): void
     {
         $this->discard(); // defensive: never leave a half-open previous file
-        $fh = @fopen($absolutePath, 'wb');
+        $tmpPath = $absolutePath . '.tmp';
+        $fh = @fopen($tmpPath, 'wb');
         if ($fh === false) {
-            throw new \RuntimeException("Cannot open result file for writing: {$absolutePath}");
+            throw new \RuntimeException("Cannot open result file for writing: {$tmpPath}");
         }
         $this->fh = $fh;
         $this->path = $absolutePath;
+        $this->tmpPath = $tmpPath;
         $this->firstRow = true;
         $this->sanitized = false;
         $this->write('{"data":[');
@@ -47,7 +52,10 @@ final class ResultWriter
     }
 
     /**
-     * Close the data array and append the meta block.
+     * Close the data array, append the meta block, and publish the file by
+     * renaming the temp file over the final name (publish-then-not-visible
+     * until complete). Throws when the rename fails; the caller then
+     * discards() the temp leftover.
      * @param array<string,mixed> $meta
      */
     public function finish(array $meta): void
@@ -66,18 +74,23 @@ final class ResultWriter
         $this->write('],"meta":' . $metaJson . '}');
         fclose($this->fh);
         $this->fh = null;
+        if (!@rename($this->tmpPath, $this->path)) {
+            throw new \RuntimeException("Cannot publish result file: {$this->path}");
+        }
+        $this->tmpPath = '';
     }
 
-    /** Close the file if open; unlink the partial file when it exists. */
+    /** Close the file if open; unlink the partial temp file when it exists. */
     public function discard(): void
     {
         if ($this->fh !== null) {
             @fclose($this->fh);
             $this->fh = null;
         }
-        if ($this->path !== '' && is_file($this->path)) {
-            @unlink($this->path);
+        if ($this->tmpPath !== '' && is_file($this->tmpPath)) {
+            @unlink($this->tmpPath);
         }
+        $this->tmpPath = '';
         $this->path = '';
     }
 

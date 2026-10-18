@@ -140,6 +140,10 @@ final class Worker
         $n = 0;
         foreach ($rows as $row) {
             self::deleteResultFile((string)($row['result_path'] ?? ''));
+            // The interrupted pass may also have left the published file
+            // (crashed right after rename) or the in-flight temp partial.
+            Cleanup::safeUnlink("results/{$row['id']}.json");
+            Cleanup::safeUnlink("results/{$row['id']}.json.tmp");
             $n += $db->execute(
                 "UPDATE executions
                  SET status = 'failed', finished_at = ?, error_message = ?, result_path = NULL
@@ -293,7 +297,9 @@ final class Worker
     private static function markFailed(int $execId, string $message): void
     {
         Db::instance()->execute(
-            "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
+            "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?,
+                    result_path = NULL, result_size_bytes = NULL
+             WHERE id = ?",
             [Time::now(), $message, $execId]
         );
     }

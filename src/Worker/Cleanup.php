@@ -40,7 +40,7 @@ final class Cleanup
 
     // ------------------------------------------------------------------
 
-    /** 1) Expired ready executions: remove file, mark expired, log. */
+    /** 1) Expired ready executions: remove file, mark expired, clear the path. */
     private static function expireReady(): int
     {
         $db = Db::instance();
@@ -55,7 +55,8 @@ final class Cleanup
             // logic), instead of streaming a file that vanishes mid-read.
             $removed = self::safeUnlink((string)$row['result_path']);
             $n += $db->execute(
-                "UPDATE executions SET status = 'expired' WHERE id = ? AND status = 'ready'",
+                "UPDATE executions SET status = 'expired', result_path = NULL, result_size_bytes = NULL
+                 WHERE id = ? AND status = 'ready'",
                 [$row['id']]
             );
             Logger::event('expired', null, (int)$row['request_id'], null, (int)$row['id'], null,
@@ -65,22 +66,33 @@ final class Cleanup
         return $n;
     }
 
-    /** 2) Failed executions that reference a file: clear the dangling path. */
+    /**
+     * 2) Executions that still reference a result file but can never serve it
+     *    (failed, or the inconsistent scheduled/running-with-a-path leftover):
+     *    delete the file AND its in-flight .tmp sibling, clear the path.
+     *    A row only ever gets result_path once ready, so a matched
+     *    scheduled/running row is already inconsistent — and an actively
+     *    writing execution has result_path IS NULL, so it can never match.
+     */
     private static function clearFailedFiles(): int
     {
         $db = Db::instance();
         $rows = $db->rows(
             "SELECT id, result_path FROM executions
-             WHERE status = 'failed' AND result_path IS NOT NULL"
+             WHERE status IN ('scheduled', 'running', 'failed') AND result_path IS NOT NULL"
         );
         $n = 0;
         foreach ($rows as $row) {
-            self::safeUnlink((string)$row['result_path']);
+            if (self::safeUnlink((string)$row['result_path'])) {
+                $n++;
+            }
+            if (self::safeUnlink("results/{$row['id']}.json.tmp")) {
+                $n++;
+            }
             $db->execute(
                 'UPDATE executions SET result_path = NULL, result_size_bytes = NULL WHERE id = ?',
                 [$row['id']]
             );
-            $n++;
         }
         return $n;
     }
@@ -107,6 +119,8 @@ final class Cleanup
                  WHERE id = ? AND status = 'running'",
                 [Time::now(), 'The instantaneous query was interrupted and never finished. Submit the request again.', $row['id']]
             );
+            self::safeUnlink("results/{$row['id']}.json");
+            self::safeUnlink("results/{$row['id']}.json.tmp");
             Logger::event('failed', null, (int)$row['request_id'], null, (int)$row['id'], null, null, null,
                 'cleanup recovered a stale instant execution (interrupted web process)');
         }
@@ -120,16 +134,17 @@ final class Cleanup
         $n = 0;
         foreach (['results', 'cache'] as $sub) {
             $files = glob(Filesystem::absoluteFromRelative($sub . '/*.json')) ?: [];
-            foreach ($files as $absolute) {
+            $tmps = glob(Filesystem::absoluteFromRelative($sub . '/*.json.tmp')) ?: [];
+            foreach (array_merge($files, $tmps) as $absolute) {
                 // Only the documented per-execution layout, ids are numeric.
-                if (preg_match('#/([0-9]+)\.json$#', $absolute, $m) !== 1) {
+                if (preg_match('#/([0-9]+)\.json(\.tmp)?$#', $absolute, $m) !== 1) {
                     continue;
                 }
                 $count = (int)$db->value('SELECT COUNT(*) FROM executions WHERE id = ?', [(int)$m[1]]);
                 if ($count !== 0) {
                     continue; // still referenced
                 }
-                $relative = $sub . '/' . $m[1] . '.json';
+                $relative = $sub . '/' . $m[1] . ($m[2] ?? '');
                 if (self::safeUnlink($relative)) {
                     $n++;
                     Logger::event('expired', null, null, null, (int)$m[1], null, null, null,
@@ -166,13 +181,14 @@ final class Cleanup
 
     /**
      * Unlink a file stored under storage/. The path MUST match the known
-     * layout (results/name.json or cache/name.json) and must resolve INSIDE
-     * the storage directory; anything else is refused without touching disk.
+     * layout (results/name.json or cache/name.json, optionally the in-flight
+     * .tmp sibling) and must resolve INSIDE the storage directory; anything
+     * else is refused without touching disk.
      */
     public static function safeUnlink(string $relative): bool
     {
         if ($relative === ''
-            || preg_match('#^(results|cache)/[A-Za-z0-9._-]+\.json$#i', $relative) !== 1) {
+            || preg_match('#^(results|cache)/[A-Za-z0-9._-]+\.json(\.tmp)?$#i', $relative) !== 1) {
             return false;
         }
         $absolute = Filesystem::absoluteFromRelative($relative);
