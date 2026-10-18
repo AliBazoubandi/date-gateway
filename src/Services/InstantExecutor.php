@@ -242,9 +242,16 @@ final class InstantExecutor
     /** Replays a cached instant execution (fresh enough; not yet expired). */
     public static function emitFromCache(array $request, int $clientId, string $callId, array $execution, string $ip, bool $asFile = false): void
     {
-        $path = Filesystem::absoluteFromRelative((string)$execution['result_path']);
         $rows = [];
-        $hasFile = is_file($path);
+        $hasFile = false;
+        if ($execution['result_path'] !== null) {
+            try {
+                $path = Filesystem::resultPath((string)$execution['result_path']);
+                $hasFile = is_file($path);
+            } catch (\RuntimeException) {
+                $hasFile = false; // tampered stored path: replay without a file
+            }
+        }
         if ($hasFile) {
             $decoded = json_decode((string)file_get_contents($path), true);
             // Newer executions store the standard {"data":[...],"meta":{...}}

@@ -45,6 +45,28 @@ final class Filesystem
         return self::storageDir() . '/' . ltrim($relativeToStorage, '/\\');
     }
 
+    /**
+     * Resolve a STORED result/cache path (executions.result_path). The value
+     * comes from the database, so it is untrusted input: only the documented
+     * layout results|cache/name.json is accepted, and the resolved path must
+     * stay inside storage/. Throws \RuntimeException on anything else —
+     * callers treat that as "no usable file" (410/502), never as a path.
+     */
+    public static function resultPath(string $relative): string
+    {
+        if (preg_match('#^(results|cache)/[A-Za-z0-9._-]+\.json$#i', $relative) !== 1) {
+            throw new \RuntimeException("Invalid stored result path: '{$relative}'");
+        }
+        $absolute = self::absoluteFromRelative($relative);
+        $base = realpath(self::storageDir());
+        $dir = realpath(dirname($absolute));
+        if ($base === false || $dir === false
+            || !str_starts_with(str_replace('\\', '/', $dir), str_replace('\\', '/', $base) . '/')) {
+            throw new \RuntimeException("Stored result path escapes storage: '{$relative}'");
+        }
+        return $absolute;
+    }
+
     public static function relative(string $absolute): string
     {
         return str_replace('\\', '/', substr($absolute, strlen(self::storageDir()) + 1));

@@ -121,6 +121,12 @@ try {
     Invoke-Suite "links_test" {
         & $PhpExe (Join-Path $PSScriptRoot "links_test.php")
     }
+    Invoke-Suite "filesystem_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "filesystem_test.php")
+    }
+    Invoke-Suite "sqlguard_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "sqlguard_test.php")
+    }
 
     # 3) the four smoke tests.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in

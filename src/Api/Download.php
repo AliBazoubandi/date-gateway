@@ -91,8 +91,15 @@ final class Download
             Errors::gone('This result has expired.');
         }
 
-        $absolute = Filesystem::absoluteFromRelative((string)$exec['result_path']);
-        if ($exec['result_path'] === null || !is_file($absolute)) {
+        $absolute = '';
+        if ($exec['result_path'] !== null) {
+            try {
+                $absolute = Filesystem::resultPath((string)$exec['result_path']);
+            } catch (\RuntimeException) {
+                $absolute = ''; // untrusted/tampered path: treat as missing file below
+            }
+        }
+        if ($absolute === '' || !is_file($absolute)) {
             // Ready but the file vanished (manual cleanup?): treat as gone.
             $db->execute("UPDATE executions SET status = 'expired' WHERE id = ?", [$exec['id']]);
             Errors::gone('This result is no longer available.');
