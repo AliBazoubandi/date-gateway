@@ -112,7 +112,7 @@ final class WebhookDispatcher
             'call_id' => $callId,
             'request_code' => $requestCode,
             'status' => 'ready',
-            'link' => \Api\Links::forCall($callId),
+            'link' => self::callLink($callId), // null when base_url is unconfigured
             'expires_at' => Time::iso((string)$exec['expires_at']),
             'row_count' => (int)($exec['row_count'] ?? 0),
         ]);
@@ -171,6 +171,20 @@ final class WebhookDispatcher
             (int)$exec['id'], null, $durationMs, (int)($exec['row_count'] ?? 0),
             'send #' . $failedCount . ' failed (' . $detail . '); retry in ' . max(1, $step) . ' min');
         return 'failed';
+    }
+
+    /**
+     * Per-call download link for the payload. Best-effort: when the link
+     * cannot be built (e.g. GATEWAY_BASE_URL unset), delivery must still
+     * happen with link=null — cli/check.php flags the configuration.
+     */
+    private static function callLink(string $callId): ?string
+    {
+        try {
+            return \Api\Links::forCall($callId);
+        } catch (\RuntimeException) {
+            return null;
+        }
     }
 
     /**

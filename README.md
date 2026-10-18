@@ -275,6 +275,12 @@ Payload:
 }
 ```
 
+`link` is the absolute download URL and is `null` when the gateway cannot
+build one (no `GATEWAY_BASE_URL` configured, or the call predates download
+tokens). Receivers must tolerate a missing link and poll
+`GET /api/v1/calls/{call_id}` instead — `cli/check.php` reports the missing
+base URL as a FAIL so the gap is visible to the operator.
+
 Receiver-side verification (PHP example):
 
 ```php
@@ -359,17 +365,23 @@ no longer verify.
 
 ## 9. Tests
 
-Run from the project root (needs a live MariaDB `data_gateway`; the smoke
-tests create and remove their own fixtures marked `smoke` / `smk.` / `swk.` /
-`whk.` — deletions are scoped to those markers, so real clients, permission
-grants, calls, logs and audit rows survive every run):
+**Safe path — `tests\run_all.ps1`** (PowerShell, no elevation needed): builds
+a throwaway environment itself — random `data_gateway_test_<random>` schema
+(imported from `sql\schema.sql`), throwaway `storage\test-<random>` dir — and
+runs everything against it: `php -l` on every file, `smoke_db`,
+`encryption_test --db`, `links_test`, then the four end-to-end smokes
+(`api_smoke`, `admin_smoke`, `worker_smoke`, `webhook_smoke`) plus
+`stream_memory_test`, each refusing to run unless `GATEWAY_TEST_MODE=1` and
+the metadata DB name contains `_test` (they `exit(2)` otherwise). The DB and
+storage dir are always dropped in a `finally` block, and every fixture is
+run-scoped, so a green run touches nothing outside its sandbox:
 
 ```
-php tests\api_smoke.php      REM full API surface over php -S (35 checks)
-php tests\worker_smoke.php   REM real CLI worker + cleanup passes
-php tests\webhook_smoke.php  REM real webhook dispatch against a local receiver
-php tests\admin_smoke.php    REM admin panel flows over php -S with curl
+powershell -ExecutionPolicy Bypass -File tests\run_all.ps1
 ```
+
+Running the smoke scripts **directly** against a real `data_gateway` is no
+longer supported — the guards above refuse it on purpose.
 
 ## 10. Production go-live checklist
 
@@ -385,9 +397,12 @@ php tests\admin_smoke.php    REM admin panel flows over php -S with curl
    ever returns the file contents, the DocumentRoot or `.htaccess` is wrong;
    fix before going live.
 3. **Set `GATEWAY_BASE_URL`** in `config/.env` to the real public URL
-   (e.g. `https://gw.internal`). Never serve download links built from the
-   incoming `Host` header in production — `cli/check.php` warns when it is
-   empty.
+   (e.g. `https://gw.internal`). It must be a valid URL and use `https` in
+   production — `Links::base()` fails fast (and `cli/check.php` reports
+   FAIL) while it is empty or non-https, instead of silently building
+   download links from the incoming `Host` header (a cache-poisoning /
+   phishing risk). Only with `GATEWAY_DEBUG=1` may it stay empty (links
+   then fall back to the Host header, for development machines).
 4. **HTTPS/TLS: enabled (decided).** This deployment serves over TLS. The
    session cookie `secure` flag and the download-link scheme auto-detect from
    `HTTPS`/the base URL scheme, so once Apache terminates TLS the app sets
@@ -404,6 +419,6 @@ php tests\admin_smoke.php    REM admin panel flows over php -S with curl
    running whether a user is logged on or not — exactly what a server wants.
    Each task carries a hard time limit (worker 60 / cleanup 30 / webhooks 15
    minutes); re-run the script to apply updated limits to existing tasks.
-6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (the
-   empty-`base_url` line is a WARN, not a FAIL) **and** all four smoke tests
-   pass.
+6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
+   includes a set, valid, https `GATEWAY_BASE_URL` — the check FAILS while
+   it is missing) **and** all four smoke tests pass.

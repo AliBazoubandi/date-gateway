@@ -31,8 +31,19 @@ try {
 $ok('Time zone is Asia/Tehran', date_default_timezone_get() === 'Asia/Tehran', date_default_timezone_get());
 echo '     now = ', now_str(), '  (ISO: ', iso8601(now_str()) ?? '-', ')', PHP_EOL;
 
-if (trim((string)Core\Config::get('app.base_url', '')) === '') {
-    $warn('app.base_url is empty', 'links are built from the incoming Host header; set GATEWAY_BASE_URL in config/.env for production');
+$baseUrl = trim((string)Core\Config::get('app.base_url', ''));
+if ($baseUrl === '') {
+    $ok('app.base_url is set (download/webhook links need it)', false,
+        'set GATEWAY_BASE_URL=https://<your-host> in config/.env');
+} else {
+    $valid = filter_var($baseUrl, FILTER_VALIDATE_URL) !== false;
+    $ok('app.base_url is a valid URL', $valid, $valid ? $baseUrl : "'{$baseUrl}' is not a valid URL");
+    if ($valid) {
+        $scheme = strtolower((string)parse_url($baseUrl, PHP_URL_SCHEME));
+        $debug = (bool)Core\Config::get('app.debug', false);
+        $ok('app.base_url uses https', $scheme === 'https' || $debug,
+            $scheme === 'https' ? '' : "scheme is '{$scheme}'" . ($debug ? ' (allowed: GATEWAY_DEBUG=1)' : ''));
+    }
 }
 
 foreach (['mysqli' => 'metadata DB driver', 'openssl' => 'AES-256-GCM', 'curl' => 'webhooks'] as $ext => $why) {
