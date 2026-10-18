@@ -120,8 +120,16 @@ XAMPP at `C:\xampp`.
 
 ## 3. Scheduled tasks (Windows Task Scheduler)
 
-The worker, cleanup, and webhook dispatcher are plain CLI scripts. Register
-them once from an elevated prompt (adjust paths):
+The worker, cleanup, and webhook dispatcher are plain CLI scripts. The
+easiest way to register all three is the bundled PowerShell script (run from
+an elevated prompt; it derives the project root from its own location and
+takes the PHP path as a parameter):
+
+```
+powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1 -PhpExe "C:\xampp\php\php.exe"
+```
+
+Or register them by hand (adjust paths):
 
 ```
 schtasks /Create /F /TN "DataGateway worker"  /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\worker.php\""
@@ -132,7 +140,9 @@ schtasks /Create /F /TN "DataGateway webhooks" /SC MINUTE /MO 1 /TR "\"C:\xampp\
 - **worker** (every 1 min) — claims due delayed executions, runs them on
   the target DB, writes result files, then drains due webhook deliveries.
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
-  removes failed leftovers and stale instant state.
+  removes failed leftovers and stale instant state. With
+  `cleanup.log_retention_days > 0` it also prunes `request_logs` older than
+  that many days (batched); `0` (default) keeps the log forever.
 - **webhooks** (optional, every 1 min) — retries webhook deliveries between
   worker passes so clients get notified faster than once a minute. The
   worker already drains the queue at the end of each pass; this task just
@@ -182,6 +192,16 @@ If the request has `instant_cache_seconds > 0`, an identical re-submit
 within the window replays the cached copy instantly (`instant_cache_hit`
 logged). If the target connection is at its concurrency cap the call gets
 `429 rate_limited` + `Retry-After` instead of queuing.
+
+### Optional per-client submit throttle
+
+`limits.client_submit_max` (default `0` = off) caps how many submissions one
+client may start per `limits.client_submit_window_seconds` (default `60`).
+It counts that client's own `submitted`/`shared` log rows in a sliding
+window; once the cap is reached, further submits return `429 rate_limited` +
+`Retry-After` and are logged as `rate_limited`. This is independent of the
+per-connection concurrency cap above. Enable it by setting
+`client_submit_max` to a positive number in `config/config.php`.
 
 ## 5. Webhooks
 
@@ -279,3 +299,34 @@ php tests\worker_smoke.php   REM real CLI worker + cleanup passes
 php tests\webhook_smoke.php  REM real webhook dispatch against a local receiver
 php tests\admin_smoke.php    REM admin panel flows over php -S with curl
 ```
+
+## 9. Production go-live checklist
+
+1. **Metadata DB user.** Do not run as `root`. Create the dedicated user with
+   `sql/create_user.sql` (SELECT/INSERT/UPDATE/DELETE/LOCK TABLES on
+   `data_gateway` only) and set its password as `GATEWAY_DB_PASSWORD` in
+   `config/.env`. Give each target connection its own account too, and make
+   those accounts **read-only** on the target databases.
+2. **Apache DocumentRoot MUST be `public/`.** Nothing above `public/` may be
+   web-reachable. Keep the root `.htaccess` safety net active by allowing
+   overrides in the vhost (`AllowOverride All`). Verify from outside:
+   `curl -i http://<host>/config/.env` must return **403 or 404** — if it
+   ever returns the file contents, the DocumentRoot or `.htaccess` is wrong;
+   fix before going live.
+3. **Set `GATEWAY_BASE_URL`** in `config/.env` to the real public URL
+   (e.g. `https://gw.internal`). Never serve download links built from the
+   incoming `Host` header in production — `cli/check.php` warns when it is
+   empty.
+4. **Decide HTTPS on or off.** The session cookie `secure` flag auto-detects
+   from `HTTPS`/the base URL scheme. TLS is recommended even with a
+   self-signed cert. XAMPP quick setup: run `C:\xampp\apache\makecert.bat` to
+   generate a self-signed cert, enable `mod_ssl`/`mod_socache_shmcb` in
+   `httpd.conf`, uncomment the `LoadModule ssl_module` + `Include
+   conf/extra/httpd-ssl.conf` lines, then restart Apache and browse
+   `https://localhost` to accept the warning.
+5. **Register the scheduled tasks:** run `deployment\register_tasks.ps1`
+   (§3). For a headless server, register them to run whether the user is
+   logged on or not, or move them to a Windows Service.
+6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (the
+   empty-`base_url` line is a WARN, not a FAIL) **and** all four smoke tests
+   pass.
