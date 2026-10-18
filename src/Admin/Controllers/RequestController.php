@@ -232,6 +232,14 @@ final class RequestController
         }
         if (trim($in['sql_text']) === '') {
             $e[] = 'SQL text is required.';
+        } else {
+            // Save-time gate so a non-read-only statement is rejected before
+            // it can ever be scheduled (QueryRunner re-checks at execution).
+            try {
+                \Services\SqlGuard::assertReadOnly($in['sql_text']);
+            } catch (\RuntimeException $ex) {
+                $e[] = 'SQL must be a single read-only SELECT statement. ' . $ex->getMessage();
+            }
         }
         $conn = $db->one('SELECT id FROM connections WHERE id = ?', [$in['connection_id']]);
         if ($conn === null) {

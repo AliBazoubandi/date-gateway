@@ -31,6 +31,9 @@ final class QueryRunner
             'duration_ms' => 0, 'error' => '', 'timed_out' => false];
         $driver = null;
         try {
+            // Every execution path funnels through here, so this is the
+            // enforcement point for the read-only guarantee (P1-6).
+            SqlGuard::assertReadOnly($sql);
             $driver = ConnectionFactory::fromConnectionRow($connectionRow, $timeoutSeconds);
             $driver->setQueryTimeout($timeoutSeconds);
             $stmt = $driver->query($sql);
