@@ -24,10 +24,12 @@ return [
     // Production: create the dedicated user with sql/create_user.sql (SELECT,
     // INSERT, UPDATE, DELETE, LOCK TABLES on data_gateway only) and set its
     // password as GATEWAY_DB_PASSWORD in config/.env. Do NOT ship with root.
+    // Every part can be overridden via the environment (tests point the
+    // gateway at a throwaway DB with GATEWAY_DB_NAME):
     'metadata_db' => [
-        'host' => '127.0.0.1',
-        'port' => 3306,
-        'database' => 'data_gateway',
+        'host' => (string)\Core\Env::get('GATEWAY_DB_HOST', '127.0.0.1'),
+        'port' => (int)\Core\Env::get('GATEWAY_DB_PORT', '3306'),
+        'database' => (string)\Core\Env::get('GATEWAY_DB_NAME', 'data_gateway'),
         'user' => (string)\Core\Env::get('GATEWAY_DB_USER', 'gateway'),
         'password' => (string)\Core\Env::get('GATEWAY_DB_PASSWORD', ''),
     ],
@@ -44,7 +46,9 @@ return [
     'storage' => [
         // Absolute path to the storage area (result JSON files + instant cache).
         // Default: <project>/storage  - outside the web root when DocumentRoot=public/
-        'dir' => null,          // null = <project root>/storage
+        // Override with GATEWAY_STORAGE_DIR (the test runner points it at a
+        // throwaway directory so a run can never touch real result files).
+        'dir' => \Core\Env::get('GATEWAY_STORAGE_DIR'),   // null = <project root>/storage
         // Sub-paths, relative to dir:
         'results_subdir' => 'results',
         'cache_subdir' => 'cache',

@@ -58,10 +58,12 @@ XAMPP at `C:\xampp`.
 1. **Create the metadata database**
 
    ```
-   C:\xampp\mysql\bin\mysql.exe -u root -p < sql\schema.sql
+   C:\xampp\mysql\bin\mysql.exe -u root -p < sql\create_database.sql
+   C:\xampp\mysql\bin\mysql.exe -u root -p data_gateway < sql\schema.sql
    ```
 
-   (or paste `sql/schema.sql` into phpMyAdmin's SQL tab).
+   (the first file creates the `data_gateway` database, the second loads the
+   tables; or paste both into phpMyAdmin's SQL tab, in this order).
 
 2. **Configure** `config/config.php`
 

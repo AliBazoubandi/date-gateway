@@ -1,18 +1,14 @@
 -- ============================================================================
--- Data Gateway - metadata database schema
+-- Data Gateway - metadata database schema (tables + foreign keys only).
 -- Target: MySQL 5.7+ / MariaDB 10.4+ (XAMPP ships MariaDB).
--- Import with an administrative user, e.g.:
---   mysql -u root -p < sql\schema.sql
--- (or paste into phpMyAdmin's SQL tab)
+-- The database itself is created by sql\create_database.sql; import this file
+-- INTO that database, e.g.:
+--   mysql -u root -p data_gateway < sql\schema.sql
+-- (or paste into phpMyAdmin's SQL tab with data_gateway selected)
 -- All timestamps are stored as DATETIME in Tehran local time (+03:30, no DST).
 -- ============================================================================
 
 SET NAMES utf8mb4;
-
-CREATE DATABASE IF NOT EXISTS `data_gateway`
-  CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-
-USE `data_gateway`;
 
 -- ---------------------------------------------------------------------------
 -- Admin users (single role: every active admin sees everything)
