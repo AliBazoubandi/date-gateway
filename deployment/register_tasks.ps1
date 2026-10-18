@@ -62,11 +62,14 @@ if ($RunAs -eq 'System') {
     }
 }
 
-# --- Tasks: script name, repetition minutes, human label --------------------
+# --- Tasks: script name, repetition minutes, human label, hard time cap ------
+# TimeLimitMin is a HARD kill switch: if a run wedges (DB hang, stuck socket),
+# Task Scheduler force-terminates it. The next scheduled fire simply claims
+# the work again, so an aggressive cap is safe — an unlimited run is not.
 $tasks = @(
-    @{ Script = "worker.php";   Minutes = 1; Label = "delayed executions" },
-    @{ Script = "cleanup.php";  Minutes = 5; Label = "expiry + recovery" },
-    @{ Script = "webhooks.php"; Minutes = 1; Label = "webhook delivery" }
+    @{ Script = "worker.php";   Minutes = 1; Label = "delayed executions"; TimeLimitMin = 60 },
+    @{ Script = "cleanup.php";  Minutes = 5; Label = "expiry + recovery";  TimeLimitMin = 30 },
+    @{ Script = "webhooks.php"; Minutes = 1; Label = "webhook delivery";   TimeLimitMin = 15 }
 )
 
 # --- Hidden launcher for the CurrentUser mode -------------------------------
@@ -100,8 +103,9 @@ foreach ($t in $tasks) {
         -RepetitionInterval (New-TimeSpan -Minutes $t.Minutes) `
         -RepetitionDuration (New-TimeSpan -Days 3650)
 
+    # Hard cap per run — see $tasks table above for why these values.
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes ([Math]::Max(10, $t.Minutes + 5))) `
+        -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes $t.TimeLimitMin) `
         -MultipleInstances IgnoreNew
 
     if ($RunAs -eq 'System') {

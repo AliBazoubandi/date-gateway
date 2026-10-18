@@ -167,6 +167,13 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
 
 Delete a task with `schtasks /Delete /TN "DataGateway-webhooks" /F`.
 
+Every task is registered with a **hard time limit** — worker 60 min,
+cleanup 30 min, webhooks 15 min. If a run wedges (hung DB connection,
+stuck socket), Task Scheduler force-terminates it instead of letting an
+orphaned PHP process hold locks forever; the next scheduled fire simply
+claims the work again. Re-running `register_tasks.ps1` re-registers the
+tasks, so it also applies new limits to an existing installation.
+
 ## 4. API
 
 All endpoints live under `/api/v1` and authenticate with
@@ -395,6 +402,8 @@ php tests\admin_smoke.php    REM admin panel flows over php -S with curl
    an elevated PowerShell (§3). The default `-RunAs System` registration is
    invisible (no console flash when tasks fire every minute) and keeps
    running whether a user is logged on or not — exactly what a server wants.
+   Each task carries a hard time limit (worker 60 / cleanup 30 / webhooks 15
+   minutes); re-run the script to apply updated limits to existing tasks.
 6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (the
    empty-`base_url` line is a WARN, not a FAIL) **and** all four smoke tests
    pass.
