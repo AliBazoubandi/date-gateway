@@ -56,9 +56,9 @@ $storageDir = Join-Path $projectRoot "storage\test-$suffix"
 & $MysqlExe @mysqlArgs -e "CREATE DATABASE IF NOT EXISTS ``$testDb`` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 if ($LASTEXITCODE -ne 0) { throw "cannot create test database '$testDb' (mysql root access works?)" }
 # GRANT ON the throwaway DB only. The grants vanish with the DB on drop.
-foreach ($host in @("localhost", "127.0.0.1")) {
-    & $MysqlExe @mysqlArgs -e "GRANT ALL PRIVILEGES ON ``$testDb``.* TO '$dbUser'@'$host';"
-    if ($LASTEXITCODE -ne 0) { Write-Host "WARN: could not grant on $testDb to '$dbUser'@'$host' ($LASTEXITCODE)" }
+foreach ($dbHost in @("localhost", "127.0.0.1")) {
+    & $MysqlExe @mysqlArgs -e "GRANT ALL PRIVILEGES ON ``$testDb``.* TO '$dbUser'@'$dbHost';"
+    if ($LASTEXITCODE -ne 0) { Write-Host "WARN: could not grant on $testDb to '$dbUser'@'$dbHost' ($LASTEXITCODE)" }
 }
 Get-Content -Raw (Join-Path $projectRoot "sql\schema.sql") | & $MysqlExe @mysqlArgs --default-character-set=utf8mb4 $testDb
 if ($LASTEXITCODE -ne 0) { throw "cannot import sql\schema.sql into '$testDb'" }
@@ -101,15 +101,14 @@ function Invoke-Suite([string]$name, [scriptblock]$block) {
 try {
     # 1) syntax-check every PHP file except vendor/
     Invoke-Suite "php -l (all files)" {
-        & $PhpExe -r "`$fail = 0;
-        `$it = new RecursiveIteratorIterator(new RecursiveDirectoryIterator('$projectRoot', FilesystemIterator::SKIP_DOTS));
-        foreach (`$it as `$f) {
-            if (`$f->isFile() && `$f->getExtension() === 'php' && strpos(`$f->getPathname(), DIRECTORY_SEPARATOR . 'vendor' . DIRECTORY_SEPARATOR) === false) {
-                exec('\"$PhpExe\" -l ' . escapeshellarg(`$f->getPathname()) . ' 2>&1', `$out, `$code);
-                if (`$code !== 0) { echo implode(PHP_EOL, `$out), PHP_EOL; `$fail = 1; }
+        $bad = 0
+        Get-ChildItem -Path $projectRoot -Recurse -Filter *.php |
+            Where-Object { $_.FullName -notmatch '\\vendor\\' } |
+            ForEach-Object {
+                $out = & $PhpExe -l $_.FullName 2>&1
+                if ($LASTEXITCODE -ne 0) { $bad = 1; Write-Host $out }
             }
-        }
-        exit(`$fail);"
+        & cmd /c "exit $bad"
     }
 
     # 2) unit-style tests
@@ -120,15 +119,15 @@ try {
         & $PhpExe (Join-Path $PSScriptRoot "encryption_test.php") --db
     }
 
-    # 3) the four smoke tests (+ audit_spot needs admin_smoke's audit rows)
+    # 3) the four smoke tests.
+    # (audit_spot is a manual spot-check: it needs audit rows to survive in
+    #  the DB, but the smokes now clean up after themselves - run it by hand
+    #  against a DB that has recent admin activity.)
     Invoke-Suite "api_smoke" {
         & $PhpExe (Join-Path $PSScriptRoot "api_smoke.php")
     }
     Invoke-Suite "admin_smoke" {
         & $PhpExe (Join-Path $PSScriptRoot "admin_smoke.php")
-    }
-    Invoke-Suite "audit_spot" {
-        & $PhpExe (Join-Path $PSScriptRoot "audit_spot.php")
     }
     Invoke-Suite "worker_smoke" {
         & $PhpExe (Join-Path $PSScriptRoot "worker_smoke.php")

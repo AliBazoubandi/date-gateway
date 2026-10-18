@@ -179,11 +179,11 @@ $getErr = static function (string $body): string {
 // ----------------- auth failure paths -----------------
 [$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed);
 $check('no auth -> 401', $code === 401 && $getErr($body) === 'unauthorized');
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed', 'gw_totally_invalid_key_1234567890abc');
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, 'gw_totally_invalid_key_1234567890abc');
 $check('invalid key -> 401', $code === 401 && $getErr($body) === 'unauthorized');
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed', $C['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, $C['key']);
 $check('inactive client -> 403', $code === 403 && $getErr($body) === 'forbidden');
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed_deny', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDeny, $A['key']);
 $check('missing permission -> 403', $code === 403 && $getErr($body) === 'forbidden');
 $check('missing permission denied log',
     (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND event = 'denied'", [$reqDeny]) >= 1);
@@ -195,7 +195,7 @@ $check('code with illegal chars -> 404', $code === 404 && $getErr($body) === 'no
 $check('GET on submit -> 405', $code === 405 && $getErr($body) === 'method_not_allowed');
 
 // ----------------- delayed flow + rule 1 -----------------
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, $A['key']);
 $payload = json_decode($body, true);
 $check('first submit -> 200 scheduled', $code === 200 && ($payload['status'] ?? '') === 'scheduled'
     && isset($payload['call_id']) && $payload['link'] === null && $payload['expires_at'] === null, $body);
@@ -207,7 +207,7 @@ $callRow = $db->one('SELECT * FROM calls WHERE id = ?', [$call1]);
 $check('call owns execution, not shared', $callRow !== null
     && (int)$callRow['execution_id'] === (int)$execRow['id'] && (int)$callRow['was_shared'] === 0);
 
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, $A['key']);
 $payload2 = json_decode($body, true);
 $check('second submit attaches (rule 1)', $code === 200 && ($payload2['status'] ?? '') === 'scheduled'
     && ($payload2['call_id'] ?? '') !== $call1);
@@ -229,6 +229,7 @@ $check('status w/o key -> 401', $code === 401);
 $rows = [['ping' => 1, 'pad' => 'x'], ['ping' => 2, 'pad' => 'y']];
 $json = json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 $fileName = bin2hex(random_bytes(8)) . '.json';
+\Core\Filesystem::prepare();
 file_put_contents(\Core\Filesystem::resultsDir() . '/' . $fileName, $json);
 $extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $fileName;
 $token = \Core\Str::hex(24);
@@ -242,7 +243,7 @@ $readyExecId = $db->insertId();
 
 $db->execute('UPDATE executions SET status = ? WHERE request_id = ? AND status IN (?, ?)',
     ['expired', $reqDelayed, 'scheduled', 'running']); // drain so rule 2 can win its turn
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, $A['key']);
 $payload3 = json_decode($body, true);
 $check('rule 2 -> link returned now', $code === 200 && ($payload3['status'] ?? '') === 'ready'
     && is_string($payload3['link'] ?? null) && str_contains((string)$payload3['link'], '/api/v1/results/')
