@@ -19,8 +19,11 @@ Two response modes:
 - **Delayed** — a background worker runs the query on schedule and the
   client polls `/api/v1/calls/{id}` or receives a webhook when the result
   file is ready.
-- **Instant** — the query runs synchronously during the submit call and the
-  rows come back in the JSON response (optionally cached for N seconds).
+- **Instant** — the query runs synchronously during the submit call; the
+  rows come back inline in the JSON response AND the run is stored as a
+  downloadable result file exactly like a delayed execution, so the
+  response also carries a download `link` (and `?download=1` skips the
+  inline copy and returns the file directly instead).
 
 ---
 
@@ -121,35 +124,46 @@ XAMPP at `C:\xampp`.
 ## 3. Scheduled tasks (Windows Task Scheduler)
 
 The worker, cleanup, and webhook dispatcher are plain CLI scripts. The
-easiest way to register all three is the bundled PowerShell script (run from
-an elevated prompt; it derives the project root from its own location and
-takes the PHP path as a parameter):
+easiest way to register all three is the bundled PowerShell script; it
+derives the project root from its own location and takes the PHP path as a
+parameter. Run it from an **elevated** PowerShell:
 
 ```
 powershell -ExecutionPolicy Bypass -File deployment\register_tasks.ps1 -PhpExe "C:\xampp\php\php.exe"
 ```
 
+The tasks run as `NT AUTHORITY\SYSTEM` by default (`-RunAs System`): when a
+task fires every minute **no console window appears** (SYSTEM runs in
+session 0, which has no visible desktop), and the tasks keep running
+whether a user is logged on or not. The alternative is `-RunAs
+CurrentUser`, which registers the tasks under the current account but fires
+them via `deployment\run_hidden.vbs` (wscript, GUI subsystem = silent window
+style 0) so no window flashes either — however it only works while that user
+is logged on.
+
 Or register them by hand (adjust paths):
 
 ```
-schtasks /Create /F /TN "DataGateway worker"  /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\worker.php\""
-schtasks /Create /F /TN "DataGateway cleanup" /SC MINUTE /MO 5 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\cleanup.php\""
-schtasks /Create /F /TN "DataGateway webhooks" /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\webhooks.php\""
+schtasks /Create /F /RU SYSTEM /TN "DataGateway-worker"   /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\worker.php\""
+schtasks /Create /F /RU SYSTEM /TN "DataGateway-cleanup"  /SC MINUTE /MO 5 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\cleanup.php\""
+schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\webhooks.php\""
 ```
 
 - **worker** (every 1 min) — claims due delayed executions, runs them on
   the target DB, writes result files, then drains due webhook deliveries.
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
-  removes failed leftovers and stale instant state. With
-  `cleanup.log_retention_days > 0` it also prunes `request_logs` older than
-  that many days (batched); `0` (default) keeps the log forever.
+  removes failed leftovers, recovers instant executions that died mid-query
+  in the web server, and deletes orphaned result/cache files whose
+  `executions` row no longer exists. With `cleanup.log_retention_days > 0`
+  it also prunes `request_logs` older than that many days (batched); `0`
+  (default) keeps the log forever.
 - **webhooks** (optional, every 1 min) — retries webhook deliveries between
   worker passes so clients get notified faster than once a minute. The
   worker already drains the queue at the end of each pass; this task just
   closes the gap. Delivery is fenced with `GET_LOCK`, so running worker and
   webhooks concurrently is safe.
 
-Delete a task with `schtasks /Delete /TN "DataGateway webhooks" /F`.
+Delete a task with `schtasks /Delete /TN "DataGateway-webhooks" /F`.
 
 ## 4. API
 
@@ -169,7 +183,8 @@ curl -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/calls/CALL_
 -> 200 {"call_id":"...","request_code":"sales.daily","status":"ready",
         "row_count":123,"ready_at":"...","expires_at":"...","link":"http://gw.internal/api/v1/results/TOKEN"}
 
-:: download — stream the result file (until expires_at)
+:: download — stream the result file (until expires_at). Downloads carry
+:: Content-Disposition: attachment; filename="result-{code}-{execution_id}.json"
 curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 ```
 
@@ -273,7 +288,26 @@ Note on links: each call's download token is stored twice — a SHA-256 hash
 worker can rebuild the webhook `link` even for calls that attached to a
 ready execution). Neither form exposes the raw token at rest.
 
-## 6. Cache rules (delayed mode)
+## 6. Character encoding (non-ASCII data)
+
+- SQL Server connections are opened with `'CharacterSet' => 'UTF-8'` forced
+  (`src/Db/SqlServerDriver.php`). Without it the driver converts VARCHAR
+  data and column aliases through the client codepage, which turns text
+  like Persian into `?` characters plus invalid bytes — corrupting both the
+  downloadable result files and the inline responses.
+- The JSON layer assumes nothing about data quality:
+  `Core\Str::json()` and `json_out()` always encode with
+  `JSON_INVALID_UTF8_SUBSTITUTE`, so a malformed value can never fail an
+  encoding, blank out a response, or produce a 500 — it is emitted with
+  replacement characters instead.
+- The result-file writer (`src/Worker/ResultWriter.php`) goes further for
+  file mode: it repairs invalid UTF-8 in values AND in column-name keys
+  (mojibake'd SQL aliases become repairable or positional `col_N` names)
+  before falling back to substitution. `meta.encoding_sanitized` in a
+  result file tells you a repair happened; with the SQL Server charset fix
+  it should never appear again.
+
+## 7. Cache rules (delayed mode)
 
 1. A submit while an execution for the request is `scheduled`/`running`
    attaches to it — no duplicate run; the new call gets its own token.
@@ -283,7 +317,7 @@ ready execution). Neither form exposes the raw token at rest.
 
 Instant results follow the same spirit via the time-windowed cache.
 
-## 7. Upgrading an existing installation
+## 8. Upgrading an existing installation
 
 If the DB was created before the webhook feature, add the encrypted-token
 column once (also documented at the end of `sql/schema.sql`):
@@ -299,6 +333,13 @@ Old calls keep `token_enc = NULL`: they simply get no `link` in webhook
 payloads; everything else keeps working. `php cli\check.php` flags the
 missing column if you forget.
 
+**Instant result files (2026-10):** no schema change is needed — instant
+runs reuse the existing `calls`/`executions` token columns. Instant
+responses gain a `link`, `?download=1` works out of the box, and the file
+lifetime is `limits.instant.result_ttl_minutes` (default 60 minutes, swept
+to `expired` by cleanup). Existing consumers that read the inline `data`
+stay compatible unchanged.
+
 **Breaking webhook change (2026-10):** signatures are now computed over
 `"<unix timestamp>.<raw body>"` and every delivery carries an
 `X-Gateway-Timestamp` header. If you built a receiver against the old
@@ -307,20 +348,21 @@ missing column if you forget.
 than ~5 minutes (replay protection). Signatures from the old scheme will
 no longer verify.
 
-## 8. Tests
+## 9. Tests
 
 Run from the project root (needs a live MariaDB `data_gateway`; the smoke
 tests create and remove their own fixtures marked `smoke` / `smk.` / `swk.` /
-`whk.`):
+`whk.` — deletions are scoped to those markers, so real clients, permission
+grants, calls, logs and audit rows survive every run):
 
 ```
-php tests\api_smoke.php      REM full API surface over php -S (30 checks)
+php tests\api_smoke.php      REM full API surface over php -S (35 checks)
 php tests\worker_smoke.php   REM real CLI worker + cleanup passes
 php tests\webhook_smoke.php  REM real webhook dispatch against a local receiver
 php tests\admin_smoke.php    REM admin panel flows over php -S with curl
 ```
 
-## 9. Production go-live checklist
+## 10. Production go-live checklist
 
 1. **Metadata DB user.** Do not run as `root`. Create the dedicated user with
    `sql/create_user.sql` (SELECT/INSERT/UPDATE/DELETE/LOCK TABLES on
@@ -347,9 +389,10 @@ php tests\admin_smoke.php    REM admin panel flows over php -S with curl
    `mod_ssl`/`mod_socache_shmcb` in `httpd.conf`, uncomment the `LoadModule
    ssl_module` + `Include conf/extra/httpd-ssl.conf` lines, then restart Apache
    and browse `https://localhost` to accept the warning.
-5. **Register the scheduled tasks:** run `deployment\register_tasks.ps1`
-   (§3). For a headless server, register them to run whether the user is
-   logged on or not, or move them to a Windows Service.
+5. **Register the scheduled tasks:** run `deployment\register_tasks.ps1` from
+   an elevated PowerShell (§3). The default `-RunAs System` registration is
+   invisible (no console flash when tasks fire every minute) and keeps
+   running whether a user is logged on or not — exactly what a server wants.
 6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (the
    empty-`base_url` line is a WARN, not a FAIL) **and** all four smoke tests
    pass.
