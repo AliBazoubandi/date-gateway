@@ -13,6 +13,7 @@ use Core\Filesystem;
 use Core\Str;
 use Core\Time;
 use Services\Encryption;
+use Worker\Cleanup;
 
 require __DIR__ . '/../src/Core/bootstrap.php';
 
@@ -30,25 +31,46 @@ $check = static function (string $label, bool $pass, string $detail = '') use (&
 
 $db = db();
 
-// ------------------- self-cleaning fixtures, FK-safe order -------------------
-$wipe = static function () use ($db): void {
-    // Smoke-scoped only: a live gateway's real calls/logs/executions and
-    // permission grants must never be wiped by a test run.
-    $clients = "SELECT id FROM clients WHERE name LIKE 'worker smk%'";
-    $requests = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
-                 WHERE r.code LIKE 'swk.%' OR c.name LIKE 'worker smk%'";
-    $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls
-                  WHERE client_id IN ($clients) OR request_id IN ($requests))");
-    $db->execute("DELETE FROM request_logs WHERE client_id IN ($clients) OR request_id IN ($requests)");
-    $db->execute("DELETE FROM calls WHERE client_id IN ($clients) OR request_id IN ($requests)");
-    $db->execute("DELETE FROM executions WHERE request_id IN ($requests)");
-    $db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($clients)");
-    $db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
-                  WHERE r.code LIKE 'swk.%' OR c.name LIKE 'worker smk%'");
-    $db->execute("DELETE FROM connections WHERE name LIKE 'worker smk%'");
-    $db->execute("DELETE FROM clients WHERE name LIKE 'worker smk%'");
+// ------------------- per-run fixtures (unique names, self-cleaning) -------------------
+// Every fixture name carries the random run id; the shutdown cleanup removes
+// exactly this run's rows/files (FK-safe order), so a failed run leaves
+// nothing behind and real data is never matched.
+$run = substr(Str::hex(4), 0, 8);
+$fixtureFileRels = [];
+$connectionIds = [];
+$requestIds = [];
+$clientIds = [];
+$wipe = static function () use ($db, &$fixtureFileRels, &$connectionIds, &$requestIds, &$clientIds): void {
+    foreach ($fixtureFileRels as $rel) {
+        Cleanup::safeUnlink($rel);
+    }
+    if ($requestIds !== []) {
+        $r = implode(',', array_map('intval', $requestIds));
+        foreach ($db->rows("SELECT result_path FROM executions WHERE request_id IN ($r)") as $row) {
+            if ($row['result_path'] !== null) {
+                Cleanup::safeUnlink((string)$row['result_path']);
+            }
+        }
+        $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE request_id IN ($r))");
+        $db->execute("DELETE FROM calls WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM executions WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM client_request_permissions WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM request_logs WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM requests WHERE id IN ($r)");
+    }
+    if ($clientIds !== []) {
+        $c = implode(',', array_map('intval', $clientIds));
+        $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE client_id IN ($c))");
+        $db->execute("DELETE FROM calls WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM request_logs WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM clients WHERE id IN ($c)");
+    }
+    if ($connectionIds !== []) {
+        $db->execute('DELETE FROM connections WHERE id IN (' . implode(',', array_map('intval', $connectionIds)) . ')');
+    }
 };
-$wipe();
+register_shutdown_function($wipe);
 
 $now = now_str();
 $mkConn = static function (string $name, int $cap, int $active) use ($db, $now): int {
@@ -59,9 +81,10 @@ $mkConn = static function (string $name, int $cap, int $active) use ($db, $now):
     );
     return $db->insertId();
 };
-$connMain = $mkConn('worker smk main', 2, 1);
-$connCap = $mkConn('worker smk cap1', 1, 1);
-$connOff = $mkConn('worker smk offline', 2, 0);
+$connMain = $mkConn("wsmk {$run} main", 2, 1);
+$connCap = $mkConn("wsmk {$run} cap1", 1, 1);
+$connOff = $mkConn("wsmk {$run} offline", 2, 0);
+array_push($connectionIds, $connMain, $connCap, $connOff);
 
 $mkRequest = static function (string $code, string $sql, int $connId, int $ttl = 15,
     int $timeout = 10, int $maxRows = 1000) use ($db, $now): int {
@@ -74,14 +97,15 @@ $mkRequest = static function (string $code, string $sql, int $connId, int $ttl =
     return $db->insertId();
 };
 
-$rReady = $mkRequest('swk.ready', 'SELECT 1 AS ping UNION ALL SELECT 2 AS ping', $connMain);
-$rTtl = $mkRequest('swk.ttl', 'SELECT 1 AS ping', $connMain, 3);
-$rBad = $mkRequest('swk.bad', 'SELECT * FROM _definitely_not_here', $connMain);
-$rTrunc = $mkRequest('swk.trunc', 'SELECT 1 AS n UNION ALL SELECT 2 AS n UNION ALL SELECT 3 AS n', $connMain, 5, 10, 2);
-$rCap = $mkRequest('swk.cap', 'SELECT 1 AS ping', $connCap);
-$rInactive = $mkRequest('swk.inactive', 'SELECT 1 AS ping', $connOff);
-$rFuture = $mkRequest('swk.future', 'SELECT 1 AS ping', $connMain);
-$rSlow = $mkRequest('swk.slow', 'SELECT SLEEP(4) AS slow', $connMain, 15, 1);
+$rReady = $mkRequest("swk{$run}.ready", 'SELECT 1 AS ping UNION ALL SELECT 2 AS ping', $connMain);
+$rTtl = $mkRequest("swk{$run}.ttl", 'SELECT 1 AS ping', $connMain, 3);
+$rBad = $mkRequest("swk{$run}.bad", 'SELECT * FROM _definitely_not_here', $connMain);
+$rTrunc = $mkRequest("swk{$run}.trunc", 'SELECT 1 AS n UNION ALL SELECT 2 AS n UNION ALL SELECT 3 AS n', $connMain, 5, 10, 2);
+$rCap = $mkRequest("swk{$run}.cap", 'SELECT 1 AS ping', $connCap);
+$rInactive = $mkRequest("swk{$run}.inactive", 'SELECT 1 AS ping', $connOff);
+$rFuture = $mkRequest("swk{$run}.future", 'SELECT 1 AS ping', $connMain);
+$rSlow = $mkRequest("swk{$run}.slow", 'SELECT SLEEP(4) AS slow', $connMain, 15, 1);
+array_push($requestIds, $rReady, $rTtl, $rBad, $rTrunc, $rCap, $rInactive, $rFuture, $rSlow);
 
 $mkExec = static function (array $fields) use ($db): int {
     $row = array_merge([
@@ -113,17 +137,19 @@ $execInactive = $mkExec(['request_id' => $rInactive, 'scheduled_at' => $due]);
 // cap=1 connection from claiming anything new.
 $execFreshRunning = $mkExec(['request_id' => $rCap, 'status' => 'running', 'started_at' => $due]);
 // Crashed-worker leftover: old 'running' row with a partial file to purge.
-$staleFileRel = 'results/wsmk_stale.json';
+$staleFileRel = "results/wsmk_{$run}_stale.json";
 file_put_contents(Filesystem::absoluteFromRelative($staleFileRel), '{"data":[');
+$fixtureFileRels[] = $staleFileRel;
 $execStale = $mkExec(['request_id' => $rFuture, 'status' => 'running',
     'started_at' => $staleStarted, 'result_path' => $staleFileRel]);
 
 // A client + one call attached to an execution -> webhook delivery expected.
 $db->execute(
     'INSERT INTO clients (name, type, api_key_hash, is_active, created_at) VALUES (?, ?, ?, 1, ?)',
-    ['worker smk client', 'agent', hash('sha256', Str::hex(16)), $now]
+    ["wsmk {$run} client", 'agent', hash('sha256', Str::hex(16)), $now]
 );
 $clientId = $db->insertId();
+$clientIds[] = $clientId;
 $webhookCallId = Str::hex(16);
 $db->execute(
     'INSERT INTO calls (id, client_id, request_id, execution_id, created_at, ip, was_shared)
@@ -144,8 +170,9 @@ $ttlDiff = static function (array $e): ?int {
 };
 
 // Run a real CLI entry point: [exit code, combined stdout+stderr].
-$runCli = static function (string $relScript): array {
-    $descriptors = [1 => ['pipe', 'w'], 2 => ['file', BASE_PATH . '/storage/_wsmk_stderr.tmp', 'w']];
+$runCli = static function (string $relScript) use ($run): array {
+    $tmp = Filesystem::storageDir() . "/_wsmk_{$run}_stderr.tmp";
+    $descriptors = [1 => ['pipe', 'w'], 2 => ['file', $tmp, 'w']];
     $proc = proc_open('php ' . $relScript, $descriptors, $pipes, BASE_PATH);
     if (!is_resource($proc)) {
         return [-1, 'spawn failed'];
@@ -153,8 +180,8 @@ $runCli = static function (string $relScript): array {
     $out = stream_get_contents($pipes[1]) ?: '';
     fclose($pipes[1]);
     $code = (int)proc_close($proc);
-    $err = @file_get_contents(BASE_PATH . '/storage/_wsmk_stderr.tmp');
-    @unlink(BASE_PATH . '/storage/_wsmk_stderr.tmp');
+    $err = @file_get_contents($tmp);
+    @unlink($tmp);
     return [$code, $out . ($err === false || $err === '' ? '' : ' ||ERR:: ' . trim($err))];
 };
 
@@ -179,7 +206,7 @@ $check('ready: streamed data rows', is_array($decoded)
 $check('ready: envelope meta', is_array($decoded)
     && ($decoded['meta']['row_count'] ?? -1) === 2 && ($decoded['meta']['truncated'] ?? true) === false
     && ($decoded['meta']['execution_id'] ?? 0) === $execReady
-    && ($decoded['meta']['request_code'] ?? '') === 'swk.ready');
+    && ($decoded['meta']['request_code'] ?? '') === "swk{$run}.ready");
 $check('ready: logs started + succeeded',
     $logCount('started', $execReady) === 1 && $logCount('succeeded', $execReady) === 1);
 $check('ready: expires = ready_at + ttl 15min', $ttlDiff($e) !== null
@@ -238,12 +265,13 @@ $check('summary line: due=7 ready=4 failed=2 blocked=1 + swept counts',
 
 // ======================= pass 2: the cleanup CLI =============================
 // Mark two ready executions expired; seed file leftovers + a stale instant.
-$cacheStaleRel = 'cache/wsmk_cache.json';
+$cacheStaleRel = "cache/wsmk_{$run}_cache.json";
 file_put_contents(Filesystem::absoluteFromRelative($cacheStaleRel), '[{"ping":1}]');
-$cacheFreshRel = 'cache/wsmk_fresh.json';
+$cacheFreshRel = "cache/wsmk_{$run}_fresh.json";
 file_put_contents(Filesystem::absoluteFromRelative($cacheFreshRel), '[{"ping":9}]');
-$failedFileRel = 'results/wsmk_failed.json';
+$failedFileRel = "results/wsmk_{$run}_failed.json";
 file_put_contents(Filesystem::absoluteFromRelative($failedFileRel), '{"data":[1]');
+array_push($fixtureFileRels, $cacheStaleRel, $cacheFreshRel, $failedFileRel);
 
 $execCacheStale = $mkExec(['request_id' => $rReady, 'mode' => 'instant', 'status' => 'ready',
     'expires_at' => Time::mysql(Time::addMinutes(new \DateTimeImmutable($due, Time::timezone()), -1)),
@@ -294,9 +322,9 @@ foreach ([
     }
 }
 $wipe();
-$check('fixtures removed', (int)$db->value("SELECT COUNT(*) FROM requests WHERE code LIKE 'swk.%'") === 0
-    && (int)$db->value("SELECT COUNT(*) FROM connections WHERE name LIKE 'worker smk%'") === 0
-    && (int)$db->value('SELECT COUNT(*) FROM clients WHERE name LIKE ?', ['worker smk%']) === 0);
+$check('fixtures removed', (int)$db->value("SELECT COUNT(*) FROM requests WHERE code LIKE 'swk{$run}%'") === 0
+    && (int)$db->value("SELECT COUNT(*) FROM connections WHERE name LIKE 'wsmk {$run}%'") === 0
+    && (int)$db->value('SELECT COUNT(*) FROM clients WHERE name LIKE ?', ["wsmk {$run}%"]) === 0);
 
 echo $failures === 0 ? '=== WORKER SMOKE PASS ===' : "=== WORKER SMOKE: {$failures} FAILED ===", PHP_EOL;
 exit($failures === 0 ? 0 : 1);

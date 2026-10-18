@@ -15,38 +15,71 @@ require __DIR__ . '/../src/Core/bootstrap.php';
 test_guard();
 require __DIR__ . '/../src/Core/Filesystem.php';
 
-// ----------------- self-cleaning fixtures (FK-safe order) -----------------
+// ----------------- per-run fixtures (unique names, self-cleaning) -----------------
+// run_all.ps1 points the gateway at a throwaway DB + storage dir (see
+// test_guard). Every fixture name carries the random run id, and the
+// registered shutdown cleanup removes exactly this run's rows and files —
+// a failed run leaves nothing behind and real data is never matched.
+$run = substr(\Core\Str::hex(4), 0, 8);
+$codeDelayed = "smk{$run}.delayed";
+$codeDeny = "smk{$run}.delayed_deny";
+$codeInst = "smk{$run}.instant";
+$codeBad = "smk{$run}.instant_bad";
+$codeSlow = "smk{$run}.instant_slow";
+$codeRl = "smk{$run}.instant_rl";
+$codeInstDl = "smk{$run}.instant_dl";
+$codeNone = "smk{$run}.none";
+
 $db = db();
-// Smoke-scoped only: a run against a live gateway must not wipe real
-// grants/calls/logs/executions, so every delete carries a marker filter.
-$smokeClientIds = "SELECT id FROM clients WHERE name LIKE 'smoke api%'";
-$smokeRequestIds = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
-                    WHERE c.name LIKE 'local mariadb%' OR c.name LIKE '%smoke%' OR r.code LIKE 'smk.%'";
-$db->execute("DELETE FROM webhook_deliveries WHERE call_id IN ($smokeClientIds)
-              OR call_id IN (SELECT id FROM calls WHERE request_id IN ($smokeRequestIds))");
-$db->execute("DELETE FROM request_logs WHERE client_id IN ($smokeClientIds) OR request_id IN ($smokeRequestIds)");
-// admin_audit_log is the admin smoke's fixture — not touched here.
-$db->execute("DELETE FROM calls WHERE client_id IN ($smokeClientIds) OR request_id IN ($smokeRequestIds)");
-$db->execute("DELETE FROM executions WHERE request_id IN ($smokeRequestIds)");
-$db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($smokeClientIds) OR request_id IN ($smokeRequestIds)");
-// requests+connections are FK-paired; clear them together by smoke markers.
-$db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
-              WHERE c.name LIKE 'local mariadb%' OR c.name LIKE '%smoke%' OR r.code LIKE 'smk.%'");
-$db->execute("DELETE FROM connections WHERE name LIKE 'local mariadb%' OR name LIKE '%smoke%'");
-$db->execute("DELETE FROM clients WHERE name LIKE 'smoke api%'");
-// requests+connections are FK-paired; clear them together by smoke markers.
-$db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
-              WHERE c.name LIKE 'local mariadb%' OR c.name LIKE '%smoke%' OR r.code LIKE 'smk.%'");
-$db->execute("DELETE FROM connections WHERE name LIKE 'local mariadb%' OR name LIKE '%smoke%'");
-$db->execute("DELETE FROM clients WHERE name LIKE 'smoke api%'");
+$clientIds = [];
+$requestIds = [];
+$connectionIds = [];
+$extraFiles = [];
+// FK-safe order: files -> deliveries -> calls -> executions -> permissions
+// -> logs -> requests -> connections -> clients.
+$cleanup = static function () use ($db, &$clientIds, &$requestIds, &$connectionIds, &$extraFiles): void {
+    $in = static fn (array $ids): string => implode(',', array_map('intval', $ids));
+    foreach ($extraFiles as $f) {
+        if (is_file($f)) {
+            @unlink($f);
+        }
+    }
+    if ($requestIds !== []) {
+        $r = $in($requestIds);
+        foreach ($db->rows("SELECT result_path FROM executions WHERE request_id IN ($r)") as $row) {
+            if ($row['result_path'] !== null) {
+                \Worker\Cleanup::safeUnlink((string)$row['result_path']);
+            }
+        }
+        $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE request_id IN ($r))");
+        $db->execute("DELETE FROM calls WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM executions WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM client_request_permissions WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM request_logs WHERE request_id IN ($r)");
+        $db->execute("DELETE FROM requests WHERE id IN ($r)");
+    }
+    if ($clientIds !== []) {
+        $c = $in($clientIds);
+        $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE client_id IN ($c))");
+        $db->execute("DELETE FROM calls WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM request_logs WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM clients WHERE id IN ($c)");
+    }
+    if ($connectionIds !== []) {
+        $db->execute('DELETE FROM connections WHERE id IN (' . $in($connectionIds) . ')');
+    }
+};
+register_shutdown_function($cleanup);
 
 $now = now_str();
 $db->execute(
     'INSERT INTO connections (name, db_type, host, port, db_name, username, password_encrypted, max_concurrency, is_active, created_at)
      VALUES (?, ?, ?, NULL, ?, ?, ?, 2, 1, ?)',
-    ['local mariadb', 'mysql', '127.0.0.1', 'mysql', 'root', Encryption::encrypt(''), $now]
+    ["smk {$run} mariadb", 'mysql', '127.0.0.1', 'mysql', 'root', Encryption::encrypt(''), $now]
 );
 $connId = $db->insertId();
+$connectionIds[] = $connId;
 
 $addRequest = static function (string $code, string $mode, int $timeout, int $maxRows, int $cache, string $sql) use ($db, $connId, $now): int {
     $db->execute(
@@ -57,13 +90,14 @@ $addRequest = static function (string $code, string $mode, int $timeout, int $ma
     return $db->insertId();
 };
 
-$reqDelayed = $addRequest('smk.delayed', 'delayed', 30, 1000, 0, 'SELECT 1 AS ping');
-$reqDeny = $addRequest('smk.delayed_deny', 'delayed', 30, 1000, 0, 'SELECT 1 AS ping');
-$reqInst = $addRequest('smk.instant', 'instant', 30, 100, 60, 'SELECT 1 AS ping');
-$reqBad = $addRequest('smk.instant_bad', 'instant', 30, 100, 0, 'SELECT * FROM _table_that_does_not_exist');
-$reqSlow = $addRequest('smk.instant_slow', 'instant', 1, 100, 0, 'SELECT SLEEP(5) AS slow');
-$reqRl = $addRequest('smk.instant_rl', 'instant', 30, 100, 0, 'SELECT 1 AS ping');
-$reqInstDl = $addRequest('smk.instant_dl', 'instant', 30, 100, 0, 'SELECT 1 AS ping');
+$reqDelayed = $addRequest($codeDelayed, 'delayed', 30, 1000, 0, 'SELECT 1 AS ping');
+$reqDeny = $addRequest($codeDeny, 'delayed', 30, 1000, 0, 'SELECT 1 AS ping');
+$reqInst = $addRequest($codeInst, 'instant', 30, 100, 60, 'SELECT 1 AS ping');
+$reqBad = $addRequest($codeBad, 'instant', 30, 100, 0, 'SELECT * FROM _table_that_does_not_exist');
+$reqSlow = $addRequest($codeSlow, 'instant', 1, 100, 0, 'SELECT SLEEP(5) AS slow');
+$reqRl = $addRequest($codeRl, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
+$reqInstDl = $addRequest($codeInstDl, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
+array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl);
 
 $mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
@@ -74,9 +108,10 @@ $mkClient = static function (string $name, bool $active = true) use ($db, $now):
     $id = $db->insertId();
     return ['id' => $id, 'key' => $key];
 };
-$A = $mkClient('smoke api A');
-$B = $mkClient('smoke api B');
-$C = $mkClient('smoke api C (inactive)', false);
+$A = $mkClient("smk {$run} A");
+$B = $mkClient("smk {$run} B");
+$C = $mkClient("smk {$run} C (inactive)", false);
+array_push($clientIds, (int)$A['id'], (int)$B['id'], (int)$C['id']);
 $db->execute('INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?)', [$A['id'], $reqDelayed, $now]);
 $db->execute(
     'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
@@ -142,7 +177,7 @@ $getErr = static function (string $body): string {
 };
 
 // ----------------- auth failure paths -----------------
-[$code, $body] = api('POST', '/api/v1/request/smk.delayed');
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed);
 $check('no auth -> 401', $code === 401 && $getErr($body) === 'unauthorized');
 [$code, $body] = api('POST', '/api/v1/request/smk.delayed', 'gw_totally_invalid_key_1234567890abc');
 $check('invalid key -> 401', $code === 401 && $getErr($body) === 'unauthorized');
@@ -152,11 +187,11 @@ $check('inactive client -> 403', $code === 403 && $getErr($body) === 'forbidden'
 $check('missing permission -> 403', $code === 403 && $getErr($body) === 'forbidden');
 $check('missing permission denied log',
     (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND event = 'denied'", [$reqDeny]) >= 1);
-[$code, $body] = api('POST', '/api/v1/request/smk.none', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeNone, $A['key']);
 $check('unknown code -> 404', $code === 404 && $getErr($body) === 'not_found');
 [$code, $body] = api('POST', '/api/v1/request/smk%20bad', $A['key']);
 $check('code with illegal chars -> 404', $code === 404 && $getErr($body) === 'not_found');
-[$code, $body] = api('GET', '/api/v1/request/smk.delayed', $A['key']);
+[$code, $body] = api('GET', '/api/v1/request/' . $codeDelayed, $A['key']);
 $check('GET on submit -> 405', $code === 405 && $getErr($body) === 'method_not_allowed');
 
 // ----------------- delayed flow + rule 1 -----------------
@@ -184,7 +219,7 @@ $check('rule-1 call shares the execution',
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1, $A['key']);
 $st = json_decode($body, true);
 $check('status for owner -> scheduled', $code === 200 && ($st['status'] ?? '') === 'scheduled'
-    && $st['ready_at'] === null && $st['request_code'] === 'smk.delayed', $body);
+    && $st['ready_at'] === null && $st['request_code'] === $codeDelayed, $body);
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1, $B['key']);
 $check('status for foreign client -> 404', $code === 404);
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1);
@@ -195,6 +230,7 @@ $rows = [['ping' => 1, 'pad' => 'x'], ['ping' => 2, 'pad' => 'y']];
 $json = json_encode($rows, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 $fileName = bin2hex(random_bytes(8)) . '.json';
 file_put_contents(\Core\Filesystem::resultsDir() . '/' . $fileName, $json);
+$extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $fileName;
 $token = \Core\Str::hex(24);
 $db->execute(
     "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, finished_at, ready_at, expires_at,
@@ -233,7 +269,7 @@ $check('expired -> 410 + marked', $code === 410
     && (int)$db->value("SELECT status = 'expired' FROM executions WHERE id = ?", [$readyExecId]) === 1);
 
 // ----------------- instant flows -----------------
-[$code, $body] = api('POST', '/api/v1/request/smk.instant', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeInst, $A['key']);
 $inst = json_decode($body, true);
 $check('instant executes synchronously', $code === 200
     && ($inst['mode'] ?? '') === 'instant' && ($inst['status'] ?? '') === 'ready'
@@ -267,33 +303,33 @@ $stInst = json_decode($body, true);
 $check('status for instant call carries link', $code === 200 && ($stInst['status'] ?? '') === 'ready'
     && is_string($stInst['link'] ?? null));
 
-[$code, $body, , $hdrs] = api('POST', '/api/v1/request/smk.instant_dl?download=1', $A['key'], true);
+[$code, $body, , $hdrs] = api('POST', '/api/v1/request/' . $codeInstDl . '?download=1', $A['key'], true);
 $direct = json_decode($body, true);
 $check('?download=1 returns the file directly', $code === 200
     && (bool)preg_match('/^content-disposition:\s*attachment/im', $hdrs)
     && ($direct['data'][0]['ping'] ?? null) === '1'
     && (($direct['meta']['mode'] ?? '') === 'instant'), $body);
-[$code, $body] = api('POST', '/api/v1/request/smk.instant', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeInst, $A['key']);
 $inst2 = json_decode($body, true);
 $check('instant cache hit replays same data', $code === 200 && ($inst2['data'] ?? null) === $inst['data']
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'instant_cache_hit'") >= 1);
 
-[$code, $body] = api('POST', '/api/v1/request/smk.instant_bad', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeBad, $A['key']);
 $check('query failure -> 502 generic', $code === 502 && $getErr($body) === 'execution_failed'
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'failed' AND request_id = ?", [$reqBad]) >= 1
     && str_contains((string)$db->value('SELECT error_message FROM executions WHERE request_id = ? ORDER BY id DESC LIMIT 1', [$reqBad]), '_table_that_does_not_exist'));
-[$code, $body] = api('POST', '/api/v1/request/smk.instant_slow', $A['key']);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeSlow, $A['key']);
 $check('query timeout -> 504', $code === 504 && $getErr($body) === 'timeout'
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'timeout' AND request_id = ?", [$reqSlow]) >= 1);
 
-[$code, $body] = api('POST', '/api/v1/request/smk.instant_rl', $A['key']); // warm-up (passes, cap free)
+[$code, $body] = api('POST', '/api/v1/request/' . $codeRl, $A['key']); // warm-up (passes, cap free)
 $db->execute('INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?)', [$A['id'], $reqRl, $now]);
 $db->execute(
     "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, row_count, truncated)
      VALUES (?, 'instant', 'running', ?, ?, 0, 0), (?, 'instant', 'running', ?, ?, 0, 0)",
     [$reqRl, $now, $now, $reqRl, $now, $now]
 );
-[$code, $body, , $rawHeaders] = api('POST', '/api/v1/request/smk.instant_rl', $A['key'], true);
+[$code, $body, , $rawHeaders] = api('POST', '/api/v1/request/' . $codeRl, $A['key'], true);
 $hasRetryAfter = (bool)preg_match('/^retry-after:\s*\d+/mi', $rawHeaders);
 $check('instant cap -> 429 + Retry-After', $code === 429 && $hasRetryAfter && $getErr($body) === 'rate_limited', $body);
 

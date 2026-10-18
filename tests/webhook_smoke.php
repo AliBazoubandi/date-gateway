@@ -12,6 +12,7 @@ use Core\Filesystem;
 use Core\Str;
 use Core\Time;
 use Services\Encryption;
+use Worker\Cleanup;
 
 require __DIR__ . '/../src/Core/bootstrap.php';
 
@@ -28,43 +29,58 @@ $check = static function (string $label, bool $pass, string $detail = '') use (&
 
 $db = db();
 
-// ------------------- self-cleaning fixtures, FK-safe order -------------------
-$wipe = static function () use ($db): void {
-    // Smoke-scoped only: a live gateway's real calls/logs/executions and
-    // permission grants must never be wiped by a test run.
-    $clients = "SELECT id FROM clients WHERE name LIKE 'webhook smk%'";
-    $requests = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
-                 WHERE r.code LIKE 'whk.%' OR c.name LIKE 'webhook smk%'";
-    $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls
-                  WHERE client_id IN ($clients) OR request_id IN ($requests))");
-    $db->execute("DELETE FROM request_logs WHERE client_id IN ($clients) OR request_id IN ($requests)");
-    $db->execute("DELETE FROM calls WHERE client_id IN ($clients) OR request_id IN ($requests)");
-    $db->execute("DELETE FROM executions WHERE request_id IN ($requests)");
-    $db->execute("DELETE FROM client_request_permissions WHERE client_id IN ($clients)");
-    $db->execute("DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
-                  WHERE r.code LIKE 'whk.%' OR c.name LIKE 'webhook smk%'");
-    $db->execute("DELETE FROM connections WHERE name LIKE 'webhook smk%'");
-    $db->execute("DELETE FROM clients WHERE name LIKE 'webhook smk%'");
+// ------------------- per-run fixtures (unique names, self-cleaning) -------------------
+// Every fixture name carries the random run id; the shutdown cleanup removes
+// exactly this run's rows/files (FK-safe order), so a failed run leaves
+// nothing behind and real data is never matched.
+$run = substr(Str::hex(4), 0, 8);
+$requestId = 0;
+$connId = 0;
+$clientIds = [];
+$fixtureFileRels = [];
+$wipe = static function () use ($db, &$requestId, &$connId, &$clientIds, &$fixtureFileRels): void {
+    foreach ($fixtureFileRels as $rel) {
+        Cleanup::safeUnlink($rel);
+    }
+    if ($requestId > 0) {
+        $db->execute('DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE request_id = ?)', [$requestId]);
+        $db->execute('DELETE FROM calls WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM executions WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM client_request_permissions WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM request_logs WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM requests WHERE id = ?', [$requestId]);
+    }
+    if ($clientIds !== []) {
+        $c = implode(',', array_map('intval', $clientIds));
+        $db->execute("DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE client_id IN ($c))");
+        $db->execute("DELETE FROM calls WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM request_logs WHERE client_id IN ($c)");
+        $db->execute("DELETE FROM clients WHERE id IN ($c)");
+    }
+    if ($connId > 0) {
+        $db->execute('DELETE FROM connections WHERE id = ?', [$connId]);
+    }
 };
-$wipe();
+register_shutdown_function($wipe);
 
 $now = now_str();
 $db->execute(
     'INSERT INTO connections (name, db_type, host, port, db_name, username, password_encrypted, is_active, created_at)
      VALUES (?, ?, ?, NULL, ?, ?, ?, 1, ?)',
-    ['webhook smk conn', 'mysql', '127.0.0.1', 'mysql', 'root', Encryption::encrypt(''), $now]
+    ["whsmk {$run} conn", 'mysql', '127.0.0.1', 'mysql', 'root', Encryption::encrypt(''), $now]
 );
 $connId = $db->insertId();
 $db->execute(
     'INSERT INTO requests (code, name, sql_text, connection_id, response_mode, instant_cache_seconds,
         delay_minutes, ttl_minutes, timeout_seconds, max_rows, is_active, created_at)
      VALUES (?, ?, ?, ?, ?, 0, 0, 15, 10, 100, 1, ?)',
-    ['whk.ready', 'webhook smk request', 'SELECT 1 AS ping', $connId, 'delayed', $now]
+    ["whk{$run}.ready", "whsmk {$run} request", 'SELECT 1 AS ping', $connId, 'delayed', $now]
 );
 $requestId = $db->insertId();
 
 // Ready execution + a real result file, like the worker would leave behind.
-$resultRel = 'results/whsmk_result.json';
+$resultRel = "results/whsmk_{$run}_result.json";
+$fixtureFileRels[] = $resultRel;
 $payloadRows = '{"data":[{"ping":"1"}],"meta":{"row_count":1}}';
 file_put_contents(Filesystem::absoluteFromRelative($resultRel), $payloadRows);
 $db->execute(
@@ -151,8 +167,9 @@ $receiveOne = static function (string $status) use ($server): ?array {
  * one webhook request ($status, null = expect no request), then reap it.
  * Returns [exitCode, combinedOutput, request|null].
  */
-$exchange = static function (string $relScript, ?string $status) use ($receiveOne): array {
-    $descriptors = [1 => ['pipe', 'w'], 2 => ['file', BASE_PATH . '/storage/_whsmk_stderr.tmp', 'w']];
+$exchange = static function (string $relScript, ?string $status) use ($receiveOne, $run): array {
+    $tmp = Filesystem::storageDir() . "/_whsmk_{$run}_stderr.tmp";
+    $descriptors = [1 => ['pipe', 'w'], 2 => ['file', $tmp, 'w']];
     $proc = proc_open('php ' . $relScript, $descriptors, $pipes, BASE_PATH);
     if (!is_resource($proc)) {
         return [-1, 'spawn failed', null];
@@ -161,19 +178,21 @@ $exchange = static function (string $relScript, ?string $status) use ($receiveOn
     $out = stream_get_contents($pipes[1]) ?: '';
     fclose($pipes[1]);
     $code = (int)proc_close($proc);
-    $err = @file_get_contents(BASE_PATH . '/storage/_whsmk_stderr.tmp');
-    @unlink(BASE_PATH . '/storage/_whsmk_stderr.tmp');
+    $err = @file_get_contents($tmp);
+    @unlink($tmp);
     return [$code, $out . ($err === false || $err === '' ? '' : ' ||ERR:: ' . trim($err)), $req];
 };
 
 // Fixture builders: a client (+url), a call with an encrypted token, a pending delivery.
-$mkClient = static function (?string $url) use ($db, $now, $secret, $port): int {
+$mkClient = static function (?string $url) use ($db, $now, $secret, $port, $run, &$clientIds): int {
     $db->execute(
         'INSERT INTO clients (name, type, api_key_hash, webhook_url, webhook_secret, is_active, created_at)
          VALUES (?, ?, ?, ?, ?, 1, ?)',
-        ['webhook smk client ' . Str::hex(4), 'agent', hash('sha256', Str::hex(16)), $url, $secret, $now]
+        ["whsmk {$run} client " . Str::hex(4), 'agent', hash('sha256', Str::hex(16)), $url, $secret, $now]
     );
-    return $db->insertId();
+    $id = $db->insertId();
+    $clientIds[] = $id;
+    return $id;
 };
 $mkCallDelivery = static function (int $clientId) use ($db, $now, $execId, $requestId): array {
     $callId = Str::hex(16);
@@ -220,7 +239,7 @@ $check('HMAC-SHA256 signature valid (timestamp-bound)', $sig !== '' && $tsHeader
 $payload = json_decode($reqBody, true);
 $check('payload fields', is_array($payload)
     && ($payload['call_id'] ?? '') === $callA
-    && ($payload['request_code'] ?? '') === 'whk.ready'
+    && ($payload['request_code'] ?? '') === "whk{$run}.ready"
     && ($payload['status'] ?? '') === 'ready'
     && (int)($payload['row_count'] ?? 0) === 1
     && str_contains((string)($payload['expires_at'] ?? ''), '+03:30'), substr($reqBody, 0, 200));
@@ -292,8 +311,8 @@ if (is_file(Filesystem::absoluteFromRelative($resultRel))) {
     @unlink(Filesystem::absoluteFromRelative($resultRel));
 }
 $wipe();
-$check('fixtures removed', (int)$db->value("SELECT COUNT(*) FROM requests WHERE code LIKE 'whk.%'") === 0
-    && (int)$db->value("SELECT COUNT(*) FROM clients WHERE name LIKE 'webhook smk%'") === 0);
+$check('fixtures removed', (int)$db->value("SELECT COUNT(*) FROM requests WHERE code LIKE 'whk{$run}%'") === 0
+    && (int)$db->value("SELECT COUNT(*) FROM clients WHERE name LIKE 'whsmk {$run}%'") === 0);
 
 echo $failures === 0 ? '=== WEBHOOK SMOKE PASS ===' : "=== WEBHOOK SMOKE: {$failures} FAILED ===", PHP_EOL;
 exit($failures === 0 ? 0 : 1);

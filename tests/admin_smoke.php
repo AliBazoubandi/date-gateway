@@ -12,29 +12,47 @@ test_guard();
 $port = rand(20000, 60000);
 $root = BASE_PATH;
 
-// Self-cleaning: wipe smoke leftovers so the run is repeatable — scoped to
-// smoke markers only, so real grants/logs/calls/executions/audit survive.
-$smokeClients = "SELECT id FROM clients WHERE name LIKE 'smoke%'";
-$smokeRequests = "SELECT r.id FROM requests r JOIN connections c ON c.id = r.connection_id
-                  WHERE r.code LIKE 'smoke%' OR c.name LIKE 'local mariadb%'";
-foreach ([
-    "DELETE FROM webhook_deliveries WHERE call_id IN ($smokeClients)
-      OR call_id IN (SELECT id FROM calls WHERE request_id IN ($smokeRequests))",
-    "DELETE FROM request_logs WHERE client_id IN ($smokeClients) OR request_id IN ($smokeRequests)",
-    "DELETE FROM calls WHERE client_id IN ($smokeClients) OR request_id IN ($smokeRequests)",
-    "DELETE FROM executions WHERE request_id IN ($smokeRequests)",
-    "DELETE FROM client_request_permissions WHERE client_id IN ($smokeClients) OR request_id IN ($smokeRequests)",
-    "DELETE FROM clients WHERE name LIKE 'smoke%'",
-    'DELETE FROM login_attempts',
-    "DELETE r FROM requests r JOIN connections c ON c.id = r.connection_id
-        WHERE r.code LIKE 'smoke%' OR c.name LIKE 'local mariadb%'",
-    "DELETE FROM connections WHERE name LIKE 'local mariadb%'",
-    // audit scoped to the smoke admin, BEFORE the user itself is removed
-    "DELETE FROM admin_audit_log WHERE admin_user_id IN (SELECT id FROM admin_users WHERE username = 'smoke_admin')",
-    "DELETE FROM admin_users WHERE username = 'smoke_admin'",
-] as $sql) {
-    db()->execute($sql);
-}
+// Per-run fixtures: every name carries the random run id and the shutdown
+// cleanup removes exactly this run's rows — a failed run leaves nothing
+// behind (no leftover admin user, no grants, no audit rows, no login_attempts
+// wipe: real data is never matched or touched).
+$run = substr(\Core\Str::hex(4), 0, 8);
+$adminName = "smoke_admin_{$run}";
+$connName = "smk {$run} mariadb";
+$code = "smk{$run}.ping";
+$clientName = "smk {$run} agent";
+
+$db = db();
+$adminId = 0;
+$clientId = 0;
+$requestId = 0;
+$connectionId = 0;
+$cleanup = static function () use ($db, &$adminId, &$clientId, &$requestId, &$connectionId): void {
+    if ($requestId > 0) {
+        $db->execute('DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE request_id = ?)', [$requestId]);
+        $db->execute('DELETE FROM calls WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM executions WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM client_request_permissions WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM request_logs WHERE request_id = ?', [$requestId]);
+        $db->execute('DELETE FROM requests WHERE id = ?', [$requestId]);
+    }
+    if ($clientId > 0) {
+        $db->execute('DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE client_id = ?)', [$clientId]);
+        $db->execute('DELETE FROM calls WHERE client_id = ?', [$clientId]);
+        $db->execute('DELETE FROM client_request_permissions WHERE client_id = ?', [$clientId]);
+        $db->execute('DELETE FROM request_logs WHERE client_id = ?', [$clientId]);
+        $db->execute('DELETE FROM clients WHERE id = ?', [$clientId]);
+    }
+    if ($connectionId > 0) {
+        $db->execute('DELETE FROM connections WHERE id = ?', [$connectionId]);
+    }
+    if ($adminId > 0) {
+        // audit rows of the smoke admin go with the admin itself
+        $db->execute('DELETE FROM admin_audit_log WHERE admin_user_id = ?', [$adminId]);
+        $db->execute('DELETE FROM admin_users WHERE id = ?', [$adminId]);
+    }
+};
+register_shutdown_function($cleanup);
 chdir($root);
 // Array command form: no cmd.exe wrapper, so proc_terminate() really kills
 // php -S (string form orphans the server, which then wedges later runs).
@@ -91,18 +109,19 @@ $check = static function (string $label, bool $ok, string $detail = '') use (&$p
 [$code, $body] = http('GET', '/admin/login');
 $check('login page 200 + CSRF', $code === 200 && str_contains($body, '_csrf'));
 
-shell_exec('php "' . $root . '/cli/create_admin.php" --username=smoke_admin --password=test!pass123');
+shell_exec('php "' . $root . '/cli/create_admin.php" --username=' . $adminName . ' --password=test!pass123');
+$adminId = (int)db()->value('SELECT id FROM admin_users WHERE username = ?', [$adminName]);
 
 $token = csrf($body);
 [$code, $body] = http('POST', '/admin/login', [
-    '_csrf' => $token, 'username' => 'smoke_admin', 'password' => 'wrong-pass-1',
+    '_csrf' => $token, 'username' => $adminName, 'password' => 'wrong-pass-1',
 ]);
 $check('wrong password rejected', str_contains($body, 'Wrong username or password') || str_contains($body, 'Locked'));
 
 [$code, $body] = http('GET', '/admin/login');
 $check('login page again', $code === 200);
 [$code, $body] = http('POST', '/admin/login', [
-    '_csrf' => csrf($body), 'username' => 'smoke_admin', 'password' => 'test!pass123',
+    '_csrf' => csrf($body), 'username' => $adminName, 'password' => 'test!pass123',
 ]);
 $check('login succeeds -> dashboard', str_contains($body, 'Dashboard'));
 
@@ -111,28 +130,30 @@ $check('login succeeds -> dashboard', str_contains($body, 'Dashboard'));
 $check('connections/new 200', $code === 200);
 $token = csrf($body);
 [$code, $body] = http('POST', '/admin/connections', [
-    '_csrf' => $token, 'id' => 0, 'name' => 'local mariadb', 'db_type' => 'mysql',
+    '_csrf' => $token, 'id' => 0, 'name' => $connName, 'db_type' => 'mysql',
     'host' => '127.0.0.1', 'port' => '', 'db_name' => 'mysql', 'username' => 'root',
     'password' => '', 'max_concurrency' => '', 'is_active' => 1,
 ]);
 [$code, $body] = http('GET', '/admin/connections');
-$check('connection created + listed', str_contains($body, 'local mariadb'));
+$check('connection created + listed', str_contains($body, $connName));
 
 // Request CRUD + test run -------------------------------------------------
 [$code, $body] = http('GET', '/admin/requests/new');
 $check('requests/new 200', $code === 200);
 $token = csrf($body);
-$connId = db()->value('SELECT id FROM connections WHERE name = ?', ['local mariadb']);
+$connId = db()->value('SELECT id FROM connections WHERE name = ?', [$connName]);
+$connectionId = (int)$connId;
 [$code, $body] = http('POST', '/admin/requests', [
     '_csrf' => $token, 'id' => 0,
-    'code' => 'smoke.ping', 'name' => 'Smoke ping', 'description' => 'smoke',
+    'code' => $code, 'name' => 'Smoke ping', 'description' => 'smoke',
     'sql_text' => 'SELECT 1 AS ping, SLEEP(0.02) AS settle', 'connection_id' => $connId,
     'response_mode' => 'delayed', 'delay_minutes' => 0, 'ttl_minutes' => 15,
     'timeout_seconds' => 30, 'max_rows' => 1000, 'is_active' => 1,
 ]);
 [$code, $body] = http('GET', '/admin/requests');
-$check('request created + listed', str_contains($body, 'smoke.ping') && str_contains($body, 'Delayed'));
-$reqId = (int)db()->value('SELECT id FROM requests WHERE code = ?', ['smoke.ping']);
+$check('request created + listed', str_contains($body, $code) && str_contains($body, 'Delayed'));
+$reqId = (int)db()->value('SELECT id FROM requests WHERE code = ?', [$code]);
+$requestId = $reqId;
 
 [$code, $body] = http('POST', '/admin/requests/test', ['_csrf' => $token, 'id' => $reqId]);
 $check('test run shows rows', str_contains($body, '<code>1<'));
@@ -148,7 +169,7 @@ $check('test run audit entry written',
 [$code, $body] = http('GET', '/admin/requests/' . $reqId);
 $token = csrf($body);
 [$code, $body] = http('POST', '/admin/requests', [
-    '_csrf' => $token, 'id' => $reqId, 'code' => 'smoke.ping', 'name' => 'Smoke ping',
+    '_csrf' => $token, 'id' => $reqId, 'code' => $code, 'name' => 'Smoke ping',
     'description' => 'smoke', 'sql_text' => 'SELECT 1 AS ping, SLEEP(0.02) AS settle',
     'connection_id' => $connId, 'response_mode' => 'instant',
     'instant_cache_seconds' => 30, 'delay_minutes' => 0, 'ttl_minutes' => 15,
@@ -168,18 +189,19 @@ $check('badge shows Instant', str_contains($body, 'Instant'));
 [$code, $body] = http('GET', '/admin/clients/new');
 $token = csrf($body);
 [$code, $body] = http('POST', '/admin/clients', [
-    '_csrf' => $token, 'id' => 0, 'name' => 'smoke agent', 'type' => 'agent',
+    '_csrf' => $token, 'id' => 0, 'name' => $clientName, 'type' => 'agent',
     'webhook_url' => '', 'webhook_secret' => '', 'is_active' => 1,
 ]);
 $hasKey = preg_match('/<code class="key">([0-9a-z_]+)<\/code>/', $body, $km) === 1;
 $apiKey = $km[1] ?? '';
 $check('api key revealed once', $hasKey && strlen($apiKey) >= 40);
-$cliId = (int)db()->value('SELECT id FROM clients WHERE name = ?', ['smoke agent']);
+$cliId = (int)db()->value('SELECT id FROM clients WHERE name = ?', [$clientName]);
+$clientId = $cliId;
 $check('only the hash is stored',
     strlen((string)db()->value('SELECT api_key_hash FROM clients WHERE id = ?', [$cliId])) === 64);
 
 [$code, $body] = http('GET', '/admin/clients/' . $cliId);
-$check('permissions editor lists request', str_contains($body, 'smoke.ping'));
+$check('permissions editor lists request', str_contains($body, $code));
 [$code, $body] = http('POST', '/admin/clients/permissions', [
     '_csrf' => csrf($body), 'id' => $cliId, 'request_ids' => [$reqId],
 ]);
