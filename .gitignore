@@ -1,4 +1,14 @@
-/storage/
+# Result files, instant-cache copies and lock files. A result file is the
+# literal output of a reviewed query - business data, never repo material.
+# The tree stays untracked except for .htaccess, the deny-all safety net that
+# has to ship with the code; Filesystem::prepare() creates results/ and the CLI
+# scripts create their own lock files, so an empty storage/ is a valid start.
+/storage/*
+!/storage/.htaccess
+
+# Also catch a result export saved at the project root.
+result*.json
+
 /config/.env
 /vendor/
 *.tmp

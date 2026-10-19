@@ -126,6 +126,21 @@ XAMPP at `C:\xampp`.
    `metadata_db` host/port/database) has committed defaults in
    `config/config.php` and only needs editing to change a policy.
 
+   **The key that is already burned.** The first snapshot of this repository
+   committed a real master key (`5122ef88…bf755f`) in `config/config.php` before
+   secrets moved to `config/.env`. It is listed in
+   `Services\Encryption::RETIRED_KEYS`, so bootstrap and every encrypt/decrypt
+   refuse it and nothing new can be sealed with it — but the value still lives
+   in this repository's git history and must be treated as public. Anyone who
+   has that key cannot read passwords stored under the current one, and GCM
+   authentication means a tampered or foreign blob fails decryption instead of
+   returning garbage. **If a connection's password was saved while the retired
+   key was configured, it can no longer be decrypted** — the admin panel will
+   report `Decryption failed` when it is used; re-enter that password once.
+   Removing the value means rewriting published history (every commit hash
+   changes for everyone who cloned), which is a separate, deliberate decision
+   and not part of this fix.
+
 4. **Point Apache at `public/`** — the project root itself must never be
    the document root. In `C:\xampp\apache\conf\extra\httpd-vhosts.conf`:
 
@@ -893,6 +908,24 @@ Pass `-WebUser "IIS AppPool\gateway"` (or your dedicated service account)
 when PHP does not run as SYSTEM. Afterwards verify the app end to end: a
 read-only code/config tree must not affect submissions, downloads, worker
 passes, or webhook delivery.
+
+### What never belongs in the repository
+
+`storage/` is the directory most worth keeping out of git: a file under
+`storage\results` is the literal output of a reviewed query — the same business
+data an API response carries — and `storage\cache` holds instant-mode copies of
+it. `.gitignore` therefore ignores the whole tree **except** `storage/.htaccess`,
+the deny-all safety net a fresh checkout needs. An empty `storage/` is a valid
+start: `Core\Filesystem::prepare()` (called by the worker, cleanup and the
+instant path) creates `results/`, and the `*.lock` files appear when the CLI
+scripts first run. `result*.json` is ignored at every level as well, so an
+export saved next to `README.md` cannot be staged by accident. The other two
+non-source paths are `config/.env` (every secret, §2) and `vendor/` (a generated
+autoloader with no packages behind it, see the introduction).
+
+Before pushing, `git status --ignored` should show nothing under `storage/`
+except `.htaccess` (which is tracked, on purpose), and `git ls-files "*.json"`
+should list only `composer.json`.
 
 ## 12. Read-only SQL policy
 
