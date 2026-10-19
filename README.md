@@ -207,7 +207,11 @@ curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 Status values: `scheduled` → `running` → `ready` (then `expired`), or
 `failed`. Error responses carry `{"error":{"code":"...","message":"..."}}`
 — codes include `unauthorized` (401), `forbidden` (403), `not_found`
-(404), `method_not_allowed` (405), `execution_failed` (502), `timeout`
+(404), `method_not_allowed` (405), `query_rejected` (502, saved SQL is not
+read-only), `execution_failed` (502), `result_unavailable` (502, the stored
+result file is missing or unreadable — an empty 200 is never returned),
+`result_too_large` (413, instant result past
+`limits.instant.max_result_bytes`), `timeout`
 (504), `rate_limited` (429, with `Retry-After`), and `410 Gone` for an
 expired link.
 
