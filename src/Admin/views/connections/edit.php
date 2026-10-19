@@ -33,4 +33,4 @@ $isNew = ($m('id', 0) == 0);
   </div>
 </form>
 </section>
-<p class="hint">Passwords are AES-256-GCM encrypted with the master key in config/config.php, never shown again.</p>
+<p class="hint">Passwords are AES-256-GCM encrypted with the master key (GATEWAY_MASTER_KEY in config/.env), never shown again.</p>

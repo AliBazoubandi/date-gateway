@@ -2,9 +2,18 @@
 
 An internal HTTP gateway that lets authenticated clients run **pre-approved,
 reviewed SQL queries** against internal databases and receive results as
-time-limited JSON file links. Plain PHP 8.1+, no Composer, no frameworks,
-native DB drivers only (`mysqli` / `sqlsrv_*` / `pg_*`). Built for
-Windows + XAMPP; every timestamp is Tehran local time (`+03:30`, no DST).
+time-limited JSON file links. Plain PHP 8.1+, no frameworks, no Composer
+packages to install, native DB drivers only (`mysqli` / `sqlsrv_*` / `pg_*`).
+Built for Windows + XAMPP; every timestamp is Tehran local time (`+03:30`, no
+DST).
+
+`composer.json` exists as a declaration of the required PHP version and
+extensions (plus a PSR-4 autoload map). It lists **no packages**, so
+`composer install` is never part of installing or running this gateway:
+`src/Core/bootstrap.php` registers an SPL autoloader that maps `Core\Db` →
+`src/Core/Db.php` and works with no tooling at all. It prefers
+`vendor/autoload.php` when a `composer dump-autoload` has been run, so there is
+no dependency tree in `vendor/` - only the generated loader.
 
 Core model:
 
@@ -38,7 +47,7 @@ Two response modes:
   | `curl`           | webhook delivery, smoke tests                   |
   | `openssl`        | AES-256-GCM encryption (passwords, call tokens) |
   | `mbstring`       | UTF-8 handling                                  |
-  | `sqlsrv` + `pdo_sqlsrv`* | SQL Server target connections only      |
+  | `sqlsrv`*            | SQL Server target connections only      |
   | `pgsql`          | PostgreSQL target connections only              |
 
   \* The SQL Server driver on Windows also needs the Microsoft ODBC driver
@@ -78,23 +87,46 @@ XAMPP at `C:\xampp`.
    (the first file creates the `data_gateway` database, the second loads the
    tables; or paste both into phpMyAdmin's SQL tab, in this order).
 
-2. **Configure** `config/config.php`
+2. **Create the metadata-DB account**
 
-   - `security.master_key` — generate once, 64 hex chars:
+   ```
+   C:\xampp\mysql\bin\mysql.exe -u root -p < sql\create_user.sql
+   ```
+
+   `sql/create_user.sql` creates `gateway` and grants it
+   SELECT/INSERT/UPDATE/DELETE/LOCK TABLES on `data_gateway` only — no DDL, no
+   other schemas. **The password in that file is a placeholder.** Generate your
+   own (`php -r "echo bin2hex(random_bytes(24));"`), edit the file or run the
+   two `CREATE USER` / `GRANT` statements by hand, and put the same value in
+   `GATEWAY_DB_PASSWORD` below. Do not run the gateway as MySQL `root`.
+
+   Give the **target** databases a read-only account (`GRANT SELECT ONLY`) and
+   enter those credentials in the admin panel — they are stored encrypted, not
+   in this file.
+
+3. **Set the secrets in `config/.env`** — copy `config/.env.example`, which is
+   annotated per key. `.env` is gitignored; `config/config.php` is committed and
+   reads every secret through `\Core\Env::get()`, so nothing sensitive belongs
+   there.
+
+   - `GATEWAY_MASTER_KEY` — generate once, 64 hex chars:
      `php -r "echo bin2hex(random_bytes(32));"`
      This key encrypts connection passwords and per-call download tokens.
-     Changing it later makes every stored secret unreadable.
-   - `metadata_db.*` — XAMPP defaults work (`root`, empty password).
-     **Recommended for anything real:** create a dedicated account instead
-     of root — the gateway only needs DML on its own schema:
-     `CREATE USER 'gateway'@'localhost' IDENTIFIED BY 'strong-password';`
-     `GRANT SELECT,INSERT,UPDATE,DELETE,LOCK TABLES ON data_gateway.* TO 'gateway'@'localhost';`
-     Give the **target** databases a read-only account
-     (`GRANT SELECT ONLY`) and enter those credentials in the admin panel.
-   - `app.base_url` — set this if the gateway is reached via a name the
-     incoming `Host` header can't provide (links are built from it).
+     Changing it later makes every stored secret unreadable, and the gateway
+     refuses to start while it is empty or still the all-zeros placeholder
+     (`Services\Encryption::assertUsableKey()`).
+   - `GATEWAY_DB_USER` / `GATEWAY_DB_PASSWORD` — the account from step 2
+     (`gateway` is the default username).
+   - `GATEWAY_BASE_URL` — the URL clients reach the gateway at; download links
+     and webhook payloads are built from it. Required in production
+     (`cli\check.php` fails while it is empty); may stay empty in development
+     with `GATEWAY_DEBUG=1`, where links fall back to the `Host` header.
 
-3. **Point Apache at `public/`** — the project root itself must never be
+   Everything else (`limits.*`, `worker.*`, `cleanup.*`, `storage.*`,
+   `metadata_db` host/port/database) has committed defaults in
+   `config/config.php` and only needs editing to change a policy.
+
+4. **Point Apache at `public/`** — the project root itself must never be
    the document root. In `C:\xampp\apache\conf\extra\httpd-vhosts.conf`:
 
    ```
@@ -112,7 +144,7 @@ XAMPP at `C:\xampp`.
    (result files) sits outside the web root and is only reachable through
    the authenticated API.
 
-4. **Create the first admin**
+5. **Create the first admin**
 
    ```
    php cli\create_admin.php --username=admin --password=********
@@ -123,7 +155,7 @@ XAMPP at `C:\xampp`.
    existing username replaces the password **and** signs out every admin
    session that was already open (§13).
 
-5. **In the admin panel**
+6. **In the admin panel**
 
    - *Connections*: register each target DB (type, host, credentials —
      stored AES-256-GCM-encrypted, never displayed again). Use the
@@ -774,6 +806,12 @@ powershell -ExecutionPolicy Bypass -File tests\run_all.ps1
 
 Running the smoke scripts **directly** against a real `data_gateway` is no
 longer supported — the guards above refuse it on purpose.
+
+Two scripts in `tests\` are manual inspectors and are **not** called by
+`run_all.ps1`: `audit_spot.php` prints the newest `admin_audit_log` rows from
+whatever DB is configured (the smokes clean up after themselves, so it is only
+useful against a database with real admin activity), and `driver_test.php`
+opens a live connection to a target and needs its actual credentials.
 
 ## 10. Production go-live checklist
 

@@ -6,8 +6,10 @@ use Core\Config;
 use Core\Str;
 
 /**
- * AES-256-GCM encryption for connection passwords, keyed by the master key
- * in config/config.php (kept outside the web root).
+ * AES-256-GCM encryption for connection passwords, keyed by
+ * `security.master_key`: the real value is GATEWAY_MASTER_KEY in the untracked
+ * config/.env, and the config/config.php fallback is a placeholder that
+ * assertUsableKey() refuses to run with.
  *
  * Blob format: gcm:v1:<iv_b64>:<tag_b64>:<ct_b64>
  */

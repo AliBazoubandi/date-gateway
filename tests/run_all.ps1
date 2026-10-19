@@ -7,9 +7,18 @@
     throwaway storage dir (storage\test-<random>), points the gateway at them
     via GATEWAY_DB_NAME / GATEWAY_STORAGE_DIR, then runs:
       1. php -l over every *.php (except vendor/)
-      2. unit-style tests (smoke_db, encryption_test --db)
-      3. the four smoke tests (api, admin, worker, webhook) + audit_spot
+      2. the unit-style tests: schema/binder (smoke_db), encryption, links,
+         filesystem, SQL guard, read-only drivers, the worker pool, result
+         writer, submit throttle, trusted proxies, driver TLS options,
+         Str::json, SAPI bootstrap, Db::transaction, target column naming,
+         the instant cache-window clamp
+      3. the end-to-end smokes over a real php -S server and a real worker
+         pass (api, admin, worker, webhook) plus retention pruning and the
+         webhook URL policy
       4. stream_memory_test (reduced row count)
+    tests\audit_spot.php and tests\driver_test.php are manual inspectors (the
+    first reads whatever DB is configured, the second needs real target
+    credentials), so this runner does not call them.
     The test DB and storage dir are ALWAYS dropped afterwards (even on
     failure). The live data_gateway database and the real storage/ are never
     touched: every test refuses to run unless GATEWAY_TEST_MODE=1 and the
@@ -169,7 +178,7 @@ try {
         & $PhpExe (Join-Path $PSScriptRoot "instant_ttl_test.php")
     }
 
-    # 3) the four smoke tests.
+    # 3) the end-to-end smokes, plus retention and the webhook URL policy.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in
     #  the DB, but the smokes now clean up after themselves - run it by hand
     #  against a DB that has recent admin activity.)
