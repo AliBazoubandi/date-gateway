@@ -61,7 +61,8 @@ final class InstantExecutor
         array $client,
         string $callId,
         string $ip,
-        bool $asFile = false
+        bool $asFile = false,
+        ?string $idempotencyKeyHash = null
     ): void {
         $db = Db::instance();
         $connId = (int)$connection['id'];
@@ -105,10 +106,10 @@ final class InstantExecutor
         // polling and the response envelope can expose a stable result link.
         $token = Str::hex(24); // 48 hex chars
         $db->execute(
-            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
+            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
             [$callId, $client['id'], $request['id'], $execId, hash('sha256', $token),
-                Encryption::encrypt($token), $now, $ip]
+                Encryption::encrypt($token), $idempotencyKeyHash, $now, $ip]
         );
         Logger::event('submitted', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip);
 
@@ -314,7 +315,11 @@ final class InstantExecutor
             $fileOk ? Links::download($token) : null);
     }
 
-    /** Replays a cached instant execution (fresh enough; not yet expired). */
+    /**
+     * Hand back a stored instant result instead of running the query again:
+     * the request's cache window hit, and an Idempotency-Key retry of a run
+     * this client already made.
+     */
     public static function emitFromCache(array $request, int $clientId, string $callId, array $execution, string $ip, bool $asFile = false): void
     {
         $file = null;

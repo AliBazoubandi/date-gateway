@@ -5,7 +5,9 @@
 //   auth failures (401/403/404 + 'denied' logs), delayed cache rule 1 (share),
 //   status polling (owner-only), rule 2 attach with fresh call token,
 //   chunked download, 410 expiry, instant run + result file + link +
-//   ?download=1 file delivery / cache hit / 504 / 502 / 429.
+//   ?download=1 file delivery / cache hit / 504 / 502 / 429, and the
+//   Idempotency-Key replay rules (scheduled/ready/expired/failed, per-client
+//   and per-request scoping, key validation).
 // Usage: php tests\api_smoke.php
 
 use Services\Encryption;
@@ -32,6 +34,9 @@ $codeNone = "smk{$run}.none";
 $codeBig = "smk{$run}.instant_big";
 $codeCacheMiss = "smk{$run}.instant_cachemiss";
 $codeClamp = "smk{$run}.instant_clamp";
+
+$codeIdemInst = "smk{$run}.idem_instant";
+$codeIdemDelay = "smk{$run}.idem_delayed";
 
 $db = db();
 $clientIds = [];
@@ -104,7 +109,13 @@ $reqBig = $addRequest($codeBig, 'instant', 30, 100, 0, "SELECT REPEAT('x', 5000)
 $reqCacheMiss = $addRequest($codeCacheMiss, 'instant', 30, 100, 60, 'SELECT 1 AS ping');
 // A 24 h window on a request: only the result file lifetime is servable.
 $reqClamp = $addRequest($codeClamp, 'instant', 30, 100, 86400, 'SELECT 1 AS ping');
-array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss, $reqClamp);
+// Idempotency-Key fixtures. Both have caching OFF on purpose: without the
+// header every submit must re-run/attach by the normal rules, so a replay can
+// only ever come from the key.
+$reqIdemInst = $addRequest($codeIdemInst, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
+$reqIdemDelay = $addRequest($codeIdemDelay, 'delayed', 30, 1000, 0, 'SELECT 1 AS ping');
+array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss, $reqClamp,
+    $reqIdemInst, $reqIdemDelay);
 
 $mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
@@ -128,6 +139,10 @@ $db->execute(
     'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
     [$A['id'], $reqBig, $now, $A['id'], $reqCacheMiss, $now, $A['id'], $reqClamp, $now]
 );
+$db->execute(
+    'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+    [$A['id'], $reqIdemInst, $now, $A['id'], $reqIdemDelay, $now, $B['id'], $reqIdemInst, $now]
+);
 
 // ----------------- dev server + curl harness -----------------
 // Random port: a stale or sibling server must never answer instead of us.
@@ -147,7 +162,7 @@ register_shutdown_function(static function () use ($proc): void {
 });
 usleep(500000);
 
-function api(string $method, string $path, ?string $key = null, bool $tailHeaders = false): array
+function api(string $method, string $path, ?string $key = null, bool $tailHeaders = false, array $extraHeaders = []): array
 {
     global $port;
     $ch = curl_init('http://127.0.0.1:' . $port . $path);
@@ -156,8 +171,12 @@ function api(string $method, string $path, ?string $key = null, bool $tailHeader
         $opts[CURLOPT_POST] = true;
         $opts[CURLOPT_POSTFIELDS] = '';
     }
+    $httpHeaders = $extraHeaders;
     if ($key !== null) {
-        $opts[CURLOPT_HTTPHEADER] = ['Authorization: Bearer ' . $key];
+        $httpHeaders[] = 'Authorization: Bearer ' . $key;
+    }
+    if ($httpHeaders !== []) {
+        $opts[CURLOPT_HTTPHEADER] = $httpHeaders;
     }
     curl_setopt_array($ch, $opts);
     $raw = (string)curl_exec($ch);
@@ -419,6 +438,148 @@ $db->execute(
 [$code, $body, , $rawHeaders] = api('POST', '/api/v1/request/' . $codeRl, $A['key'], true);
 $hasRetryAfter = (bool)preg_match('/^retry-after:\s*\d+/mi', $rawHeaders);
 $check('shared connection cap -> 429 + Retry-After', $code === 429 && $hasRetryAfter && $getErr($body) === 'rate_limited', $body);
+// Release the two fake running rows: the cap is per CONNECTION for both modes
+// (P2-10), so leaving them would 429 every instant submit below.
+$db->execute("UPDATE executions SET status = 'failed', finished_at = NOW()
+              WHERE status = 'running' AND request_id = ?", [$reqRl]);
+
+// ------------------------------ Idempotency --------------------------------
+// A retried submit that carries the Idempotency-Key it already used answers
+// from the call that key created. Both fixtures have caching OFF, so a replay
+// can only come from the header, never from the normal attach rules.
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], false, ['Idempotency-Key: short']);
+$check('too-short Idempotency-Key -> 400 invalid_idempotency_key',
+    $code === 400 && $getErr($body) === 'invalid_idempotency_key', $body);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], false,
+    ['Idempotency-Key: ' . str_repeat('k', 201)]);
+$check('too-long Idempotency-Key -> 400 invalid_idempotency_key',
+    $code === 400 && $getErr($body) === 'invalid_idempotency_key');
+$check('a rejected key leaves no submission behind',
+    (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemInst]) === 0);
+
+$iKey = 'idem-' . $run . '-instant';
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$idem1 = json_decode($body, true);
+$check('idempotent: the first instant submit runs the query', $code === 200
+    && ($idem1['status'] ?? '') === 'ready' && (int)($idem1['row_count'] ?? 0) === 1, substr((string)$body, 0, 200));
+$iCall = (string)($idem1['call_id'] ?? '');
+$iExec = (int)$db->value('SELECT execution_id FROM calls WHERE id = ?', [$iCall]);
+$storedHash = (string)$db->value('SELECT idempotency_key_hash FROM calls WHERE id = ?', [$iCall]);
+$check('the header value is stored only as a SHA-256', strlen($storedHash) === 64
+    && $storedHash === hash('sha256', $iKey) && !str_contains($storedHash, $iKey));
+
+$execsAfterFirst = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$idem2 = json_decode($body, true);
+$check('idempotent: the retry replays the same call and link', $code === 200
+    && ($idem2['call_id'] ?? '') === $iCall && ($idem2['link'] ?? null) === ($idem1['link'] ?? null)
+    && ($idem2['data'] ?? null) == ($idem1['data'] ?? null), substr((string)$body, 0, 200));
+$check('idempotent: the retry ran nothing',
+    (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $execsAfterFirst
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemInst]) === 1);
+$check("the replay is audited as 'idempotent_replay'", (int)$db->value(
+    "SELECT COUNT(*) FROM request_logs WHERE event = 'idempotent_replay' AND call_id = ?", [$iCall]) === 1);
+
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key']);
+$idem3 = json_decode($body, true);
+$check('the same submit without the key runs again', ($idem3['call_id'] ?? '') !== $iCall
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $execsAfterFirst + 1,
+    substr((string)$body, 0, 200));
+
+$dKey = 'idem-' . $run . '-download';
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst . '?download=1', $A['key'], false,
+    ['Idempotency-Key: ' . $dKey]);
+$dlFirst = $body;
+$dlCall = (string)$db->value(
+    'SELECT id FROM calls WHERE request_id = ? AND idempotency_key_hash = ? ORDER BY created_at DESC LIMIT 1',
+    [$reqIdemInst, hash('sha256', $dKey)]
+);
+$check('idempotent: ?download=1 first submit delivers the file', $code === 200
+    && str_contains((string)$dlFirst, '"data"') && $dlCall !== '', substr((string)$dlFirst, 0, 120));
+$execsBeforeDlRetry = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst . '?download=1', $A['key'], false,
+    ['Idempotency-Key: ' . $dKey]);
+$check('idempotent: the ?download=1 retry replays that file byte for byte', $code === 200 && $body === $dlFirst
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $execsBeforeDlRetry
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE idempotency_key_hash = ?', [hash('sha256', $dKey)]) === 1);
+
+$fKey = 'idem-' . $run . '-failed';
+[$code, $body] = api('POST', '/api/v1/request/' . $codeBad, $A['key'], false, ['Idempotency-Key: ' . $fKey]);
+$check('idempotent: a failing instant run answers 502', $code === 502
+    && $getErr($body) === 'execution_failed', $body);
+$badExecs = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqBad]);
+$badCalls = (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqBad]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeBad, $A['key'], false, ['Idempotency-Key: ' . $fKey]);
+$check('idempotent: the retry replays the failure instead of running the query again',
+    $code === 502 && $getErr($body) === 'execution_failed'
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqBad]) === $badExecs
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqBad]) === $badCalls);
+
+$execsBeforeExpire = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]);
+$db->execute("UPDATE executions SET status = 'expired', result_path = NULL WHERE id = ?", [$iExec]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$check('idempotent: an expired instant replay says gone instead of re-running', $code === 410
+    && $getErr($body) === 'expired'
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $execsBeforeExpire,
+    $body);
+
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $B['key'], false, ['Idempotency-Key: ' . $iKey]);
+$idemB = json_decode($body, true);
+$check('the same key for another client is its own submission', $code === 200
+    && ($idemB['call_id'] ?? '') !== $iCall
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE client_id = ? AND idempotency_key_hash = ?',
+        [$B['id'], hash('sha256', $iKey)]) === 1, substr((string)$body, 0, 200));
+
+// Same header value, different request: the key is scoped per request.
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemDelay, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$delay1 = json_decode($body, true);
+$check('the same key on another request is its own submission', $code === 200
+    && ($delay1['call_id'] ?? '') !== $iCall && ($delay1['status'] ?? '') === 'scheduled', substr((string)$body, 0, 200));
+$dCall = (string)($delay1['call_id'] ?? '');
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemDelay, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$delay2 = json_decode($body, true);
+$check('idempotent: a keyed retry of a scheduled delayed run replays it', $code === 200
+    && ($delay2['call_id'] ?? '') === $dCall && ($delay2['status'] ?? '') === 'scheduled'
+    && array_key_exists('link', $delay2) && $delay2['link'] === null
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemDelay]) === 1
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemDelay]) === 1,
+    substr((string)$body, 0, 200));
+$dExec = (int)$db->value('SELECT execution_id FROM calls WHERE id = ?', [$dCall]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemDelay, $A['key']);
+$delay3 = json_decode($body, true);
+$check('a keyless delayed submit is its own call on the same execution',
+    ($delay3['call_id'] ?? '') !== $dCall && ($delay3['status'] ?? '') === 'scheduled'
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemDelay]) === 1,
+    substr((string)$body, 0, 200));
+
+$delayFile = bin2hex(random_bytes(8)) . '.json';
+file_put_contents(\Core\Filesystem::resultsDir() . '/' . $delayFile, '[{"ping":7}]');
+$extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $delayFile;
+$db->execute(
+    "UPDATE executions SET status = 'ready', finished_at = NOW(), ready_at = NOW(),
+        expires_at = DATE_ADD(NOW(), INTERVAL 15 MINUTE), result_path = ?, row_count = 1
+     WHERE id = ?",
+    ['results/' . $delayFile, $dExec]
+);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemDelay, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$delay4 = json_decode($body, true);
+$check('idempotent: a keyed retry of a ready delayed run returns that call and its link', $code === 200
+    && ($delay4['call_id'] ?? '') === $dCall && ($delay4['status'] ?? '') === 'ready'
+    && is_string($delay4['link'] ?? null) && array_key_exists('error', $delay4) && $delay4['error'] === null,
+    substr((string)$body, 0, 200));
+$dlTokenIdem = basename((string)parse_url((string)($delay4['link'] ?? ''), PHP_URL_PATH));
+[$code, $body] = api('GET', '/api/v1/results/' . $dlTokenIdem, $A['key']);
+$check('the replayed link downloads the stored result', $code === 200
+    && json_decode($body, true) === [['ping' => 7]], $body);
+
+$db->execute("UPDATE executions SET status = 'expired' WHERE id = ?", [$dExec]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemDelay, $A['key'], false, ['Idempotency-Key: ' . $iKey]);
+$delay5 = json_decode($body, true);
+$check('idempotent: a keyed retry after expiry says expired instead of scheduling a new run', $code === 200
+    && ($delay5['call_id'] ?? '') === $dCall && ($delay5['status'] ?? '') === 'expired'
+    && array_key_exists('link', $delay5) && $delay5['link'] === null
+    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemDelay]) === 1,
+    substr((string)$body, 0, 200));
 
 echo $pass === $total ? '=== API SMOKE PASS (' . $total . '/' . $total . ') ===' : "=== API SMOKE: {$pass}/{$total} ===", PHP_EOL;
 exit($pass === $total ? 0 : 1);

@@ -11,7 +11,7 @@ $expect = [
         'delay_minutes', 'ttl_minutes', 'timeout_seconds', 'max_rows'],
     'executions' => ['request_id', 'mode', 'status', 'scheduled_at', 'truncated', 'error_code'],
     'connections' => ['db_type', 'password_encrypted', 'max_concurrency'],
-    'calls' => ['id', 'was_shared'],
+    'calls' => ['id', 'was_shared', 'token_enc', 'idempotency_key_hash'],
     'webhook_deliveries' => ['state', 'next_retry_at'],
     'request_logs' => ['timestamp', 'event', 'duration_ms'],
     'admin_audit_log' => ['before_json'],

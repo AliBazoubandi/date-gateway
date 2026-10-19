@@ -122,6 +122,15 @@ try {
     $ok('admin_users.session_version present (admin session epoch)', $hasSessionVersion === 1,
         'run the ALTER at the end of sql\\schema.sql if missing');
 
+    // Post-schema upgrade: calls.idempotency_key_hash (Idempotency-Key
+    // submits). Keyless submits never touch it, so only those break.
+    $hasIdemKey = (int)db()->value(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'calls' AND column_name = 'idempotency_key_hash'"
+    );
+    $ok('calls.idempotency_key_hash present (idempotent submits)', $hasIdemKey === 1,
+        'run the ALTER at the end of sql\\schema.sql if missing');
+
     // A webhook delivery stays 'pending' when the receiver is down or the
     // client lost its URL/secret: a growing backlog means clients are not
     // being told, and it also blocks call pruning.

@@ -9,6 +9,7 @@ use Core\Http;
 use Core\Str;
 use Core\Time;
 use Services\Encryption;
+use Services\ExecutionError;
 use Services\InstantExecutor;
 use Services\Logger;
 
@@ -16,9 +17,18 @@ use Services\Logger;
  * POST /api/v1/request/{code} — the submission endpoint.
  * Auth flow: Bearer key -> active client -> permission for this request ->
  * request active. Async instant replay rules below.
+ * An Idempotency-Key header makes a retried submission answer from the call it
+ * already created instead of running the query a second time.
  */
 final class Submit
 {
+    /** Client-facing HTTP status per sanitized failure code (an instant POST
+     *  that failed answered with one of these; a replay must answer the same). */
+    private const FAILURE_HTTP = [
+        ExecutionError::TIMEOUT => 504,
+        ExecutionError::TOO_LARGE => 413,
+    ];
+
     public static function handle(string $code): void
     {
         if (!Http::isPost()) {
@@ -51,25 +61,116 @@ final class Submit
             Errors::forbidden('This client has no permission for this request.');
         }
 
+        // ?download=1: the instant POST response is the result FILE itself
+        // (Content-Disposition attachment) instead of the JSON envelope.
+        $asFile = (string)Http::param('download', 'g') === '1';
+        $idemHash = self::idempotencyKeyHash();
+        if ($idemHash !== null) {
+            // The lock spans the replay lookup AND this request's own call
+            // INSERT: the flows below write the key hash into calls before they
+            // emit, so a second submit with the same key cannot read "no prior
+            // call" and start a duplicate run. It dies with the connection.
+            $db->lock('gw_idem_' . $clientId . '_' . substr($idemHash, 0, 16), 10);
+            // Only returns when there is nothing replayable to answer with.
+            self::replayPriorSubmission($request, $client, $idemHash, $ip, $asFile);
+        }
+
         self::enforceClientSubmitRate($clientId, $requestId, $ip);
 
         $callId = self::newCallId();
 
         if ((string)$request['response_mode'] === 'instant') {
-            self::instantFlow($request, $client, $callId, $ip);
+            self::instantFlow($request, $client, $callId, $ip, $asFile, $idemHash);
             return;
         }
-        self::delayedFlow($request, $client, $callId, $ip);
+        self::delayedFlow($request, $client, $callId, $ip, $idemHash);
     }
 
     /** ---------------------------------------------------------------- */
 
-    private static function instantFlow(array $request, array $client, string $callId, string $ip): void
+    /**
+     * SHA-256 of the client's Idempotency-Key header, or null when absent.
+     * The header value itself is never stored. 8 characters minimum because a
+     * one-letter key is a collision between unrelated submissions waiting to
+     * happen; printable ASCII only, so a mangled or multi-line value is a
+     * client error rather than a silently shared bucket.
+     */
+    private static function idempotencyKeyHash(): ?string
+    {
+        $key = trim((string)($_SERVER['HTTP_IDEMPOTENCY_KEY'] ?? ''));
+        if ($key === '') {
+            return null;
+        }
+        if (strlen($key) < 8 || strlen($key) > 200 || preg_match('/^[!-~]+$/', $key) !== 1) {
+            Errors::emit(400, 'invalid_idempotency_key',
+                'Idempotency-Key must be 8-200 printable ASCII characters.');
+        }
+        return hash('sha256', $key);
+    }
+
+    /**
+     * A key this client already used for this request answers the retry from
+     * the call it created: same call_id, same execution, no second run. Falls
+     * through when nothing can be replayed (no prior call, its execution row is
+     * gone, or an instant run still in flight - the instant POST carries the
+     * rows, so a half-finished run has nothing to hand back).
+     */
+    private static function replayPriorSubmission(array $request, array $client, string $idemHash, string $ip, bool $asFile): void
+    {
+        $clientId = (int)$client['id'];
+        $requestId = (int)$request['id'];
+        $prior = Db::instance()->one(
+            'SELECT e.*, c.id AS call_id FROM calls c
+             JOIN executions e ON e.id = c.execution_id
+             WHERE c.client_id = ? AND c.request_id = ? AND c.idempotency_key_hash = ?
+             ORDER BY c.created_at DESC LIMIT 1',
+            [$clientId, $requestId, $idemHash]
+        );
+        if ($prior === null) {
+            return;
+        }
+        $callId = (string)$prior['call_id'];
+        $execId = (int)$prior['id'];
+        $status = (string)$prior['status'];
+        // Same clock rule as the status endpoint: a ready row past its TTL is
+        // no longer servable even if cleanup has not marked it yet.
+        if ($status === 'ready' && $prior['expires_at'] !== null
+            && (string)$prior['expires_at'] <= Time::now()) {
+            $status = 'expired';
+        }
+        Logger::event('idempotent_replay', $clientId, $requestId, $callId, $execId, $ip,
+            null, $prior['row_count'] !== null ? (int)$prior['row_count'] : null,
+            'replayed the submission this Idempotency-Key already made (' . $status . ')');
+
+        if ((string)$prior['mode'] === 'instant') {
+            if ($status === 'ready') {
+                InstantExecutor::emitFromCache($request, $clientId, $callId, $prior, $ip, $asFile);
+            }
+            if ($status === 'expired') {
+                Errors::gone('That submission\'s result has expired from the gateway. Submit again with a new Idempotency-Key.');
+            }
+            if ($status === 'failed') {
+                $errorCode = ExecutionError::code($prior['error_code'] ?? null);
+                Errors::emit(self::FAILURE_HTTP[$errorCode] ?? 502, $errorCode,
+                    ExecutionError::message($errorCode));
+            }
+            return; // scheduled|running: no finished result to replay
+        }
+
+        json_out([
+            'call_id' => $callId,
+            'status' => $status,
+            'scheduled_at' => $prior['scheduled_at'] !== null ? Time::iso((string)$prior['scheduled_at']) : null,
+            'ready_at' => $prior['ready_at'] !== null ? Time::iso((string)$prior['ready_at']) : null,
+            'expires_at' => $prior['expires_at'] !== null ? Time::iso((string)$prior['expires_at']) : null,
+            'link' => $status === 'ready' ? Links::forCall($callId) : null,
+            'error' => ExecutionError::forExecution(['status' => $status, 'error_code' => $prior['error_code'] ?? null]),
+        ]);
+    }
+
+    private static function instantFlow(array $request, array $client, string $callId, string $ip, bool $asFile, ?string $idemHash): void
     {
         $db = Db::instance();
-        // ?download=1: the POST response is the result FILE itself
-        // (Content-Disposition attachment) instead of the JSON envelope.
-        $asFile = (string)\Core\Http::param('download', 'g') === '1';
 
         $cacheSeconds = InstantExecutor::cacheWindowSeconds($request);
         if ($cacheSeconds > 0) {
@@ -87,9 +188,9 @@ final class Submit
                 // and gets its own download token, same as delayed rule 2.
                 $token = \Core\Str::hex(24); // 48 hex chars
                 $db->execute(
-                    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)',
+                    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
                     [$callId, $client['id'], $request['id'], $cached['id'], hash('sha256', $token),
-                        Encryption::encrypt($token), Time::now(), $ip]
+                        Encryption::encrypt($token), $idemHash, Time::now(), $ip]
                 );
                 Logger::event('submitted', (int)$client['id'], (int)$request['id'], $callId, (int)$cached['id'], $ip);
                 InstantExecutor::emitFromCache($request, (int)$client['id'], $callId, $cached, $ip, $asFile);
@@ -97,7 +198,7 @@ final class Submit
             }
         }
         $connection = $db->one('SELECT * FROM connections WHERE id = ?', [$request['connection_id']]);
-        InstantExecutor::handle($request, $connection, $client, $callId, $ip, $asFile);
+        InstantExecutor::handle($request, $connection, $client, $callId, $ip, $asFile, $idemHash);
     }
 
     /**
@@ -106,7 +207,7 @@ final class Submit
      *  2. ready and not expired -> attach + return link now
      *  3. else create a new execution scheduled_at = now + delay_minutes
      */
-    private static function delayedFlow(array $request, array $client, string $callId, string $ip): void
+    private static function delayedFlow(array $request, array $client, string $callId, string $ip, ?string $idemHash): void
     {
         $db = Db::instance();
         $now = Time::nowDt();
@@ -133,7 +234,7 @@ final class Submit
             [$request['id']]
         );
         if ($active !== null) {
-            self::attachCall($request, $client, $callId, $ip, (int)$active['id'], 1);
+            self::attachCall($request, $client, $callId, $ip, (int)$active['id'], 1, $idemHash);
             $status = (string)$active['status'];
             Logger::event('shared', (int)$client['id'], $requestId, $callId, (int)$active['id'], $ip,
                 null, null, 'attached to ' . $status . ' execution (cache rule 1, link arrives with the webhook)');
@@ -162,10 +263,10 @@ final class Submit
             // same link later (hash-only would make that impossible).
             $token = Str::hex(24); // 48 hex chars
             $db->execute(
-                'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)',
+                'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
                 [$callId, $client['id'], $request['id'], $ready['id'], hash('sha256', $token),
-                    Encryption::encrypt($token), Time::now(), $ip]
+                    Encryption::encrypt($token), $idemHash, Time::now(), $ip]
             );
             Logger::event('shared', (int)$client['id'], $requestId, $callId, (int)$ready['id'], $ip,
                 null, (int)$ready['row_count'], 'attached to ready execution (cache rule 2, fresh call token)');
@@ -184,13 +285,13 @@ final class Submit
         // Execution and call commit together: a scheduled row with no call
         // attached is a real query run for nobody (and the worker claims it),
         // while a call with no execution can never be answered.
-        $execId = $db->transaction(static function () use ($db, $request, $scheduledAt, $client, $callId, $ip): int {
+        $execId = $db->transaction(static function () use ($db, $request, $scheduledAt, $client, $callId, $ip, $idemHash): int {
             $db->execute(
                 'INSERT INTO executions (request_id, mode, status, scheduled_at) VALUES (?, ?, ?, ?)',
                 [(int)$request['id'], 'delayed', 'scheduled', $scheduledAt]
             );
             $newId = $db->insertId();
-            self::attachCall($request, $client, $callId, $ip, $newId, 0);
+            self::attachCall($request, $client, $callId, $ip, $newId, 0, $idemHash);
             return $newId;
         });
         Logger::event('submitted', (int)$client['id'], $requestId, $callId, $execId, $ip,
@@ -206,17 +307,17 @@ final class Submit
         ]);
     }
 
-    private static function attachCall(array $request, array $client, string $callId, string $ip, ?int $executionId, int $wasShared): void
+    private static function attachCall(array $request, array $client, string $callId, string $ip, ?int $executionId, int $wasShared, ?string $idemHash): void
     {
         // Every delayed call gets its own download token at creation: the
         // SHA-256 hash for lookup, an AES-256-GCM copy so the webhook and the
         // status endpoint can rebuild a stable link once the execution is ready.
         $token = Str::hex(24); // 48 hex chars
         Db::instance()->execute(
-            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [$callId, $client['id'], $request['id'], $executionId,
-                hash('sha256', $token), Encryption::encrypt($token), Time::now(), $ip, $wasShared]
+                hash('sha256', $token), Encryption::encrypt($token), $idemHash, Time::now(), $ip, $wasShared]
         );
     }
 

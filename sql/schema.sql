@@ -163,6 +163,10 @@ CREATE TABLE IF NOT EXISTS `executions` (
 -- used for lookup; token_enc (AES-256-GCM, master key) lets the webhook
 -- rebuild a stable download link across retries. The plaintext is never
 -- stored and is only returned to the owning client.
+-- idempotency_key_hash: SHA-256 of the client's Idempotency-Key header, NULL
+-- for the (normal) submission without one. The header value itself is never
+-- stored. Not unique on purpose - see the note in README about concurrent
+-- duplicate submits.
 CREATE TABLE IF NOT EXISTS `calls` (
   `id`           CHAR(32)     NOT NULL,
   `client_id`    INT UNSIGNED NOT NULL,
@@ -170,6 +174,7 @@ CREATE TABLE IF NOT EXISTS `calls` (
   `execution_id` BIGINT UNSIGNED NULL DEFAULT NULL,
   `token_hash`   CHAR(64)     NULL DEFAULT NULL COMMENT 'per-call download token (rule-2 attaches to ready executions)',
   `token_enc`    TEXT         NULL DEFAULT NULL COMMENT 'AES-256-GCM copy of the per-call token; lets webhooks rebuild the link',
+  `idempotency_key_hash` CHAR(64) NULL DEFAULT NULL COMMENT 'SHA-256 of the submit Idempotency-Key header; scopes duplicate submits',
   `created_at`   DATETIME     NOT NULL,
   `ip`           VARCHAR(45)  NOT NULL DEFAULT '',
   `was_shared`   TINYINT(1)   NOT NULL DEFAULT 0,
@@ -177,7 +182,8 @@ CREATE TABLE IF NOT EXISTS `calls` (
   UNIQUE KEY `uq_calls_token` (`token_hash`),
   KEY `idx_calls_client` (`client_id`, `created_at`),
   KEY `idx_calls_request` (`request_id`),
-  KEY `idx_calls_execution` (`execution_id`)
+  KEY `idx_calls_execution` (`execution_id`),
+  KEY `idx_calls_idempotency` (`client_id`, `request_id`, `idempotency_key_hash`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -186,7 +192,7 @@ CREATE TABLE IF NOT EXISTS `calls` (
 -- in batches during each cleanup pass)
 -- events: submitted|denied|shared|started|succeeded|failed|downloaded|expired|
 --         webhook_sent|webhook_failed|instant_executed|instant_cache_hit|
---         rate_limited|timeout
+--         rate_limited|timeout|idempotent_replay
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `request_logs` (
   `id`           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -329,4 +335,14 @@ ALTER TABLE `client_rate_limits`
 -- handed to any client, so the column held a hash of a credential nobody could
 -- use; downloads resolve the per-call token in `calls` instead. Do not run it
 -- before deploying - the previous worker version writes the column.)
+--
+--   ALTER TABLE `calls`
+--     ADD COLUMN `idempotency_key_hash` CHAR(64) NULL DEFAULT NULL
+--       COMMENT 'SHA-256 of the submit Idempotency-Key header; scopes duplicate submits'
+--       AFTER `token_enc`,
+--     ADD INDEX `idx_calls_idempotency` (`client_id`, `request_id`, `idempotency_key_hash`);
+-- (the duplicate-submit guard. Run it BEFORE deploying: every submit that
+-- carries an Idempotency-Key reads and writes this column, so a missing one
+-- fails those submits. Submits without the header never touch it, and old rows
+-- simply have no key to match.)
 -- ---------------------------------------------------------------------------

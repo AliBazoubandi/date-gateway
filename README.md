@@ -229,6 +229,8 @@ permission grant for the request code.
 
 ```
 :: submit — one call per submit; identical concurrent submits share one execution
+:: add -H "Idempotency-Key: <per-attempt value>" and a retry answers from the
+:: call that key already made instead of starting another submission
 curl -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/request/sales.daily
 -> 200 {"call_id":"...","status":"scheduled","scheduled_at":"...","ready_at":null,"expires_at":null,"link":null}
 
@@ -261,7 +263,9 @@ output). `storage_low` means the gateway volume is under
 `limits.min_free_disk_bytes` — it is the gateway's problem to fix, retrying
 the same query immediately will not help. Error *responses* carry `{"error":{"code":"...","message":"..."}}`
 — codes include `unauthorized` (401), `forbidden` (403), `not_found`
-(404), `method_not_allowed` (405), `query_rejected` (502, saved SQL is not
+(404), `method_not_allowed` (405), `invalid_idempotency_key` (400, the
+`Idempotency-Key` header is not 8-200 printable ASCII characters),
+`query_rejected` (502, saved SQL is not
 read-only), `execution_failed` (502), `result_unavailable` (502, the stored
 result file is missing or unreadable — an empty 200 is never returned),
 `result_too_large` (413, instant result past
@@ -331,6 +335,46 @@ enabled at 60 submissions per 60s window** in `config/config.php`; set
 to `0` to disable. Upgrading an existing installation requires the
 `client_rate_limits` table from `sql/schema.sql` (see the upgrade block at the
 end of that file) before deploying this code.
+
+### Idempotent submits (`Idempotency-Key`)
+
+A submit may carry `Idempotency-Key: <8-200 printable ASCII characters>`. The
+gateway stores only its SHA-256 (`calls.idempotency_key_hash`) and, for a key
+this client already used **on this request**, answers the retry from the call
+that key created: same `call_id`, same execution, same download link, and no
+second run of the query. A too-short, too-long or non-printable key is rejected
+with `400 invalid_idempotency_key` and nothing is submitted.
+
+What a retry answers, by the state of the original run:
+
+| original run | the keyed retry returns |
+|---|---|
+| delayed, `scheduled`/`running` | `200` submit envelope, `link: null` (poll that `call_id`) |
+| delayed, `ready` | `200` envelope carrying that call's own `link` |
+| delayed, `expired` | `200` envelope, `status:"expired"`, `link: null` — it does **not** schedule a new run |
+| delayed, `failed` | `200` envelope with `error` set (the submit itself had succeeded) |
+| instant, `ready` | the same rows inline, or the same file with `?download=1`, and the same `link` |
+| instant, `failed` | the error the original POST returned (`504 timeout`, `413 result_too_large`, `502 …`) |
+| instant, `expired` | `410 expired` — the stored result is gone, so there is nothing to replay |
+| instant, still running | no finished result to hand back: it submits like a normal one |
+| its `executions` row pruned by retention | a normal submit — the key's history went with the call |
+
+A replay starts no work, so it does not consume the per-client submit throttle
+above, and it is logged as `idempotent_replay` against the original `call_id`.
+The key is scoped to (client, request): the same value from another client, or
+on another request code, is an independent submission. To force a fresh run,
+submit with a new key; the old call is left exactly as it was.
+
+Concurrency: the replay lookup and this submit's own call write are fenced by a
+per-(client, key) `GET_LOCK` (`gw_idem_…`, 10 s wait), so two simultaneous
+retries cannot both conclude "no prior call". If the first attempt is an
+in-flight instant run that outlives that wait, or the metadata DB stalls the
+lock, the second behaves like an un-keyed submit — a duplicate call, never a
+lost or wrong answer. This is "one key, one answer once the first attempt is
+recorded", not a queue.
+
+Upgrading: run the `calls.idempotency_key_hash` ALTER from the §8 upgrade block
+before deploying. Submits without the header never read or write the column.
 
 ## 5. Webhooks
 
@@ -536,6 +580,11 @@ attached is a real query run for nobody, and the worker would still claim it.
 Instant results follow the same spirit via the time-windowed cache, whose
 window never outlives the cached result file.
 
+A submit carrying an `Idempotency-Key` that this client already used on this
+request skips these rules entirely: it is answered from the call that key
+created (§4). The rules above are what a keyless submit — or a first use of a
+key — does.
+
 ## 8. Upgrading an existing installation
 
 The statements below are also collected at the end of `sql/schema.sql`.
@@ -591,6 +640,18 @@ it, so a missing column breaks the panel):
 ```sql
 ALTER TABLE `admin_users`
   ADD COLUMN `session_version` INT NOT NULL DEFAULT 0 AFTER `locked_until`;
+```
+
+If the DB was created before idempotent submits, add the key column **before**
+deploying (a submit carrying `Idempotency-Key` reads and writes it, so only
+those submits break without it):
+
+```sql
+ALTER TABLE `calls`
+  ADD COLUMN `idempotency_key_hash` CHAR(64) NULL DEFAULT NULL
+    COMMENT 'SHA-256 of the submit Idempotency-Key header; scopes duplicate submits'
+    AFTER `token_enc`,
+  ADD INDEX `idx_calls_idempotency` (`client_id`, `request_id`, `idempotency_key_hash`);
 ```
 
 **Admin sessions and audit (2026-10):** no other schema change. Two behavior
