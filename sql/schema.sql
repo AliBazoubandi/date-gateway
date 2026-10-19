@@ -129,7 +129,6 @@ CREATE TABLE IF NOT EXISTS `client_request_permissions` (
 -- delayed:  scheduled -> running -> ready|failed -> expired
 -- instant:  running -> ready|failed  (cache window in expires_at when enabled)
 -- result_path: path relative to storage/ (e.g. "results/abc.json")
--- download_token_hash: SHA-256 hex of the download token (token itself never stored)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `executions` (
   `id`                  BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -150,12 +149,10 @@ CREATE TABLE IF NOT EXISTS `executions` (
   -- (timeout / execution_failed / query_rejected / result_too_large). The raw
   -- driver text stays in error_message, which is admin-only.
   `error_code`          VARCHAR(32)  NULL DEFAULT NULL,
-  `download_token_hash` CHAR(64)     NULL DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_exec_status_sched` (`status`, `scheduled_at`),
   KEY `idx_exec_request_status` (`request_id`, `status`),
   KEY `idx_exec_request_mode_fin` (`request_id`, `mode`, `status`, `finished_at`),
-  KEY `idx_exec_token` (`download_token_hash`),
   KEY `idx_exec_expires` (`status`, `expires_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
@@ -325,4 +322,11 @@ ALTER TABLE `client_rate_limits`
 -- authenticated admin page reads the column, so a missing one breaks the panel.
 -- Existing sessions carry no version and are signed out on their next request,
 -- which just means admins log in once more.)
+--
+--   ALTER TABLE `executions` DROP COLUMN `download_token_hash`;
+-- (OPTIONAL, and only after the new code is deployed: no code path reads or
+-- writes it any more. An execution-level download token was stored but never
+-- handed to any client, so the column held a hash of a credential nobody could
+-- use; downloads resolve the per-call token in `calls` instead. Do not run it
+-- before deploying - the previous worker version writes the column.)
 -- ---------------------------------------------------------------------------

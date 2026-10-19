@@ -1,6 +1,6 @@
 <?php /** @var array $counts @var array $recent */
 use Core\Str;
-$c = $counts['programs'] ?? [];
+$c = $counts['activity'] ?? [];
 ?>
 <h1>Dashboard</h1>
 <section class="cols">

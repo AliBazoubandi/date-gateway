@@ -86,9 +86,9 @@ $payloadRows = '{"data":[{"ping":"1"}],"meta":{"row_count":1}}';
 file_put_contents(Filesystem::absoluteFromRelative($resultRel), $payloadRows);
 $db->execute(
     "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, finished_at, ready_at,
-        expires_at, result_path, result_size_bytes, row_count, download_token_hash)
-     VALUES (?, 'delayed', 'ready', ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?, ?, 1, ?)",
-    [$requestId, $now, $now, $now, $now, $resultRel, strlen($payloadRows), hash('sha256', Str::hex(24))]
+        expires_at, result_path, result_size_bytes, row_count)
+     VALUES (?, 'delayed', 'ready', ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?, ?, 1)",
+    [$requestId, $now, $now, $now, $now, $resultRel, strlen($payloadRows)]
 );
 $execId = $db->insertId();
 

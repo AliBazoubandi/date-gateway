@@ -244,6 +244,9 @@ curl -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/calls/CALL_
 
 :: download — stream the result file (until expires_at). Downloads carry
 :: Content-Disposition: attachment; filename="result-{code}-{execution_id}.json"
+:: The call's own token from its link is the only download credential: a token
+:: is never issued for an execution as such, so several calls sharing one
+:: execution each download with their own link.
 curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 ```
 
@@ -595,11 +598,27 @@ space than that makes new delayed runs fail with `storage_low`. Lower it (or
 set `0`) if the storage volume is small but intentionally nearly full.
 
 **Instant result files (2026-10):** no schema change is needed — instant
-runs reuse the existing `calls`/`executions` token columns. Instant
+runs reuse the existing `calls` token columns. Instant
 responses gain a `link`, `?download=1` works out of the box, and the file
 lifetime is `limits.instant.result_ttl_minutes` (default 60 minutes, swept
 to `expired` by cleanup). Existing consumers that read the inline `data`
 stay compatible unchanged.
+
+**Retired execution-level download token (2026-10):** the worker no longer
+mints a token per execution, and `executions.download_token_hash` is neither
+written nor read any more — no API response ever carried that token, so the only
+way to use it was to guess 48 hex characters. `GET /api/v1/results/{token}`
+resolves the **call's** token only; a valid token presented by a client that
+does not own it is a 404 (as before) and is now logged as `denied`. Fresh
+databases do not create the column at all. On an existing database you may drop
+it, but only **after** the new code is deployed:
+
+```sql
+ALTER TABLE `executions` DROP COLUMN `download_token_hash`;
+```
+
+The previous worker version writes that column, so dropping it first would fail
+every finished run.
 
 **Breaking webhook change (2026-10):** signatures are now computed over
 `"<unix timestamp>.<raw body>"` and every delivery carries an

@@ -197,12 +197,10 @@ try {
     $ok('security.master_key is a real, non-placeholder 64-hex key', false, $e->getMessage());
 }
 
-// Storage dirs.
-$storage = Core\Filesystem::storageDir();
-foreach (['results', 'cache'] as $sub) {
-    $dir = $storage . '/' . $sub;
-    $ok("storage dir writable: {$dir}", is_dir($dir) && is_writable($dir), is_dir($dir) ? '' : 'missing');
-}
+// Storage dir (result files live here; nothing else is written to storage/).
+$resultsDir = Core\Filesystem::resultsDir();
+$ok("storage dir writable: {$resultsDir}",
+    is_dir($resultsDir) && is_writable($resultsDir), is_dir($resultsDir) ? '' : 'missing');
 
 // Free-space floor for new result files (limits.min_free_disk_bytes): below it
 // the worker refuses a run with storage_low instead of filling the volume.

@@ -42,7 +42,7 @@ use Services\StorageGuard;
  *
  * Success flow (per execution): stream rows to storage/results/{id}.json, mark
  * ready with ready_at/expires_at = ready_at + request ttl_minutes, set
- * result_path/size/row_count/truncated, mint the download token (hash only).
+ * result_path/size/row_count/truncated (download credentials are per call).
  * Webhook deliveries for the attached calls are enqueued by the worker as
  * 'pending' rows on success AND on failure, to be sent by the webhook
  * deliverer; the payload follows the execution status.
@@ -350,17 +350,15 @@ final class Worker
             return;
         }
 
-        $token = Str::hex(24); // 48 hex chars; only its SHA-256 is stored
         $size = (int)(@filesize($absolute) ?: 0);
         try {
-            Db::instance()->transaction(static function () use ($execId, $readyAt, $expiresAt, $size, $result, $token): void {
+            Db::instance()->transaction(static function () use ($execId, $readyAt, $expiresAt, $size, $result): void {
                 Db::instance()->execute(
                     'UPDATE executions SET status = ?, finished_at = ?, ready_at = ?, expires_at = ?,
-                            result_path = ?, result_size_bytes = ?, row_count = ?, truncated = ?,
-                            download_token_hash = ?
+                            result_path = ?, result_size_bytes = ?, row_count = ?, truncated = ?
                      WHERE id = ?',
                     ['ready', $readyAt, $readyAt, $expiresAt, 'results/' . $execId . '.json',
-                        $size, (int)$result['row_count'], $result['truncated'] ? 1 : 0, hash('sha256', $token), $execId]
+                        $size, (int)$result['row_count'], $result['truncated'] ? 1 : 0, $execId]
                 );
                 // Same transaction as the status flip: a ready row nobody was
                 // told about is indistinguishable from a lost run, and the

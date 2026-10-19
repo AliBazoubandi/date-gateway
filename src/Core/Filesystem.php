@@ -4,8 +4,8 @@ namespace Core;
 
 /**
  * Storage paths + directory preparation.
- * storage/ holds result JSON files (storage/results/) and instant-cache copies
- * (storage/cache/). It lives OUTSIDE the web root when Apache serves public/.
+ * storage/ holds the result JSON files (storage/results/). It lives OUTSIDE the
+ * web root when Apache serves public/.
  */
 final class Filesystem
 {
@@ -25,15 +25,10 @@ final class Filesystem
         return self::storageDir() . '/' . Config::get('storage.results_subdir', 'results');
     }
 
-    public static function cacheDir(): string
-    {
-        return self::storageDir() . '/' . Config::get('storage.cache_subdir', 'cache');
-    }
-
     /** Creates the storage directories if missing. */
     public static function prepare(): void
     {
-        foreach ([self::storageDir(), self::resultsDir(), self::cacheDir()] as $dir) {
+        foreach ([self::storageDir(), self::resultsDir()] as $dir) {
             if (!is_dir($dir) && !@mkdir($dir, 0770, true) && !is_dir($dir)) {
                 throw new \RuntimeException("Cannot create storage directory: {$dir}");
             }
@@ -48,9 +43,10 @@ final class Filesystem
     /**
      * Resolve a STORED result/cache path (executions.result_path). The value
      * comes from the database, so it is untrusted input: only the documented
-     * layout results|cache/name.json is accepted, and the resolved path must
-     * stay inside storage/. Throws \RuntimeException on anything else —
-     * callers treat that as "no usable file" (410/502), never as a path.
+     * layout results|cache/name.json is accepted (nothing writes to cache/
+     * any more; the prefix stays so older files can still be served and swept),
+     * and the resolved path must stay inside storage/. Throws \RuntimeException
+     * on anything else; callers treat that as "no usable file" (410/502), never as a path.
      */
     public static function resultPath(string $relative): string
     {

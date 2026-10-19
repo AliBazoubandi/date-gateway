@@ -44,14 +44,12 @@ return [
     ],
 
     'storage' => [
-        // Absolute path to the storage area (result JSON files + instant cache).
+        // Absolute path to the storage area (the result JSON files).
         // Default: <project>/storage  - outside the web root when DocumentRoot=public/
         // Override with GATEWAY_STORAGE_DIR (the test runner points it at a
         // throwaway directory so a run can never touch real result files).
         'dir' => \Core\Env::get('GATEWAY_STORAGE_DIR'),   // null = <project root>/storage
-        // Sub-paths, relative to dir:
         'results_subdir' => 'results',
-        'cache_subdir' => 'cache',
     ],
 
     'limits' => [

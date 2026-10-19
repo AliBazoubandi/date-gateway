@@ -291,10 +291,4 @@ final class Db
     {
         return $this->conn()->ping();
     }
-
-    /** Escape % and _ for a LIKE pattern built from user input (use with ?). */
-    public static function likeContains(string $s): string
-    {
-        return '%' . str_replace(['\\', '%', '_'], ['\\\\', '\%', '\_'], $s) . '%';
-    }
 }

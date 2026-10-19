@@ -241,12 +241,15 @@ $fileName = bin2hex(random_bytes(8)) . '.json';
 \Core\Filesystem::prepare();
 file_put_contents(\Core\Filesystem::resultsDir() . '/' . $fileName, $json);
 $extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $fileName;
-$token = \Core\Str::hex(24);
+// A 48-hex string of exactly the shape the retired execution-level download
+// token used to have. Nothing issues such a token any more, so it must not be
+// a credential.
+$unissued = \Core\Str::hex(24);
 $db->execute(
     "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, finished_at, ready_at, expires_at,
-        result_path, result_size_bytes, row_count, download_token_hash)
-     VALUES (?, 'delayed', 'ready', ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?, ?, 2, ?)",
-    [$reqDelayed, $now, $now, $now, $now, 'results/' . $fileName, strlen($json), hash('sha256', $token)]
+        result_path, result_size_bytes, row_count)
+     VALUES (?, 'delayed', 'ready', ?, ?, ?, ?, DATE_ADD(NOW(), INTERVAL 15 MINUTE), ?, ?, 2)",
+    [$reqDelayed, $now, $now, $now, $now, 'results/' . $fileName, strlen($json)]
 );
 $readyExecId = $db->insertId();
 
@@ -265,16 +268,22 @@ $check('download streams the file', $code === 200 && str_contains($type, 'applic
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'downloaded'") >= 1);
 [$code, $body] = api('GET', '/api/v1/results/' . $dlToken, $B['key']);
 $check('download by foreign client -> 404', $code === 404);
+$check("the foreign attempt is audited as 'denied' on that call",
+    (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'denied' AND call_id = ?",
+        [(string)($payload3['call_id'] ?? '')]) === 1);
 [$code, $body] = api('GET', '/api/v1/results/');
 $check('bad token format -> 404', $code === 404);
 
-[$code, $body] = api('GET', '/api/v1/results/' . $token, $A['key']);
-$check('execution token download -> 200', $code === 200 && json_decode($body, true) === $rows);
-[$code, $body] = api('GET', '/api/v1/results/' . $token, $B['key']);
-$check('execution token for foreign client -> 404', $code === 404);
+// The per-call token is the only download credential: an unissued 48-hex
+// string of the shape the retired execution token had resolves to nothing,
+// even for the client that would have owned the execution.
+[$code, $body] = api('GET', '/api/v1/results/' . $unissued, $A['key']);
+$check('unissued execution-shaped token -> 404', $code === 404);
+[$code, $body] = api('GET', '/api/v1/results/' . $unissued, $B['key']);
+$check('unissued execution-shaped token for another client -> 404', $code === 404);
 
 $db->execute('UPDATE executions SET expires_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE id = ?', [$readyExecId]);
-[$code, $body] = api('GET', '/api/v1/results/' . $token, $A['key']);
+[$code, $body] = api('GET', '/api/v1/results/' . $dlToken, $A['key']);
 $check('expired -> 410 + marked', $code === 410
     && (int)$db->value("SELECT status = 'expired' FROM executions WHERE id = ?", [$readyExecId]) === 1);
 

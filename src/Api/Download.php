@@ -27,34 +27,26 @@ final class Download
         $db = Db::instance();
         $ip = client_ip();
 
-        $exec = $db->one('SELECT * FROM executions WHERE download_token_hash = ?', [hash('sha256', $token)]);
-        $viaCallId = null;
-        if ($exec !== null) {
-            // The worker-issued execution token: caller must own a call on it.
-            $owned = (int)$db->value(
-                'SELECT COUNT(*) FROM calls WHERE client_id = ? AND execution_id = ?',
-                [(int)$client['id'], $exec['id']]
-            ) > 0;
-            if (!$owned) {
-                Logger::event('denied', (int)$client['id'], null, null, (int)$exec['id'], $ip, null, null,
-                    'download attempt without owning call');
-                Errors::notFound('Unknown token.');
-            }
-            $viaCallId = (string)$db->value('SELECT id FROM calls WHERE client_id = ? AND execution_id = ? LIMIT 1',
-                [(int)$client['id'], $exec['id']]);
-        } else {
-            // A per-call minted token (rule 2 attach): resolves to that call.
-            $viaCall = $db->one('SELECT id, client_id, execution_id FROM calls WHERE token_hash = ?', [hash('sha256', $token)]);
-            if ($viaCall === null || (int)$viaCall['client_id'] !== (int)$client['id']) {
-                Errors::notFound('Unknown token.');
-            }
-            $viaCallId = (string)$viaCall['id'];
-            $exec = $viaCall['execution_id'] !== null
-                ? $db->one('SELECT * FROM executions WHERE id = ?', [$viaCall['execution_id']])
-                : null;
-            if ($exec === null) {
-                Errors::notFound('Unknown token.');
-            }
+        // A per-call minted token is the only download credential: no code
+        // path ever handed out an execution-level token, so the former
+        // executions.download_token_hash lookup was unreachable except by
+        // guessing 48 hex characters.
+        $viaCall = $db->one('SELECT id, client_id, execution_id FROM calls WHERE token_hash = ?', [hash('sha256', $token)]);
+        if ($viaCall === null) {
+            Errors::notFound('Unknown token.');
+        }
+        if ((int)$viaCall['client_id'] !== (int)$client['id']) {
+            // Same 404 as an unknown token (no existence leak) but audited.
+            Logger::event('denied', (int)$client['id'], null, (string)$viaCall['id'], null, $ip,
+                null, null, 'download attempt with another client token');
+            Errors::notFound('Unknown token.');
+        }
+        $viaCallId = (string)$viaCall['id'];
+        $exec = $viaCall['execution_id'] !== null
+            ? $db->one('SELECT * FROM executions WHERE id = ?', [$viaCall['execution_id']])
+            : null;
+        if ($exec === null) {
+            Errors::notFound('Unknown token.');
         }
 
         self::streamResult($exec, $viaCallId, $ip, 'result delivered');

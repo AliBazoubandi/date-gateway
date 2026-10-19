@@ -27,8 +27,14 @@ $base = str_replace('\\', '/', realpath(\Core\Filesystem::storageDir()));
 $ok = \Core\Filesystem::resultPath('results/123.json');
 $check('valid results path resolves', str_starts_with(str_replace('\\', '/', $ok), $base . '/results/'), $ok);
 
+// cache/ is the legacy prefix: prepare() no longer creates it, but a stored
+// path in it must still resolve so an older installation stays downloadable.
+$legacyCache = \Core\Filesystem::storageDir() . '/cache';
+if (!is_dir($legacyCache) && !mkdir($legacyCache, 0770, true)) {
+    $check('legacy cache fixture dir created', false);
+}
 $ok = \Core\Filesystem::resultPath('cache/abc.JSON');
-$check('cache path + uppercase ext accepted', str_starts_with(str_replace('\\', '/', $ok), $base . '/cache/'), $ok);
+$check('legacy cache path + uppercase ext accepted', str_starts_with(str_replace('\\', '/', $ok), $base . '/cache/'), $ok);
 
 $check('dot-dot traversal throws', $throws('../config/.env'));
 $check('nested dot-dot throws', $throws('results/../secrets.json'));

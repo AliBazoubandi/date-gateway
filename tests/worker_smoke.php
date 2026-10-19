@@ -204,9 +204,10 @@ $check('ready: execution ready', $e['status'] === 'ready' && $e['started_at'] !=
 $check('ready: result_path + stored size', (string)$e['result_path'] === 'results/' . $execReady . '.json'
     && (int)$e['result_size_bytes'] === (int)(@filesize(Filesystem::resultsDir() . '/' . $execReady . '.json') ?: -1),
     (string)$e['result_path']);
-$check('ready: token hash 64-hex, raw token stored nowhere',
-    preg_match('/^[0-9a-f]{64}$/', (string)$e['download_token_hash']) === 1
-    && (int)$db->value('SELECT COUNT(*) FROM executions WHERE download_token_hash = ?', [$e['download_token_hash']]) === 1);
+$check('ready: TTL window recorded and no execution-level download credential',
+    $e['ready_at'] !== null && $e['expires_at'] !== null
+    && strtotime((string)$e['expires_at']) > strtotime((string)$e['ready_at'])
+    && !array_key_exists('download_token_hash', $e));
 $rel = Filesystem::absoluteFromRelative((string)$e['result_path']);
 $decoded = is_file($rel) ? json_decode((string)file_get_contents($rel), true) : null;
 $check('ready: streamed data rows', is_array($decoded)
@@ -282,6 +283,12 @@ $check('summary line: due=7 ready=4 failed=2 blocked=1 + swept counts',
 
 // ======================= pass 2: the cleanup CLI =============================
 // Mark two ready executions expired; seed file leftovers + a stale instant.
+// The cache/ prefix is legacy: nothing creates or writes that dir any more, so
+// the fixture makes it by hand to prove cleanup still reclaims files in it.
+if (!is_dir(Filesystem::storageDir() . '/cache') && !mkdir(Filesystem::storageDir() . '/cache', 0770, true)) {
+    fwrite(STDERR, 'cannot create the legacy cache fixture dir' . PHP_EOL);
+    exit(1);
+}
 $cacheStaleRel = "cache/wsmk_{$run}_cache.json";
 file_put_contents(Filesystem::absoluteFromRelative($cacheStaleRel), '[{"ping":1}]');
 $cacheFreshRel = "cache/wsmk_{$run}_fresh.json";
