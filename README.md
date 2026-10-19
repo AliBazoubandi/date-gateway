@@ -865,6 +865,13 @@ everything is recorded and throttled on `REMOTE_ADDR`. Behind a TLS-terminating
 proxy, leave it empty and the login throttle becomes global (one person's three
 bad passwords lock every admin out) and the logs show only the proxy.
 
+**Saving a request definition reads the form body only.** Every field of
+`/admin/requests` — including `connection_id` — is taken from the POST body; a
+value in the query string is ignored, so a link cannot repoint a saved request
+at another connection while the on-screen select shows a different one. A save
+whose body has no connection fails validation with *"Pick a connection."*
+instead of silently binding one.
+
 **Not implemented, on purpose or for now:**
 
 - **No second factor.** One factor — the password — guards the whole gateway.

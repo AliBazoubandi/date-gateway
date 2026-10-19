@@ -21,6 +21,8 @@ $adminName = "smoke_admin_{$run}";
 $ghostName = "smoke_ghost_{$run}";
 $connName = "smk {$run} mariadb";
 $code = "smk{$run}.ping";
+// [$code, $body] = http(...) reuses $code for the status; keep a stable alias.
+$reqCode = $code;
 $clientName = "smk {$run} agent";
 
 $db = db();
@@ -226,6 +228,22 @@ $check('instant clamped to sane limits',
 
 [$code, $body] = http('GET', '/admin/requests');
 $check('badge shows Instant', str_contains($body, 'Instant'));
+
+// connection_id is a POST-only field: a query-string value used to win when
+// the body omitted it, so a link could repoint a saved request at another
+// connection while the form displayed the safe one.
+[$code, $body] = http('GET', '/admin/requests/' . $reqId);
+$token = csrf($body);
+[$code, $body] = http('POST', '/admin/requests?connection_id=' . $connectionId, [
+    '_csrf' => $token, 'id' => $reqId, 'code' => $reqCode, 'name' => 'Smoke ping',
+    'description' => 'smoke', 'sql_text' => 'SELECT 1 AS ping',
+    'response_mode' => 'delayed', 'delay_minutes' => 0, 'ttl_minutes' => 15,
+    'timeout_seconds' => 30, 'max_rows' => 1000, 'is_active' => 1,
+]);
+$check('query-string connection_id is ignored',
+    str_contains($body, 'Pick a connection')
+    && (int)db()->value('SELECT connection_id FROM requests WHERE id = ?', [$reqId]) === $connectionId,
+    'code=' . $code);
 
 // Client with API key shown once + permissions ----------------------------
 [$code, $body] = http('GET', '/admin/clients/new');

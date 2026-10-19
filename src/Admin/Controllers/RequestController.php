@@ -205,7 +205,9 @@ final class RequestController
             'name' => trim((string)Http::param('name', 'p')),
             'description' => trim((string)Http::param('description', 'p')),
             'sql_text' => (string)Http::param('sql_text', 'p'),
-            'connection_id' => ctype_digit((string)Http::param('connection_id', 'g')) ? (int)Http::param('connection_id', 'g') : (int)Http::param('connection_id', 'p'),
+            // POST only: a query-string connection_id would otherwise retarget
+            // the saved request behind the select the admin can see.
+            'connection_id' => (int)trim((string)(Http::param('connection_id', 'p') ?? '')),
             'response_mode' => $mode,
             'instant_cache_seconds' => $mode === 'instant' ? $cache : 0,
             'delay_minutes' => $mode === 'delayed' ? $int('delay_minutes', 'p', 0, 10080, 0) : 0,
