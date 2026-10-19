@@ -23,11 +23,36 @@ use Worker\ResultWriter;
  * carries the rows inline (backward compatible), AND the run is streamed to
  * storage/results/{id}.json via ResultWriter so the response can include a
  * per-call download link (and ?download=1 delivers the file directly). The
- * file lifetime is limits.instant.result_ttl_minutes; sweep/cleanup handles
- * expiry exactly as for delayed results.
+ * file lifetime is limits.instant.result_ttl_minutes, which also caps the
+ * request's cache window; sweep/cleanup handles expiry exactly as for delayed
+ * results.
  */
 final class InstantExecutor
 {
+    /** File lifetime of a successful instant result, in minutes. */
+    public static function resultTtlMinutes(): int
+    {
+        return max(1, (int)Config::get('limits.instant.result_ttl_minutes', 60));
+    }
+
+    /**
+     * The instant cache window a request actually gets, in seconds (0 = off).
+     *
+     * A cache hit replays the previous run's result FILE, and that file only
+     * lives for limits.instant.result_ttl_minutes. A longer window on the
+     * request therefore cannot be honoured: the sweep silently turns every
+     * hit past the file lifetime into a fresh run. The shorter value wins, so
+     * the window the gateway promises is the window it can serve.
+     */
+    public static function cacheWindowSeconds(array $request): int
+    {
+        $wanted = (int)($request['instant_cache_seconds'] ?? 0);
+        if ($wanted <= 0) {
+            return 0;
+        }
+        return min($wanted, self::resultTtlMinutes() * 60);
+    }
+
     /** @param array<string,mixed> $request @param array<string,mixed> $connection */
     public static function handle(
         array $request,
@@ -252,7 +277,7 @@ final class InstantExecutor
         if ($fileOk) {
             $resultPath = 'results/' . $execId . '.json';
             $resultSize = (@filesize(Filesystem::resultsDir() . '/' . $execId . '.json') ?: null);
-            $ttl = max(1, (int)Config::get('limits.instant.result_ttl_minutes', 60));
+            $ttl = self::resultTtlMinutes();
             $expiresAt = Time::mysql(Time::addMinutes(new \DateTimeImmutable($readyAt, Time::timezone()), $ttl));
         }
 

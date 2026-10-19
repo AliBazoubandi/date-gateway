@@ -31,6 +31,7 @@ $codeInstDl = "smk{$run}.instant_dl";
 $codeNone = "smk{$run}.none";
 $codeBig = "smk{$run}.instant_big";
 $codeCacheMiss = "smk{$run}.instant_cachemiss";
+$codeClamp = "smk{$run}.instant_clamp";
 
 $db = db();
 $clientIds = [];
@@ -101,7 +102,9 @@ $reqRl = $addRequest($codeRl, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
 $reqInstDl = $addRequest($codeInstDl, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
 $reqBig = $addRequest($codeBig, 'instant', 30, 100, 0, "SELECT REPEAT('x', 5000) AS pad");
 $reqCacheMiss = $addRequest($codeCacheMiss, 'instant', 30, 100, 60, 'SELECT 1 AS ping');
-array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss);
+// A 24 h window on a request: only the result file lifetime is servable.
+$reqClamp = $addRequest($codeClamp, 'instant', 30, 100, 86400, 'SELECT 1 AS ping');
+array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss, $reqClamp);
 
 $mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
@@ -122,8 +125,8 @@ $db->execute(
     [$A['id'], $reqInst, $now, $A['id'], $reqBad, $now, $A['id'], $reqSlow, $now, $A['id'], $reqInstDl, $now]
 );
 $db->execute(
-    'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?)',
-    [$A['id'], $reqBig, $now, $A['id'], $reqCacheMiss, $now]
+    'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
+    [$A['id'], $reqBig, $now, $A['id'], $reqCacheMiss, $now, $A['id'], $reqClamp, $now]
 );
 
 // ----------------- dev server + curl harness -----------------
@@ -349,6 +352,40 @@ if ($missExec !== null && $missExec['result_path'] !== null) {
 }
 [$code, $body] = api('POST', '/api/v1/request/' . $codeCacheMiss, $A['key']);
 $check('cache replay without file -> 502', $code === 502 && $getErr($body) === 'result_unavailable', $body);
+
+// P2-9: the stored 24 h window on $codeClamp is clamped to the result file
+// lifetime, so a run the sweep is about to expire is never replayed from it,
+// while a live run still is.
+[$code, $body] = api('POST', '/api/v1/request/' . $codeClamp, $A['key']);
+$clampExec = $db->one("SELECT * FROM executions WHERE request_id = ? AND mode = 'instant' AND status = 'ready' ORDER BY id DESC LIMIT 1", [$reqClamp]);
+$check('clamped fixture run wrote a result with a lifetime', $code === 200 && $clampExec !== null
+    && $clampExec['expires_at'] !== null, $body);
+if ($clampExec !== null) {
+    // Age it past the file lifetime but keep it well inside the stored 24 h
+    // window, which is exactly how an un-swept expired run looks.
+    $ttlMinutes = (int)\Core\Config::get('limits.instant.result_ttl_minutes', 60);
+    $db->execute(
+        'UPDATE executions SET finished_at = DATE_SUB(NOW(), INTERVAL ? MINUTE),
+                ready_at = DATE_SUB(NOW(), INTERVAL ? MINUTE),
+                expires_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE)
+         WHERE id = ?',
+        [$ttlMinutes + 5, $ttlMinutes + 5, (int)$clampExec['id']]
+    );
+    [$code, $body] = api('POST', '/api/v1/request/' . $codeClamp, $A['key']);
+    $clampSecond = json_decode((string)$body, true);
+    $clampCall2 = $db->one('SELECT execution_id, was_shared FROM calls WHERE id = ?', [(string)($clampSecond['call_id'] ?? '')]);
+    $check('run past the file lifetime is not replayed', $code === 200 && $clampCall2 !== null
+        && (int)$clampCall2['was_shared'] === 0
+        && (int)$clampCall2['execution_id'] !== (int)$clampExec['id'], $body);
+    $clampNew = $clampCall2['execution_id'] ?? null;
+
+    [$code, $body] = api('POST', '/api/v1/request/' . $codeClamp, $A['key']);
+    $clampThird = json_decode((string)$body, true);
+    $clampCall3 = $db->one('SELECT execution_id, was_shared FROM calls WHERE id = ?', [(string)($clampThird['call_id'] ?? '')]);
+    $check('clamped window still shares a live run', $code === 200 && $clampCall3 !== null
+        && (int)$clampCall3['was_shared'] === 1
+        && (int)$clampCall3['execution_id'] === (int)$clampNew, $body);
+}
 
 [$code, $body] = api('POST', '/api/v1/request/' . $codeBad, $A['key']);
 $check('query failure -> 502 generic', $code === 502 && $getErr($body) === 'execution_failed'

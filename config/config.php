@@ -65,7 +65,10 @@ return [
             // response). The inline data in the POST response is unaffected;
             // instant requests always use this value (requests.ttl_minutes is
             // 0 by design for instant). Swept to 'expired' by cleanup.
-            'result_ttl_minutes' => 60,
+            // This is also the ceiling for requests.instant_cache_seconds: a
+            // cache window longer than the file lifetime cannot be served,
+            // because the sweep deletes the result the hit would replay.
+            'result_ttl_minutes' => (int)\Core\Env::get('GATEWAY_INSTANT_RESULT_TTL_MINUTES', 60),
             // Hard cap on the INLINE instant payload: rows are buffered in
             // memory to build the JSON response, so an unbounded result could
             // OOM the PHP process. Exceeding it fails the run with 413

@@ -42,7 +42,7 @@ $inst = $row['instant_defaults'] ?? [];
     <label>TTL for result link (minutes) <input name="ttl_minutes" value="<?= (int)($row['ttl_minutes'] ?? 15) ?>" inputmode="numeric"></label>
   </div>
   <div id="instant-fields" class="grid4">
-    <label>Instant cache window (seconds, 0 = off) <input name="instant_cache_seconds" value="<?= (int)($row['instant_cache_seconds'] ?? 0) ?>" inputmode="numeric"></label>
+    <label>Instant cache window (seconds, 0 = off, max <?= min(86400, \Services\InstantExecutor::resultTtlMinutes() * 60) ?>) <input name="instant_cache_seconds" value="<?= (int)($row['instant_cache_seconds'] ?? 0) ?>" inputmode="numeric"></label>
   </div>
   <div class="grid4">
     <label>Query timeout (seconds) <input name="timeout_seconds" value="<?= (int)($row['timeout_seconds'] ?? 60) ?>" inputmode="numeric"></label>

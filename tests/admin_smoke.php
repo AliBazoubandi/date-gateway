@@ -216,7 +216,7 @@ $token = csrf($body);
     '_csrf' => $token, 'id' => $reqId, 'code' => $code, 'name' => 'Smoke ping',
     'description' => 'smoke', 'sql_text' => 'SELECT 1 AS ping, SLEEP(0.02) AS settle',
     'connection_id' => $connId, 'response_mode' => 'instant',
-    'instant_cache_seconds' => 30, 'delay_minutes' => 0, 'ttl_minutes' => 15,
+    'instant_cache_seconds' => 999999, 'delay_minutes' => 0, 'ttl_minutes' => 15,
     'timeout_seconds' => 999999, 'max_rows' => 99999999, 'is_active' => 1,
 ]);
 $rowReq = db()->one('SELECT response_mode, timeout_seconds, max_rows, instant_cache_seconds FROM requests WHERE id = ?', [$reqId]);
@@ -225,6 +225,10 @@ $check('instant clamped to sane limits',
     && (int)$rowReq['timeout_seconds'] <= (int)\Core\Config::get('limits.instant.max_timeout_seconds', 60)
     && (int)$rowReq['max_rows'] <= (int)\Core\Config::get('limits.instant.max_rows', 20000),
     json_encode($rowReq, JSON_UNESCAPED_SLASHES));
+$cacheBound = min(86400, \Services\InstantExecutor::resultTtlMinutes() * 60);
+$check('cache window clamped to the result file lifetime',
+    $rowReq !== null && (int)$rowReq['instant_cache_seconds'] === $cacheBound,
+    'bound ' . $cacheBound . ' s, stored ' . (int)($rowReq['instant_cache_seconds'] ?? -1));
 
 [$code, $body] = http('GET', '/admin/requests');
 $check('badge shows Instant', str_contains($body, 'Instant'));

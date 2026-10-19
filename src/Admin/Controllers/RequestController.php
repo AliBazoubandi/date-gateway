@@ -10,6 +10,7 @@ use Core\Http;
 use Core\Str;
 use Core\Time;
 use Services\AuditLogger;
+use Services\InstantExecutor;
 use Services\QueryRunner;
 
 final class RequestController
@@ -199,7 +200,11 @@ final class RequestController
             $n = ($raw === '') ? $default : (int)$raw;
             return min(max($n, $min), $max);
         };
-        $cache = $int('instant_cache_seconds', 'p', 0, 86400, 0);
+        // A cache window is only servable while the cached result file lives
+        // (limits.instant.result_ttl_minutes), so the form cannot offer more
+        // than the sweep can keep. 86400 stays as a sanity ceiling.
+        $cacheMax = min(86400, InstantExecutor::resultTtlMinutes() * 60);
+        $cache = $int('instant_cache_seconds', 'p', 0, $cacheMax, 0);
         return [
             'code' => trim((string)Http::param('code', 'p')),
             'name' => trim((string)Http::param('name', 'p')),

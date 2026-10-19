@@ -296,9 +296,14 @@ downloadable until cleanup expires it (`limits.instant.result_ttl_minutes`,
 default 60 minutes — instant requests ignore requests.ttl_minutes by
 design). If the request has `instant_cache_seconds > 0`, an identical
 re-submit within the window replays the cached copy instantly
-(`instant_cache_hit` logged, with its own link; `?download=1` also works). If
-the target connection is at its concurrency cap the call gets
-`429 rate_limited` + `Retry-After` instead of queuing.
+(`instant_cache_hit` logged, with its own link; `?download=1` also works). The
+window is capped at that same file lifetime — a request asking for 24 hours of
+cache against a 60-minute file gets 60 minutes, because the sweep deletes the
+result a later hit would replay, and the admin form refuses a larger number.
+To cache longer, raise `limits.instant.result_ttl_minutes`
+(`GATEWAY_INSTANT_RESULT_TTL_MINUTES`). If the target connection is at its
+concurrency cap the call gets `429 rate_limited` + `Retry-After` instead of
+queuing.
 
 ### Per-client submit throttle
 
@@ -521,7 +526,8 @@ two rows — the new scheduled execution and the call waiting for it — as one
 transaction, so either both exist or neither does. An execution with no call
 attached is a real query run for nobody, and the worker would still claim it.
 
-Instant results follow the same spirit via the time-windowed cache.
+Instant results follow the same spirit via the time-windowed cache, whose
+window never outlives the cached result file.
 
 ## 8. Upgrading an existing installation
 
@@ -680,6 +686,9 @@ through the real submit endpoint and a real worker pass with the second
 statement refused by a database trigger — §5, §7),
 `column_names_test` (the duplicate-column naming rule of §6, run through the
 real MySQL driver, `QueryRunner` and `ResultWriter`),
+`instant_ttl_test` (the instant cache window of §4 never exceeding the result
+file lifetime, including the shipped default read from a `GATEWAY_*`-free child
+process),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised

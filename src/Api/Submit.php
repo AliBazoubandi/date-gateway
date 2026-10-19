@@ -71,7 +71,7 @@ final class Submit
         // (Content-Disposition attachment) instead of the JSON envelope.
         $asFile = (string)\Core\Http::param('download', 'g') === '1';
 
-        $cacheSeconds = (int)$request['instant_cache_seconds'];
+        $cacheSeconds = InstantExecutor::cacheWindowSeconds($request);
         if ($cacheSeconds > 0) {
             $cached = $db->one(
                 "SELECT * FROM executions
