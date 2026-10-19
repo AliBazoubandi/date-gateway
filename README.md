@@ -51,6 +51,12 @@ Two response modes:
   (default 512 MiB), but the process still needs headroom above the inline cap.
   `php cli\check.php` warns when `memory_limit` is below 256M.
 
+**Startup failures.** An unusable `GATEWAY_MASTER_KEY` or an unreadable config
+stops every request before routing. The CLI prints the reason to STDERR; a web
+request writes it to the PHP error log (`error_log`) and answers a bare
+`500 Configuration error.` — the reason never goes into the HTTP response.
+(`tests\sapi_bootstrap_test.php` runs the failure through both SAPIs.)
+
 Verify everything with:
 
 ```
@@ -609,6 +615,8 @@ certificate validation defaults, the handshake cap, and a real connect attempt
 to a closed port proving it gives up in seconds),
 `str_json_test` (`Core\Str::json()` never returns `false` and never blanks a
 response — §6),
+`sapi_bootstrap_test` (a startup config failure under both the CLI and a real
+`php -S` web request — §1),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised

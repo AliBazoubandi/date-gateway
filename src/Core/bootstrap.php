@@ -36,8 +36,15 @@ try {
     // encrypt or decrypt until a real key is configured.
     \Services\Encryption::assertUsableKey((string)Config::get('security.master_key', ''));
 } catch (\Throwable $e) {
-    // Fail loudly and clearly before anything else happens.
-    fwrite(STDERR, 'Data Gateway cannot start: ' . $e->getMessage() . PHP_EOL);
+    // Fail loudly and clearly before anything else happens. STDERR only
+    // exists under the CLI SAPI: writing to it from Apache/FPM throws
+    // "Undefined constant STDERR" *inside this handler*, which replaces the
+    // one message the operator needs with a blank 500 and a PHP fatal.
+    if (PHP_SAPI === 'cli') {
+        fwrite(STDERR, 'Data Gateway cannot start: ' . $e->getMessage() . PHP_EOL);
+    } else {
+        error_log('Data Gateway cannot start: ' . $e->getMessage());
+    }
     http_response_code(500);
     echo 'Configuration error.';
     exit(1);
