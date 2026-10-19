@@ -217,8 +217,9 @@ final class Submit
 
     /**
      * Optional per-client submit throttle (limits.client_submit_max; 0 = off).
-     * Counts this client's own recent 'submitted'/'shared' log rows in a
-     * sliding window; at/over the cap the submission is refused with 429.
+     * One atomic upsert of this client's fixed-window counter per submit, so
+     * concurrent submits cannot all read a stale count and slip past the cap
+     * together. Over the cap: 429 with the real seconds left in the window.
      */
     private static function enforceClientSubmitRate(int $clientId, int $requestId, string $ip): void
     {
@@ -227,17 +228,36 @@ final class Submit
             return;
         }
         $window = max(1, (int)Config::get('limits.client_submit_window_seconds', 60));
-        $recent = (int)Db::instance()->value(
-            "SELECT COUNT(*) FROM request_logs
-             WHERE client_id = ? AND event IN ('submitted','shared')
-               AND `timestamp` >= DATE_SUB(NOW(), INTERVAL ? SECOND)",
-            [$clientId, $window]
+        $db = Db::instance();
+
+        // The hits assignment comes FIRST because both IF() conditions must
+        // still see the stored window_start (MySQL/MariaDB evaluate ON
+        // DUPLICATE KEY UPDATE assignments left to right, already-assigned
+        // columns read their new value). LAST_INSERT_ID(expr) publishes this
+        // submit's own counter without a follow-up read, which concurrent
+        // submits could otherwise inflate past what they actually caused.
+        $db->execute(
+            'INSERT INTO client_rate_limits (client_id, window_start, hits)
+             VALUES (?, NOW(), 1)
+             ON DUPLICATE KEY UPDATE
+               hits = LAST_INSERT_ID(IF(window_start <= DATE_SUB(NOW(), INTERVAL ? SECOND), 1, hits + 1)),
+               window_start = IF(window_start <= DATE_SUB(NOW(), INTERVAL ? SECOND), NOW(), window_start)',
+            [$clientId, $window, $window]
         );
-        if ($recent >= $cap) {
-            Logger::event('rate_limited', $clientId, $requestId, null, null, $ip, null, null,
-                "client submit cap reached ({$recent} in {$window}s)");
-            Errors::rateLimited($window);
+        // insert_id is 0 on the fresh-row insert (no AUTO_INCREMENT here):
+        // that submit is hit #1.
+        $hits = max(1, $db->insertId());
+        if ($hits <= $cap) {
+            return;
         }
+
+        Logger::event('rate_limited', $clientId, $requestId, null, null, $ip, null, null,
+            "client submit cap reached ({$hits} in {$window}s)");
+        $age = (int)$db->value(
+            'SELECT TIMESTAMPDIFF(SECOND, window_start, NOW()) FROM client_rate_limits WHERE client_id = ?',
+            [$clientId]
+        );
+        Errors::rateLimited(max(1, min($window, $window - $age)));
     }
 
     private static function newCallId(): string

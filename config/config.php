@@ -82,11 +82,14 @@ return [
         // Default max_rows suggested for new DELAYED requests (admin form).
         'default' => ['max_rows' => 100000],
         // Optional per-client submit throttle. 0 = disabled. When enabled, a
-        // client may start at most N submissions ('submitted'/'shared') per
-        // window; extra ones get 429 + Retry-After (logged as 'rate_limited').
+        // client may start at most N submissions per fixed window
+        // (limits.client_submit_window_seconds); extra ones get 429 +
+        // Retry-After with the seconds left in that window (logged as
+        // 'rate_limited'). Counters live in client_rate_limits, not in
+        // request_logs, so pruning logs cannot loosen the cap.
         // Production: 60 submissions per 60s window per client.
         'client_submit_window_seconds' => 60,
-        'client_submit_max' => 60,
+        'client_submit_max' => (int)\Core\Env::get('GATEWAY_CLIENT_SUBMIT_MAX', 60),
         // 429 response for instant mode when the per-connection cap is busy.
         'rate_limited_retry_after' => 5,
     ],

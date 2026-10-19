@@ -242,6 +242,21 @@ CREATE TABLE IF NOT EXISTS `webhook_deliveries` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
+-- Per-client submit throttle counters (one row per client, fixed window).
+-- `hits` is incremented atomically by the submit endpoint (single
+-- INSERT ... ON DUPLICATE KEY UPDATE), which is why this exists separately
+-- from request_logs: counting log rows raced under concurrent submits and
+-- changed behavior whenever logs were pruned. window_start resets the count
+-- once the window (limits.client_submit_window_seconds) has passed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `client_rate_limits` (
+  `client_id`     INT UNSIGNED NOT NULL,
+  `window_start`  DATETIME     NOT NULL,
+  `hits`          INT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`client_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
 -- Foreign keys (added last so the import order never matters)
 -- ---------------------------------------------------------------------------
 ALTER TABLE `requests`
@@ -264,6 +279,9 @@ ALTER TABLE `calls`
 ALTER TABLE `webhook_deliveries`
   ADD CONSTRAINT `fk_whd_call` FOREIGN KEY (`call_id`) REFERENCES `calls` (`id`) ON DELETE RESTRICT;
 
+ALTER TABLE `client_rate_limits`
+  ADD CONSTRAINT `fk_crl_client` FOREIGN KEY (`client_id`) REFERENCES `clients` (`id`) ON DELETE CASCADE;
+
 -- ---------------------------------------------------------------------------
 -- Upgrading an EXISTING installation (CREATE TABLE IF NOT EXISTS above does
 -- not touch tables that already exist). Run once:
@@ -273,4 +291,17 @@ ALTER TABLE `webhook_deliveries`
 --       AFTER `token_hash`;
 -- Older rows keep token_enc = NULL: their calls simply get no link in the
 -- webhook payload; everything else keeps working.
+--
+--   CREATE TABLE IF NOT EXISTS `client_rate_limits` (
+--     `client_id`    INT UNSIGNED NOT NULL,
+--     `window_start` DATETIME     NOT NULL,
+--     `hits`         INT UNSIGNED NOT NULL DEFAULT 1,
+--     PRIMARY KEY (`client_id`)
+--   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+--   ALTER TABLE `client_rate_limits`
+--     ADD CONSTRAINT `fk_crl_client` FOREIGN KEY (`client_id`)
+--       REFERENCES `clients` (`id`) ON DELETE CASCADE;
+-- (the per-client submit throttle counter. Create it BEFORE deploying the new
+-- code: with limits.client_submit_max > 0 every submit touches this table, so
+-- a missing table would fail the submission endpoint.)
 -- ---------------------------------------------------------------------------

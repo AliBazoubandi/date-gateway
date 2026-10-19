@@ -262,12 +262,22 @@ the target connection is at its concurrency cap the call gets
 ### Per-client submit throttle
 
 `limits.client_submit_max` caps how many submissions one client may start per
-`limits.client_submit_window_seconds`. It counts that client's own
-`submitted`/`shared` log rows in a sliding window; once the cap is reached,
-further submits return `429 rate_limited` + `Retry-After` and are logged as
-`rate_limited`. This is independent of the per-connection concurrency cap
-above. **Currently enabled at 60 submissions per 60s window** in
-`config/config.php`; set `client_submit_max` back to `0` to disable.
+`limits.client_submit_window_seconds`. The counter lives in the
+`client_rate_limits` table (one row per client: `window_start`, `hits`) and is
+bumped by a single `INSERT ... ON DUPLICATE KEY UPDATE`, so simultaneous
+submits cannot all read a stale count and slip past the cap together, and
+pruning `request_logs` cannot silently loosen it. Once the cap is reached,
+further submits return `429 rate_limited` with `Retry-After` set to the seconds
+left in the current window (not the whole window) and are logged as
+`rate_limited`. The window is **fixed**, not sliding: `hits` resets to 1 on the
+first submit after `window_start + window_seconds`.
+
+This is independent of the per-connection concurrency cap above. **Currently
+enabled at 60 submissions per 60s window** in `config/config.php`; set
+`client_submit_max` (or the `GATEWAY_CLIENT_SUBMIT_MAX` environment override)
+to `0` to disable. Upgrading an existing installation requires the
+`client_rate_limits` table from `sql/schema.sql` (see the upgrade block at the
+end of that file) before deploying this code.
 
 ## 5. Webhooks
 
@@ -391,9 +401,11 @@ no longer verify.
 a throwaway environment itself — random `data_gateway_test_<random>` schema
 (imported from `sql\schema.sql`), throwaway `storage\test-<random>` dir — and
 runs everything against it: `php -l` on every file, `smoke_db`,
-`encryption_test --db`, `links_test`, then the four end-to-end smokes
-(`api_smoke`, `admin_smoke`, `worker_smoke`, `webhook_smoke`) plus
-`stream_memory_test`, each refusing to run unless `GATEWAY_TEST_MODE=1` and
+`encryption_test --db`, `links_test`, `filesystem_test`, `sqlguard_test`,
+`readonly_driver_test`, `pool_test`, `resultwriter_test`, `throttle_test`,
+then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
+`webhook_smoke`) plus `stream_memory_test`, each refusing to run unless
+`GATEWAY_TEST_MODE=1` and
 the metadata DB name contains `_test` (they `exit(2)` otherwise). The DB and
 storage dir are always dropped in a `finally` block, and every fixture is
 run-scoped, so a green run touches nothing outside its sandbox:
