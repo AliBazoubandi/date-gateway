@@ -150,6 +150,9 @@ try {
     Invoke-Suite "proxy_test" {
         & $PhpExe (Join-Path $PSScriptRoot "proxy_test.php")
     }
+    Invoke-Suite "driver_tls_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "driver_tls_test.php")
+    }
 
     # 3) the four smoke tests.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in

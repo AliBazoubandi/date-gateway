@@ -569,6 +569,25 @@ clients whose URL would be refused — and relax with
 `GATEWAY_WEBHOOK_ALLOW_HTTP=1` / `GATEWAY_WEBHOOK_ALLOW_LOOPBACK=1` in
 `config/.env` if the deployment really needs one of those receivers.
 
+**SQL Server certificate validation (2026-10):** no schema change, but the
+default flipped: `connections.sqlsrv_trust_server_certificate` used to be `true`
+(accept any certificate) and is now `false`, and the session is now encrypted
+unless `GATEWAY_SQLSRV_ENCRYPT=0` says otherwise (see §14). **Every SQL Server
+target whose certificate does not chain to a CA in the Windows trust store on
+the gateway host will start failing to connect on deploy** — a self-signed
+intranet server is exactly that case. Either install the issuing certificate
+first, or decide deliberately and put
+
+```
+GATEWAY_SQLSRV_TRUST_SERVER_CERT=1
+```
+
+in `config/.env`. `php cli\check.php` reports the stance and WARNs when active
+SQL Server connections exist with validation off. Separately, the connect
+handshake is now capped at `GATEWAY_SQLSRV_LOGIN_TIMEOUT` (default 15 s) instead
+of inheriting the per-request query timeout, so a dead server fails fast rather
+than holding a worker slot for the whole timeout.
+
 ## 9. Tests
 
 **Safe path — `tests\run_all.ps1`** (PowerShell, no elevation needed): builds
@@ -580,6 +599,9 @@ runs everything against it: `php -l` on every file, `smoke_db`,
 `proxy_test` (the address-range math of `Core\IpRange` and who
 `Core\TrustedProxies`/`client_ip()` believe, plus the shipped admin session
 defaults read from a `GATEWAY_*`-free child process),
+`driver_tls_test` (the SQL Server connection options of §14 — encryption and
+certificate validation defaults, the handshake cap, and a real connect attempt
+to a closed port proving it gives up in seconds),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised
@@ -787,5 +809,53 @@ bad passwords lock every admin out) and the logs show only the proxy.
   account: 5 failures then a 15-minute lock; per address: 3 failures in a
   5-minute window). If the panel is reachable from a wide network, throttle it
   at the proxy.
+
+## 14. Target database connections: transport security
+
+The gateway sends each target connection's login and password, and receives
+result rows, over the network — so that hop is a secret path, not just a
+socket. What it does:
+
+**SQL Server (`sqlsrv`).** `Db\SqlServerDriver::connectionOptions()` is the
+single place these options are built (admin *Test* button and worker alike), and
+it is unit-tested (`tests\driver_tls_test.php`) without needing a server:
+
+| Option | Value | Knob |
+|--------|-------|------|
+| `Encrypt` | `true` | `GATEWAY_SQLSRV_ENCRYPT=0` |
+| `TrustServerCertificate` | `false` (validated) | `GATEWAY_SQLSRV_TRUST_SERVER_CERT=1` |
+| `LoginTimeout` | `min(sqlsrv_login_timeout, max(5, query timeout))` | `GATEWAY_SQLSRV_LOGIN_TIMEOUT` (default `15`) |
+| `ReturnDatesAsStrings`, `CharacterSet=UTF-8` | forced, not configurable | — (§6) |
+
+- **Certificates are validated by default.** The target's server certificate
+  must chain to a CA in the Windows trusted-root store on the gateway host. A
+  server with a self-signed or internally-issued certificate then fails to
+  connect with a `sqlsrv_connect` error — that is the intended outcome: fix it
+  by exporting the issuing CA's certificate and installing it on the gateway
+  (`certmgr.msc` → *Trusted Root Certification Authorities*, or
+  `certutil -addstore -f ROOT <file.cer>` elevated).
+- Setting `GATEWAY_SQLSRV_TRUST_SERVER_CERT=1` keeps the session encrypted but
+  accepts **any** certificate, so anyone on the path to the target database can
+  impersonate it and read every credential and row. Defensible on a closed LAN,
+  never across a network you do not own. `php cli\check.php` prints the effective
+  stance and WARNs while active SQL Server connections exist with validation
+  off.
+- **The handshake gets its own cap.** Before, `LoginTimeout` was derived from
+  the per-request query timeout, so a 1800-second timeout also meant "wait
+  half an hour for a server that never answers" — tying up a worker slot or an
+  instant request. The login now never exceeds
+  `connections.sqlsrv_login_timeout` (still at least 5 s for a slow VPN), and
+  `driver_tls_test` proves a connect attempt to a closed port raises
+  `Db\DbConnectException` in seconds.
+
+**MySQL and PostgreSQL.** These drivers set **no TLS options at all** —
+`MySqlDriver` uses `MYSQLI_OPT_CONNECT_TIMEOUT`/`MYSQLI_OPT_READ_TIMEOUT` and
+`PgSqlDriver` uses `connect_timeout=15`, then pass host/port/user/password/db
+only; neither `MYSQLI_OPT_SSL_*` nor `sslmode` is available in this build. For
+those targets the encryption decision belongs to the database server and the
+network: require TLS server-side (`require_secure_transport=ON` for
+MySQL/MariaDB, `ssl = on` + `hostssl` lines in `pg_hba.conf`), or carry the
+connection over a tunnel you control (IPsec, stunnel, an SSH port-forward to
+`127.0.0.1`). `connections.sqlsrv_*` knobs do not affect them.
 
 

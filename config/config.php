@@ -200,8 +200,19 @@ return [
     'test_connections' => [],
 
     'connections' => [
-        // SQL Server encryption: true = accept self-signed certificates (typical
-        // intranet setups), false = enforce certificate validation.
-        'sqlsrv_trust_server_certificate' => true,
+        // ---- SQL Server transport security (see Db\SqlServerDriver). ----
+        // Encrypt the session. Off only for a server that cannot do TLS at all.
+        'sqlsrv_encrypt' => (string)\Core\Env::get('GATEWAY_SQLSRV_ENCRYPT', '1') === '1',
+        // TRUE would accept any certificate, including one forged by someone
+        // between the gateway and the target database. Default is validation:
+        // the server certificate must chain to a CA in the Windows trust store.
+        // For an intranet server with a self-signed certificate either install
+        // that certificate there, or set GATEWAY_SQLSRV_TRUST_SERVER_CERT=1.
+        'sqlsrv_trust_server_certificate' =>
+            (string)\Core\Env::get('GATEWAY_SQLSRV_TRUST_SERVER_CERT', '0') === '1',
+        // Seconds sqlsrv_connect may spend on the TCP+TLS handshake. A long
+        // per-request query timeout must not become a long connection wait:
+        // it would hold a worker slot (or an instant request) hostage.
+        'sqlsrv_login_timeout' => (int)\Core\Env::get('GATEWAY_SQLSRV_LOGIN_TIMEOUT', 15),
     ],
 ];

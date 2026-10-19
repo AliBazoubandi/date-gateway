@@ -159,6 +159,21 @@ try {
             . ' - fix the URL on the client, or relax webhook.allow_*');
     }
 
+    // SQL Server is the only target type whose transport this code configures
+    // (MySQL and PostgreSQL take TLS from their own server-side setup), so
+    // report the policy and shout when certificates are not validated.
+    $sqlsrvActive = (int)db()->value("SELECT COUNT(*) FROM connections WHERE db_type = 'sqlserver' AND is_active = 1");
+    $trustBad = (bool)Core\Config::get('connections.sqlsrv_trust_server_certificate', false);
+    if ($sqlsrvActive > 0 && $trustBad) {
+        $warn("{$sqlsrvActive} SQL Server connection(s) with certificate validation off",
+            'any host on the path to the target database can impersonate it; install the certificate in the'
+            . ' Windows trust store and unset GATEWAY_SQLSRV_TRUST_SERVER_CERT');
+    }
+    echo '     sql server targets: ', (string)$sqlsrvActive, ' active, transport ',
+        Core\Config::get('connections.sqlsrv_encrypt', true) ? 'encrypted' : 'PLAINTEXT',
+        ', certificate ', ($trustBad ? 'accepted without validation' : 'validated'),
+        ', handshake cap ', (string)(int)Core\Config::get('connections.sqlsrv_login_timeout', 15), 's', PHP_EOL;
+
     // A delayed timeout at or above the stale-running threshold means the worker
     // could fail a legitimately-running query; the admin UI caps at 1800s (30min).
     $staleMinutes = max(1, (int)Core\Config::get('worker.stale_running_minutes', 90));

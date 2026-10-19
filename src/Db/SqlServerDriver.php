@@ -21,7 +21,29 @@ final class SqlServerDriver implements DriverInterface
             );
         }
         $server = $o['host'] . (($o['port'] ?? 0) > 0 ? ',' . (int)$o['port'] : '');
-        $options = [
+        $conn = @sqlsrv_connect($server, self::connectionOptions($o));
+        if ($conn === false) {
+            throw new DbConnectException('SQL Server connect failed: ' . $this->collectErrors(null));
+        }
+        $this->conn = $conn;
+        $this->lastError = '';
+    }
+
+    /**
+     * The sqlsrv connection options for a parameter set, kept separate from
+     * connect() so the security-relevant defaults are testable without a
+     * server (and without the extension).
+     *
+     * @param array<string,mixed> $o
+     * @return array<string,mixed>
+     */
+    public static function connectionOptions(array $o): array
+    {
+        // Handshake cap: a query timeout of 300 s must not mean a worker slot
+        // blocked for 300 s on a server that never answers.
+        $cap = max(1, (int)($o['login_timeout'] ?? 15));
+        $query = max(1, (int)($o['timeout'] ?? 30));
+        return [
             'Database' => $o['db'],
             'UID' => $o['user'],
             'PWD' => $o['password'],
@@ -31,17 +53,17 @@ final class SqlServerDriver implements DriverInterface
             // codepage unless this is set, which corrupts them to '?' and
             // produces invalid UTF-8 that breaks JSON encoding downstream.
             'CharacterSet' => 'UTF-8',
-            // Intranet servers with self-signed TLS; set
-            // connections.sqlsrv_trust_server_certificate = false to enforce validation.
-            'TrustServerCertificate' => (bool)($o['trust_server_certificate'] ?? true),
-            'LoginTimeout' => max(10, (int)$o['timeout']),
+            // Encrypted transport by default (connections.sqlsrv_encrypt), and
+            // the certificate is validated by default too
+            // (connections.sqlsrv_trust_server_certificate = false): an
+            // unvalidated certificate means anyone on the path to the target
+            // database can read and answer as if it were it. For an intranet
+            // server whose self-signed certificate cannot be installed in the
+            // Windows trust store, set GATEWAY_SQLSRV_TRUST_SERVER_CERT=1.
+            'Encrypt' => (bool)($o['encrypt'] ?? true),
+            'TrustServerCertificate' => (bool)($o['trust_server_certificate'] ?? false),
+            'LoginTimeout' => min($cap, max(5, $query)),
         ];
-        $conn = @sqlsrv_connect($server, $options);
-        if ($conn === false) {
-            throw new DbConnectException('SQL Server connect failed: ' . $this->collectErrors(null));
-        }
-        $this->conn = $conn;
-        $this->lastError = '';
     }
 
     public function setQueryTimeout(int $seconds): void

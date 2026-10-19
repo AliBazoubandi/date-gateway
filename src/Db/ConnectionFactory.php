@@ -16,7 +16,8 @@ final class ConnectionFactory
     /**
      * @param array{db_type:string,host:string,port?:int|null,db:string,
      *              user:string,password:string,timeout?:int,
-     *              trust_server_certificate?:bool} $p
+     *              trust_server_certificate?:bool,encrypt?:bool,
+     *              login_timeout?:int} $p
      */
     public static function fromParams(array $p): DriverInterface
     {
@@ -48,7 +49,6 @@ final class ConnectionFactory
             'user' => (string)$row['username'],
             'password' => $password,
             'timeout' => $timeoutSeconds ?? (int)($row['timeout_seconds'] ?? 30),
-            'trust_server_certificate' => (bool)\Core\Config::get('connections.sqlsrv_trust_server_certificate', true),
         ]);
     }
 
@@ -71,7 +71,15 @@ final class ConnectionFactory
             'user' => (string)$p['user'],
             'password' => (string)($p['password'] ?? ''),
             'timeout' => max(1, (int)($p['timeout'] ?? 30)),
-            'trust_server_certificate' => (bool)($p['trust_server_certificate'] ?? true),
+            // SQL Server transport settings (other drivers take theirs from
+            // their own DSN/conn string): resolved once here so the admin
+            // test-run and the worker always use the same policy.
+            'trust_server_certificate' => (bool)($p['trust_server_certificate']
+                ?? \Core\Config::get('connections.sqlsrv_trust_server_certificate', false)),
+            'encrypt' => (bool)($p['encrypt']
+                ?? \Core\Config::get('connections.sqlsrv_encrypt', true)),
+            'login_timeout' => max(1, (int)($p['login_timeout']
+                ?? \Core\Config::get('connections.sqlsrv_login_timeout', 15))),
         ];
     }
 }
