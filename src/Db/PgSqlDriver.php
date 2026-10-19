@@ -93,7 +93,7 @@ final class PgSqlDriver implements DriverInterface
         if ($res === false) {
             throw new DbQueryException($this->connError(), $this->timedOut);
         }
-        return ['type' => 'result', 'res' => $res];
+        return ['type' => 'result', 'res' => $res, 'keys' => ColumnNames::deduplicate(self::fieldNames($res))];
     }
 
     public function fetchRow(mixed $stmt): ?array
@@ -104,8 +104,16 @@ final class PgSqlDriver implements DriverInterface
                 if ($res === false) {
                     throw new DbQueryException($this->connError(), $this->timedOut);
                 }
-                $this->buffer = @pg_fetch_all($res); // [] when the cursor is empty/exhausted
+                // Rows are fetched numerically and named from the field list:
+                // pg_fetch_all() builds assoc rows from raw column names, so a
+                // repeated alias would collapse (see ColumnNames).
+                $keys = ColumnNames::deduplicate(self::fieldNames($res));
+                $rows = [];
+                while (($raw = @pg_fetch_row($res)) !== false) {
+                    $rows[] = count($keys) === count($raw) ? array_combine($keys, $raw) : $raw;
+                }
                 @pg_free_result($res);
+                $this->buffer = $rows; // [] when the cursor is empty/exhausted
             }
             if ($this->buffer === null || $this->buffer === []) {
                 return null;
@@ -117,10 +125,31 @@ final class PgSqlDriver implements DriverInterface
             return $row;
         }
         if (($stmt['type'] ?? '') === 'result') {
-            $row = @pg_fetch_assoc($stmt['res']);
-            return $row === false ? null : $row;
+            $raw = @pg_fetch_row($stmt['res']);
+            if (!is_array($raw)) {
+                return null;
+            }
+            $keys = $stmt['keys'] ?? null;
+            return is_array($keys) && count($keys) === count($raw)
+                ? array_combine($keys, $raw)
+                : $raw;
         }
         return null;
+    }
+
+    /**
+     * Raw column names of a result, in order (duplicates included).
+     * @param resource $res
+     * @return list<string>
+     */
+    private static function fieldNames($res): array
+    {
+        $names = [];
+        $count = (int)@pg_num_fields($res);
+        for ($i = 0; $i < $count; $i++) {
+            $names[] = (string)@pg_field_name($res, $i);
+        }
+        return $names;
     }
 
     public function free(mixed $stmt): void

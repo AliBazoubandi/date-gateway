@@ -162,6 +162,9 @@ try {
     Invoke-Suite "transaction_test" {
         & $PhpExe (Join-Path $PSScriptRoot "transaction_test.php")
     }
+    Invoke-Suite "column_names_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "column_names_test.php")
+    }
 
     # 3) the four smoke tests.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in

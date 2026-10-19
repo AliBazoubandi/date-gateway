@@ -17,6 +17,8 @@ final class MySqlDriver implements DriverInterface
     private $m = null;
     /** @var resource|\mysqli_result|null */
     private $result = null;
+    /** @var list<string>|null deduplicated column names of the open result */
+    private ?array $columnKeys = null;
     private int $timeout = 30;
     private string $lastError = '';
     private bool $timedOut = false;
@@ -95,6 +97,7 @@ final class MySqlDriver implements DriverInterface
 
     public function query(string $sql): mixed
     {
+        $this->columnKeys = null;
         try {
             $ok = $this->m->real_query($sql);
         } catch (\mysqli_sql_exception $e) {
@@ -115,19 +118,31 @@ final class MySqlDriver implements DriverInterface
             throw $this->queryException($this->m->error, (int)$this->m->errno);
         }
         $this->result = $res;
+        $this->columnKeys = ColumnNames::deduplicate(self::fieldNames($res));
         return $res;
     }
 
     public function fetchRow(mixed $stmt): ?array
     {
+        if ($stmt === null) {
+            return null;
+        }
         try {
-            $row = $stmt->fetch_assoc();
+            // Numeric, not assoc: fetch_assoc() would collapse a repeated
+            // column name and drop the earlier value (see ColumnNames).
+            $row = $stmt->fetch_row();
         } catch (\mysqli_sql_exception $e) {
             // Unbuffered results surface errors (incl. max_statement_time
             // cancellations) here during the fetch phase.
             throw $this->queryException($e->getMessage(), (int)$this->m?->errno);
         }
-        return is_array($row) ? $row : null;
+        if (!is_array($row)) {
+            return null;
+        }
+        $keys = $this->columnKeys;
+        return ($keys === null || count($keys) !== count($row))
+            ? $row // metadata unavailable: keep the row positionally
+            : array_combine($keys, $row);
     }
 
     public function free(mixed $stmt): void
@@ -137,6 +152,7 @@ final class MySqlDriver implements DriverInterface
             @$stmt->free();
         }
         $this->result = null;
+        $this->columnKeys = null;
     }
 
     public function close(): void
@@ -160,6 +176,20 @@ final class MySqlDriver implements DriverInterface
     public function lastError(): string
     {
         return $this->lastError;
+    }
+
+    /**
+     * Raw column names of a result, in order (duplicates included).
+     * @param \mysqli_result $res
+     * @return list<string>
+     */
+    private static function fieldNames($res): array
+    {
+        $names = [];
+        foreach ($res->fetch_fields() ?: [] as $field) {
+            $names[] = (string)$field->name;
+        }
+        return $names;
     }
 
     private function queryException(string $message, int $errno): DbQueryException

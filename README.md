@@ -480,6 +480,31 @@ notifications are lost.
   result file tells you a repair happened; with the SQL Server charset fix
   it should never appear again.
 
+### What a result row looks like
+
+- **Duplicate column names are kept, not collapsed.** The target drivers fetch
+  numeric rows and name them through `Db\ColumnNames::deduplicate()`: the
+  second `... AS n` in the same SELECT becomes `n_2`, the third `n_3`, and an
+  empty column name becomes `col_<position>`. Otherwise the keys are exactly
+  the aliases of the approved SQL — not trimmed, not case-folded, never
+  reordered. Before this, the native `fetch_assoc()` / `pg_fetch_all()` /
+  `sqlsrv_fetch_array(ASSOC)` calls built the row map from the raw column list
+  and kept only the **last** value of a repeated alias, so an approved column
+  disappeared from the row counts, the download file and the inline instant
+  result, with no error anywhere. `tests\column_names_test.php` pins the
+  naming rule and runs it through the real MySQL driver, `QueryRunner` and
+  `ResultWriter`.
+- **Numbers arrive as strings.** `SELECT 1 AS n` is `"n": "1"`, `2.50` is
+  `"2.50"`; only NULL stays JSON `null`. All three drivers hand back the
+  text the server sent, and the gateway deliberately does not guess a column's
+  type from its name — clients that need integers cast them.
+- **Binary columns are lossy.** `BLOB`/`VARBINARY`/`bytea` values reach the
+  JSON layer as raw bytes, which are usually invalid UTF-8, so they are
+  substituted or repaired (`meta.encoding_sanitized`) and cannot be recovered
+  downstream. Base64-encode inside the approved SQL when a client needs binary
+  data — `TO_BASE64(col)` on MySQL, `encode(col, 'base64')` on PostgreSQL —
+  or keep the column out of the query; T-SQL has no portable built-in.
+
 ## 7. Cache rules (delayed mode)
 
 1. A submit while an execution for the request is `scheduled`/`running`
@@ -634,6 +659,8 @@ response — §6),
 `transaction_test` (the InnoDB engines plus `Core\Db::transaction()`, driven
 through the real submit endpoint and a real worker pass with the second
 statement refused by a database trigger — §5, §7),
+`column_names_test` (the duplicate-column naming rule of §6, run through the
+real MySQL driver, `QueryRunner` and `ResultWriter`),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised

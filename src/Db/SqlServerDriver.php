@@ -12,6 +12,8 @@ final class SqlServerDriver implements DriverInterface
     private $conn = null;
     private int $timeout = 30;
     private string $lastError = '';
+    /** @var list<string>|null deduplicated column names of the open statement */
+    private ?array $columnKeys = null;
 
     public function connect(array $o): void
     {
@@ -73,24 +75,41 @@ final class SqlServerDriver implements DriverInterface
 
     public function query(string $sql): mixed
     {
+        $this->columnKeys = null;
         $stmt = @sqlsrv_query($this->conn, $sql, [], ['QueryTimeout' => $this->timeout]);
         if ($stmt === false) {
             $msg = $this->collectErrors(null);
             $this->lastError = $msg;
             throw new DbQueryException($msg, $this->isTimeoutText($msg));
         }
+        $meta = @sqlsrv_field_metadata($stmt);
+        if (is_array($meta)) {
+            $names = [];
+            foreach ($meta as $field) {
+                $names[] = (string)($field['Name'] ?? '');
+            }
+            $this->columnKeys = ColumnNames::deduplicate($names);
+        }
         return $stmt;
     }
 
     public function fetchRow(mixed $stmt): ?array
     {
-        $row = @sqlsrv_fetch_array($stmt, SQLSRV_FETCH_ASSOC);
+        // Numeric, not assoc: a repeated column name would otherwise collapse
+        // and the earlier value would vanish (see ColumnNames).
+        $row = @sqlsrv_fetch_array($stmt, SQLSRV_FETCH_NUMERIC);
         if ($row === false) {
             $msg = $this->collectErrors(null);
             $this->lastError = $msg;
             throw new DbQueryException($msg, $this->isTimeoutText($msg));
         }
-        return $row === null ? null : $row;
+        if (!is_array($row)) {
+            return null;
+        }
+        $keys = $this->columnKeys;
+        return ($keys === null || count($keys) !== count($row))
+            ? $row // metadata unavailable: keep the row positionally
+            : array_combine($keys, $row);
     }
 
     public function free(mixed $stmt): void
@@ -98,6 +117,7 @@ final class SqlServerDriver implements DriverInterface
         if ($stmt !== null) {
             @sqlsrv_free_stmt($stmt);
         }
+        $this->columnKeys = null;
     }
 
     public function close(): void
