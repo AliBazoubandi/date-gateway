@@ -326,8 +326,34 @@ $execStaleInst = $mkExec(['request_id' => $rReady, 'mode' => 'instant', 'status'
 $db->execute("UPDATE executions SET expires_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE id IN (?, ?)",
     [$execReady, $execTtl]);
 
+// Orphan sweep fixtures: more execution ids than one IN() chunk (500), with no
+// executions row behind them, spread over both storage dirs, plus the .tmp
+// sibling of the first id and a cache/ file sharing that same id.
+$orphanBase = ((int)$db->value('SELECT MAX(id) FROM executions')) + 100000;
+$orphanIds = [];
+for ($i = 0; $i < 501; $i++) {
+    $orphanIds[] = $orphanBase + $i;
+}
+$orphanRels = [];
+foreach ($orphanIds as $oid) {
+    $rel = "results/{$oid}.json";
+    file_put_contents(Filesystem::absoluteFromRelative($rel), '{"data":[]}');
+    $orphanRels[] = $rel;
+}
+foreach (["results/{$orphanIds[0]}.json.tmp", "cache/{$orphanIds[0]}.json"] as $rel) {
+    file_put_contents(Filesystem::absoluteFromRelative($rel), '{"data":[');
+    $orphanRels[] = $rel;
+}
+
 [$cCode, $cOut] = $runCli('cli/cleanup.php');
 $check('CLI cleanup exits 0', $cCode === 0 && !str_contains($cOut, 'ERR::'), substr($cOut, 0, 300));
+$orphansLeft = array_values(array_filter($orphanRels,
+    static fn (string $r): bool => is_file(Filesystem::absoluteFromRelative($r))));
+$check('cleanup: every orphan file removed across both dirs and the .tmp sibling',
+    $orphansLeft === [], count($orphansLeft) . ' left of ' . count($orphanRels));
+$check('cleanup: each orphan removal logged',
+    (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'expired' AND execution_id >= ?", [$orphanBase]) >= 501,
+    (string)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'expired' AND execution_id >= ?", [$orphanBase]));
 $check('cleanup: expired ready marked', $execRow($execReady)['status'] === 'expired'
     && $execRow($execTtl)['status'] === 'expired');
 $check('cleanup: their files deleted',

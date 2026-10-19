@@ -15,12 +15,14 @@ use Services\Logger;
  *
  *  1. Ready executions whose expires_at passed -> delete the result/cache
  *     file, mark the execution 'expired', log 'expired'.
- *  2. Failed or expired executions that still reference a file -> delete the
- *     leftover, clear result_path.
+ *  2. Any row that references a file no download can serve (failed, expired,
+ *     or the inconsistent scheduled/running-with-a-path leftover) -> delete the
+ *     leftover and its .tmp sibling, clear result_path in chunks.
  *  3. Instant executions stuck 'running' (web request died mid-query) older
  *     than the request timeout + grace -> mark failed, log 'failed'.
  *  4. Result/cache files whose executions row no longer exists (manual row
- *     deletes, crashed inserts) -> delete the orphan file.
+ *     deletes, crashed inserts) -> delete the orphan; the ids are looked up in
+ *     chunks, not one query per file.
  *  5. Retention (cleanup.retention.*): prune request_logs, webhook deliveries,
  *     calls, executions and the admin audit log, each only when its own window
  *     is > 0 (0 = keep forever, the default). Deletion is batched and ordered
@@ -36,6 +38,9 @@ final class Cleanup
     /** Batches per table per pass: bounds one cleanup run at 20k rows a table. */
     private const PRUNE_BATCHES_PER_PASS = 20;
 
+    /** Execution ids per statement when checking stored files for owners. */
+    private const ID_CHUNK = 500;
+
     /**
      * @return array{expired:int, files_removed:int, stale_instant:int,
      *     logs_removed:int, deliveries_removed:int, calls_removed:int,
@@ -45,7 +50,7 @@ final class Cleanup
     {
         Filesystem::prepare();
         $expired = self::expireReady();
-        $files = self::clearFailedFiles() + self::clearExpiredFiles() + self::sweepOrphanFiles();
+        $files = self::clearLeftoverFiles() + self::sweepOrphanFiles();
         $stale = self::failStaleInstant();
         $pruned = [
             // Deliveries first, then the calls that own them, then the
@@ -70,7 +75,12 @@ final class Cleanup
 
     // ------------------------------------------------------------------
 
-    /** 1) Expired ready executions: remove file, mark expired, clear the path. */
+    /**
+     * 1) Expired ready executions: remove file, mark expired, clear the path.
+     *    The status update is one statement per ID_CHUNK rows instead of one
+     *    per expired result, which is the difference between a pass that keeps
+     *    up and one that does not after TTLs are first switched on.
+     */
     private static function expireReady(): int
     {
         $db = Db::instance();
@@ -78,39 +88,46 @@ final class Cleanup
             "SELECT id, request_id, result_path, row_count FROM executions
              WHERE status = 'ready' AND expires_at IS NOT NULL AND expires_at <= NOW()"
         );
-        $n = 0;
+        $ids = [];
         foreach ($rows as $row) {
             // Delete the file FIRST: while status is still 'ready' a racing
             // download sees the missing file and self-heals to 410 (existing
             // logic), instead of streaming a file that vanishes mid-read.
             $removed = self::safeUnlink((string)$row['result_path']);
-            $n += $db->execute(
-                "UPDATE executions SET status = 'expired', result_path = NULL, result_size_bytes = NULL
-                 WHERE id = ? AND status = 'ready'",
-                [$row['id']]
-            );
+            $ids[] = (int)$row['id'];
             Logger::event('expired', null, (int)$row['request_id'], null, (int)$row['id'], null,
                 null, $row['row_count'] !== null ? (int)$row['row_count'] : null,
                 $removed ? 'ttl reached: result file deleted' : 'ttl reached: no file to delete');
+        }
+        $n = 0;
+        foreach (array_chunk($ids, self::ID_CHUNK) as $chunk) {
+            $n += $db->execute(
+                "UPDATE executions SET status = 'expired', result_path = NULL, result_size_bytes = NULL
+                 WHERE status = 'ready' AND id IN (" . self::marks(count($chunk)) . ')',
+                $chunk
+            );
         }
         return $n;
     }
 
     /**
-     * 2) Executions that still reference a result file but can never serve it
-     *    (failed, or the inconsistent scheduled/running-with-a-path leftover):
-     *    delete the file AND its in-flight .tmp sibling, clear the path.
+     * 2) Rows that reference a result file no download can ever serve (failed,
+     *    already expired, or the inconsistent scheduled/running-with-a-path
+     *    leftover): delete the file AND its in-flight .tmp sibling, then clear
+     *    the paths in chunks.
      *    A row only ever gets result_path once ready, so a matched
      *    scheduled/running row is already inconsistent — and an actively
      *    writing execution has result_path IS NULL, so it can never match.
      */
-    private static function clearFailedFiles(): int
+    private static function clearLeftoverFiles(): int
     {
         $db = Db::instance();
         $rows = $db->rows(
             "SELECT id, result_path FROM executions
-             WHERE status IN ('scheduled', 'running', 'failed') AND result_path IS NOT NULL"
+             WHERE result_path IS NOT NULL
+               AND status IN ('scheduled', 'running', 'failed', 'expired')"
         );
+        $ids = [];
         $n = 0;
         foreach ($rows as $row) {
             if (self::safeUnlink((string)$row['result_path'])) {
@@ -119,34 +136,13 @@ final class Cleanup
             if (self::safeUnlink("results/{$row['id']}.json.tmp")) {
                 $n++;
             }
-            $db->execute(
-                'UPDATE executions SET result_path = NULL, result_size_bytes = NULL WHERE id = ?',
-                [$row['id']]
-            );
+            $ids[] = (int)$row['id'];
         }
-        return $n;
-    }
-
-    /**
-     * 2b) Executions already marked 'expired' (e.g. by a racing download that
-     *     hit the TTL before this pass ran) that still reference a file:
-     *     delete the leftover and clear the path.
-     */
-    private static function clearExpiredFiles(): int
-    {
-        $db = Db::instance();
-        $rows = $db->rows(
-            "SELECT id, result_path FROM executions
-             WHERE status = 'expired' AND result_path IS NOT NULL"
-        );
-        $n = 0;
-        foreach ($rows as $row) {
-            if (self::safeUnlink((string)$row['result_path'])) {
-                $n++;
-            }
+        foreach (array_chunk($ids, self::ID_CHUNK) as $chunk) {
             $db->execute(
-                'UPDATE executions SET result_path = NULL, result_size_bytes = NULL WHERE id = ?',
-                [$row['id']]
+                'UPDATE executions SET result_path = NULL, result_size_bytes = NULL
+                 WHERE id IN (' . self::marks(count($chunk)) . ')',
+                $chunk
             );
         }
         return $n;
@@ -183,11 +179,19 @@ final class Cleanup
         return $n;
     }
 
-    /** 4) Files whose executions row no longer exists -> delete the orphan. */
+    /**
+     * 4) Files whose executions row no longer exists -> delete the orphan.
+     *
+     * The ids are collected from the directory listing first and asked about in
+     * chunks: one statement per ID_CHUNK files. Doing one COUNT(*) per
+     * file meant a cleanup pass over a full results dir cost one round trip per
+     * result, which is exactly the case retention is supposed to make cheap.
+     */
     private static function sweepOrphanFiles(): int
     {
         $db = Db::instance();
-        $n = 0;
+        /** @var array<int,list<string>> $byId execution id => its stored files */
+        $byId = [];
         foreach (['results', 'cache'] as $sub) {
             $files = glob(Filesystem::absoluteFromRelative($sub . '/*.json')) ?: [];
             $tmps = glob(Filesystem::absoluteFromRelative($sub . '/*.json.tmp')) ?: [];
@@ -196,14 +200,33 @@ final class Cleanup
                 if (preg_match('#/([0-9]+)\.json(\.tmp)?$#', $absolute, $m) !== 1) {
                     continue;
                 }
-                $count = (int)$db->value('SELECT COUNT(*) FROM executions WHERE id = ?', [(int)$m[1]]);
-                if ($count !== 0) {
-                    continue; // still referenced
-                }
-                $relative = $sub . '/' . $m[1] . ($m[2] ?? '');
+                // The stored name is the file name itself: rebuilding it from the
+                // id alone drops the .json part, and safeUnlink then refuses the
+                // path (which is how this sweep silently deleted nothing for
+                // every orphan it found).
+                $byId[(int)$m[1]][] = $sub . '/' . basename(str_replace('\\', '/', $absolute));
+            }
+        }
+        if ($byId === []) {
+            return 0;
+        }
+        $known = [];
+        foreach (array_chunk(array_keys($byId), self::ID_CHUNK) as $chunk) {
+            foreach ($db->rows(
+                'SELECT id FROM executions WHERE id IN (' . self::marks(count($chunk)) . ')', $chunk
+            ) as $row) {
+                $known[(int)$row['id']] = true;
+            }
+        }
+        $n = 0;
+        foreach ($byId as $id => $paths) {
+            if (isset($known[$id])) {
+                continue; // still referenced
+            }
+            foreach ($paths as $relative) {
                 if (self::safeUnlink($relative)) {
                     $n++;
-                    Logger::event('expired', null, null, null, (int)$m[1], null, null, null,
+                    Logger::event('expired', null, null, null, $id, null, null, null,
                         "orphaned {$relative} removed (no executions row)");
                 }
             }

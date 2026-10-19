@@ -182,8 +182,10 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
   removes failed leftovers, recovers instant executions that died mid-query
   in the web server, and deletes orphaned result/cache files whose
-  `executions` row no longer exists. It also applies the optional row
-  retention below.
+  `executions` row no longer exists. Every file/row lookup it does is
+  batched (one statement per 500 execution ids), so a pass over a full
+  `storage\results` costs round trips per batch, not per result file. It
+  also applies the optional row retention below.
 - **row retention** (`cleanup.retention.*`, all `0` = keep forever by
   default, so upgrading changes nothing until you opt in):
   `request_logs_days`, `calls_days`, `executions_days`,
