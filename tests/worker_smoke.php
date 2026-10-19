@@ -84,7 +84,10 @@ $mkConn = static function (string $name, int $cap, int $active) use ($db, $now):
 $connMain = $mkConn("wsmk {$run} main", 2, 1);
 $connCap = $mkConn("wsmk {$run} cap1", 1, 1);
 $connOff = $mkConn("wsmk {$run} offline", 2, 0);
-array_push($connectionIds, $connMain, $connCap, $connOff);
+// cap=1 connection whose single slot is taken by an INSTANT run: the delayed
+// worker must see the slot as used too (one shared counter, both modes).
+$connShared = $mkConn("wsmk {$run} shared1", 1, 1);
+array_push($connectionIds, $connMain, $connCap, $connOff, $connShared);
 
 $mkRequest = static function (string $code, string $sql, int $connId, int $ttl = 15,
     int $timeout = 10, int $maxRows = 1000) use ($db, $now): int {
@@ -105,7 +108,9 @@ $rCap = $mkRequest("swk{$run}.cap", 'SELECT 1 AS ping', $connCap);
 $rInactive = $mkRequest("swk{$run}.inactive", 'SELECT 1 AS ping', $connOff);
 $rFuture = $mkRequest("swk{$run}.future", 'SELECT 1 AS ping', $connMain);
 $rSlow = $mkRequest("swk{$run}.slow", 'SELECT SLEEP(4) AS slow', $connMain, 15, 1);
-array_push($requestIds, $rReady, $rTtl, $rBad, $rTrunc, $rCap, $rInactive, $rFuture, $rSlow);
+// Long timeout: cleanup must not reap the instant fixture row underneath it.
+$rShared = $mkRequest("swk{$run}.shared", 'SELECT 1 AS ping', $connShared, 15, 3600);
+array_push($requestIds, $rReady, $rTtl, $rBad, $rTrunc, $rCap, $rInactive, $rFuture, $rSlow, $rShared);
 
 $mkExec = static function (array $fields) use ($db): int {
     $row = array_merge([
@@ -132,6 +137,9 @@ $execSlow = $mkExec(['request_id' => $rSlow, 'scheduled_at' => $due]);
 $execCap = $mkExec(['request_id' => $rCap, 'scheduled_at' => $due]);
 $execFuture = $mkExec(['request_id' => $rFuture, 'scheduled_at' => $future]);
 $execInactive = $mkExec(['request_id' => $rInactive, 'scheduled_at' => $due]);
+$execShared = $mkExec(['request_id' => $rShared, 'scheduled_at' => $due]);
+$execSharedInstant = $mkExec(['request_id' => $rShared, 'mode' => 'instant',
+    'status' => 'running', 'started_at' => $due]);
 
 // Fresh 'running' leftover: spared by stale recovery, and it must block a
 // cap=1 connection from claiming anything new.
@@ -264,6 +272,13 @@ $check('cap: cap=1 connection blocked new claims', $execRow($execCap)['status'] 
         WHERE e.mode = 'delayed' AND e.status = 'running' AND r.connection_id = ?", [$connCap]));
 $check('future: stays scheduled and untouched', $execRow($execFuture)['status'] === 'scheduled'
     && empty($execRow($execFuture)['started_at']));
+$check('shared cap: an instant run blocks a delayed claim on that connection',
+    $execRow($execShared)['status'] === 'scheduled' && empty($execRow($execShared)['started_at']),
+    'running on that connection: ' . (int)$db->value(
+        "SELECT COUNT(*) FROM executions e JOIN requests r ON r.id = e.request_id
+         WHERE r.connection_id = ? AND e.status = 'running'", [$connShared]));
+$check('shared cap: the worker leaves the instant row alone',
+    $execRow($execSharedInstant)['status'] === 'running');
 $e = $execRow($execInactive);
 $check('inactive: swept to failed', $e['status'] === 'failed'
     && str_contains((string)$e['error_message'], 'inactive'), (string)$e['error_message']);
@@ -275,9 +290,9 @@ $check('stale: recovered to failed', $e['status'] === 'failed'
 $check('stale: partial file deleted + path cleared',
     !is_file(Filesystem::absoluteFromRelative($staleFileRel)) && $e['result_path'] === null);
 $check('stale: failure logged', $logCount('failed', $execStale) === 1);
-$check('summary line: due=7 ready=4 failed=2 blocked=1 + swept counts',
-    str_contains($wOut, 'due=7') && str_contains($wOut, 'ready=4')
-    && str_contains($wOut, 'failed=2') && str_contains($wOut, 'blocked=1')
+$check('summary line: due=8 ready=4 failed=2 blocked=2 + swept counts',
+    str_contains($wOut, 'due=8') && str_contains($wOut, 'ready=4')
+    && str_contains($wOut, 'failed=2') && str_contains($wOut, 'blocked=2')
     && str_contains($wOut, 'stale-cleaned=1') && str_contains($wOut, 'inactive-cleaned=1'),
     substr($wOut, 0, 200));
 

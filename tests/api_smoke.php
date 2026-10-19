@@ -409,14 +409,16 @@ $check('query timeout -> 504', $code === 504 && $getErr($body) === 'timeout'
 
 [$code, $body] = api('POST', '/api/v1/request/' . $codeRl, $A['key']); // warm-up (passes, cap free)
 $db->execute('INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?)', [$A['id'], $reqRl, $now]);
+// One slot taken by a DELAYED run and one by an instant run: the connection is
+// at its cap of 2 for the instant path too (shared counter, P2-10).
 $db->execute(
     "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, row_count, truncated)
-     VALUES (?, 'instant', 'running', ?, ?, 0, 0), (?, 'instant', 'running', ?, ?, 0, 0)",
+     VALUES (?, 'delayed', 'running', ?, ?, 0, 0), (?, 'instant', 'running', ?, ?, 0, 0)",
     [$reqRl, $now, $now, $reqRl, $now, $now]
 );
 [$code, $body, , $rawHeaders] = api('POST', '/api/v1/request/' . $codeRl, $A['key'], true);
 $hasRetryAfter = (bool)preg_match('/^retry-after:\s*\d+/mi', $rawHeaders);
-$check('instant cap -> 429 + Retry-After', $code === 429 && $hasRetryAfter && $getErr($body) === 'rate_limited', $body);
+$check('shared connection cap -> 429 + Retry-After', $code === 429 && $hasRetryAfter && $getErr($body) === 'rate_limited', $body);
 
 echo $pass === $total ? '=== API SMOKE PASS (' . $total . '/' . $total . ') ===' : "=== API SMOKE: {$pass}/{$total} ===", PHP_EOL;
 exit($pass === $total ? 0 : 1);

@@ -26,10 +26,11 @@ use Services\StorageGuard;
  *    connections run at the same time while two workers never share one.
  *  - Claims are atomic: UPDATE ... WHERE status = 'scheduled' (InnoDB row lock).
  *  - The per-connection cap (connections.max_concurrency, else config default 2)
- *    limits concurrently RUNNING delayed executions; it is checked DB-side so it
- *    stays valid when several hosts share one metadata DB. A single-connection
- *    pass still runs its own rows one after another: the cap bounds overlap
- *    across hosts and passes, it does not intra-parallelise one connection.
+ *    limits concurrently RUNNING executions of BOTH modes; it is checked DB-side
+ *    so it stays valid when several hosts share one metadata DB. A
+ *    single-connection pass still runs its own rows one after another: the cap
+ *    bounds overlap across hosts and passes, it does not intra-parallelise one
+ *    connection.
  *  - worker.pass_budget_seconds bounds one pass so a long queue cannot outlive
  *    the schedule interval; the remainder stays scheduled for the next minute.
  *
@@ -449,7 +450,7 @@ final class Worker
     // Small helpers
     // ------------------------------------------------------------------
 
-    /** Per-connection cap of concurrently running delayed executions. */
+    /** Per-connection cap of concurrently running executions (either mode). */
     private static function capFor(int $connectionId): int
     {
         $row = Db::instance()->one(
@@ -462,13 +463,21 @@ final class Worker
         return max(1, $cap);
     }
 
-    /** @return array<int,int> connection_id => running delayed executions */
+    /**
+     * Executions currently running per target connection, BOTH modes.
+     *
+     * The cap protects the target database, which cannot tell which gateway
+     * mode issued the query, so a shared counter is the only one that means
+     * anything: counting modes separately let one connection run 2x the cap.
+     *
+     * @return array<int,int> connection_id => running executions
+     */
     private static function runningCountByConnection(?int $connectionId = null): array
     {
         $sql = "SELECT r.connection_id AS cid, COUNT(*) AS n
              FROM executions e
              JOIN requests r ON r.id = e.request_id
-             WHERE e.mode = 'delayed' AND e.status = 'running'";
+             WHERE e.status = 'running'";
         $args = [];
         if ($connectionId !== null) {
             $sql .= ' AND r.connection_id = ?';

@@ -16,8 +16,9 @@ use Worker\ResultWriter;
 
 /**
  * Synchronous execution for response_mode = 'instant'.
- * Respects the per-connection cap with a metadata-DB named lock + counter;
- * returns 429 + Retry-After when the cap is busy (never queues).
+ * Respects the per-connection cap with a metadata-DB named lock + counter that
+ * the delayed worker shares; returns 429 + Retry-After when the cap is busy
+ * (never queues).
  *
  * Results live in BOTH shapes, like delayed executions do: the POST response
  * carries the rows inline (backward compatible), AND the run is streamed to
@@ -75,10 +76,12 @@ final class InstantExecutor
             Errors::rateLimited((int)\Core\Config::get('limits.rate_limited_retry_after', 5));
         }
 
+        // One counter for both modes (see Worker::runningCountByConnection):
+        // the target database sees queries, not gateway modes.
         $running = (int)$db->value(
             "SELECT COUNT(*) FROM executions e
              JOIN requests r ON r.id = e.request_id
-             WHERE r.connection_id = ? AND e.mode = 'instant' AND e.status = 'running'",
+             WHERE r.connection_id = ? AND e.status = 'running'",
             [$connId]
         );
         if ($running >= $cap) {

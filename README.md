@@ -303,7 +303,12 @@ result a later hit would replay, and the admin form refuses a larger number.
 To cache longer, raise `limits.instant.result_ttl_minutes`
 (`GATEWAY_INSTANT_RESULT_TTL_MINUTES`). If the target connection is at its
 concurrency cap the call gets `429 rate_limited` + `Retry-After` instead of
-queuing.
+queuing. That cap is **one counter for both modes**: `connections.max_concurrency`
+(or `limits.connection_concurrency`, default 2) counts every `running` execution
+on the connection, delayed or instant, because the target database sees queries,
+not gateway modes. A connection at its cap therefore defers delayed work until
+the instant run finishes, and an instant submit is refused while the worker is
+using the slots (2x the cap was possible when each mode counted itself).
 
 ### Per-client submit throttle
 

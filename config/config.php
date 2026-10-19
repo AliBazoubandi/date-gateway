@@ -53,7 +53,9 @@ return [
     ],
 
     'limits' => [
-        // Per-target-connection cap for concurrently RUNNING delayed executions.
+        // Per-target-connection cap for concurrently RUNNING executions. The
+        // delayed worker and the instant path share this one counter: the
+        // target database sees queries, not gateway modes.
         'connection_concurrency' => 2,
         'instant' => [
             // Sane upper bounds enforced by the admin UI for instant requests.
