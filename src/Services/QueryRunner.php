@@ -52,6 +52,10 @@ final class QueryRunner
                 }
             }
             $out['ok'] = true;
+        } catch (ResultTooLargeException $e) {
+            // Size guard, not a query failure: the caller must see it
+            // distinctly (413 for instant, failed execution for delayed).
+            throw $e;
         } catch (DbQueryException $e) {
             $out['error'] = $e->getMessage();
             $out['timed_out'] = $e->isTimeout();

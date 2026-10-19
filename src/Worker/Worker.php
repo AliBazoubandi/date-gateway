@@ -9,6 +9,7 @@ use Core\Str;
 use Core\Time;
 use Services\Logger;
 use Services\QueryRunner;
+use Services\ResultTooLargeException;
 
 /**
  * Delayed-execution worker: moves executions scheduled -> running -> ready|failed.
@@ -205,15 +206,23 @@ final class Worker
             return false;
         }
 
-        $result = QueryRunner::run(
-            $connection,
-            (string)$request['sql_text'],
-            (int)$request['timeout_seconds'],
-            (int)$request['max_rows'],
-            static function (array $row) use ($writer): void {
-                $writer->writeRow($row);
-            }
-        );
+        try {
+            $result = QueryRunner::run(
+                $connection,
+                (string)$request['sql_text'],
+                (int)$request['timeout_seconds'],
+                (int)$request['max_rows'],
+                static function (array $row) use ($writer): void {
+                    $writer->writeRow($row);
+                }
+            );
+        } catch (ResultTooLargeException $e) {
+            $writer->discard(); // remove the partial file
+            $message = Str::truncate($e->getMessage(), 4000);
+            self::markFailed($execId, $message);
+            Logger::event('failed', null, (int)$exec['request_id'], null, $execId, null, null, null, $message);
+            return false;
+        }
 
         if ($result['ok']) {
             self::finalizeSuccess($exec, $request, $writer, $result);

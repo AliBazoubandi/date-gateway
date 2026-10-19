@@ -2,6 +2,9 @@
 declare(strict_types=1);
 namespace Worker;
 
+use Core\Config;
+use Services\ResultTooLargeException;
+
 /**
  * Incremental JSON writer for delayed execution results.
  *
@@ -13,6 +16,10 @@ namespace Worker;
  * name — a crashed run can never leave a half-written file visible at the
  * documented path. Anything left at {id}.json.tmp is a partial leftover and
  * cleanup reclaims it.
+ *
+ * A hard byte cap (limits.max_result_bytes) aborts the run with
+ * ResultTooLargeException once the stream passes it, so a runaway query
+ * cannot fill the disk.
  */
 final class ResultWriter
 {
@@ -22,6 +29,13 @@ final class ResultWriter
     private string $tmpPath = '';
     private bool $firstRow = true;
     private bool $sanitized = false;
+    private int $bytesWritten = 0;
+    private int $maxBytes;
+
+    public function __construct(?int $maxBytes = null)
+    {
+        $this->maxBytes = $maxBytes ?? max(1, (int)Config::get('limits.max_result_bytes', 512 * 1024 * 1024));
+    }
 
     public function open(string $absolutePath): void
     {
@@ -36,19 +50,31 @@ final class ResultWriter
         $this->tmpPath = $tmpPath;
         $this->firstRow = true;
         $this->sanitized = false;
+        $this->bytesWritten = 0;
         $this->write('{"data":[');
     }
 
-    public function writeRow(array $row): void
+    /** @return int encoded bytes written for this row (for inline size accounting) */
+    public function writeRow(array $row): int
     {
         if ($this->fh === null) {
             throw new \RuntimeException('Result file is not open.');
         }
+        $prefix = '';
         if (!$this->firstRow) {
-            $this->write(',');
+            $prefix = ',';
         }
         $this->firstRow = false;
-        $this->write($this->encode($row));
+        $encoded = $this->encode($row);
+        $this->write($prefix);
+        $this->write($encoded);
+        return strlen($prefix) + strlen($encoded);
+    }
+
+    /** Bytes written so far (data array envelope included). */
+    public function bytesWritten(): int
+    {
+        return $this->bytesWritten;
     }
 
     /**
@@ -107,6 +133,12 @@ final class ResultWriter
 
     private function write(string $bytes): void
     {
+        $this->bytesWritten += strlen($bytes);
+        if ($this->bytesWritten > $this->maxBytes) {
+            throw new ResultTooLargeException(
+                "The result exceeded the maximum size of {$this->maxBytes} bytes."
+            );
+        }
         $n = fwrite($this->fh, $bytes);
         if ($n === false || $n !== strlen($bytes)) {
             throw new \RuntimeException('Writing the result file failed (disk full?).');

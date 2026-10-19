@@ -54,6 +54,30 @@ foreach (['sqlsrv' => 'SQL Server targets', 'pgsql' => 'PostgreSQL targets'] as 
     $ok("extension {$ext} ({$why})", $loaded, $loaded ? '' : 'enable in php.ini when you need this DB type');
 }
 
+// Instant mode buffers rows in memory to build the inline JSON response, capped
+// by limits.instant.max_result_bytes. memory_limit must leave real headroom
+// above that cap or a large result aborts the PHP process mid-request (P1-2).
+$toBytes = static function (string $v): int {
+    $v = strtolower(trim($v));
+    $unit = substr($v, -1);
+    $num = (int)$v;
+    return match ($unit) {
+        'g' => $num * 1024 * 1024 * 1024,
+        'm' => $num * 1024 * 1024,
+        'k' => $num * 1024,
+        default => $num,
+    };
+};
+$memLimit = (string)(ini_get('memory_limit') ?: '');
+$instantCap = (int)Core\Config::get('limits.instant.max_result_bytes', 0);
+if ($memLimit === '-1' || $toBytes($memLimit) >= 256 * 1024 * 1024) {
+    $ok('PHP memory_limit >= 256M (instant inline results)', true, "memory_limit = {$memLimit}");
+} else {
+    $warn('PHP memory_limit >= 256M (instant inline results)',
+        "memory_limit = {$memLimit}; instant cap is " . number_format($instantCap / 1048576, 1) .
+        " MiB of buffered rows - raise memory_limit in php.ini");
+}
+
 // Metadata DB.
 try {
     $v = db()->value('SELECT 1');

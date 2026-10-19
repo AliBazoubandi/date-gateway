@@ -68,7 +68,17 @@ return [
             // instant requests always use this value (requests.ttl_minutes is
             // 0 by design for instant). Swept to 'expired' by cleanup.
             'result_ttl_minutes' => 60,
+            // Hard cap on the INLINE instant payload: rows are buffered in
+            // memory to build the JSON response, so an unbounded result could
+            // OOM the PHP process. Exceeding it fails the run with 413
+            // result_too_large. The streamed result FILE is capped separately
+            // by limits.max_result_bytes.
+            'max_result_bytes' => (int)\Core\Env::get('GATEWAY_INSTANT_MAX_BYTES', 16 * 1024 * 1024),
         ],
+        // Hard cap on a streamed result file (delayed worker and instant
+        // file). ResultWriter aborts the run past this size instead of
+        // filling the disk (413 / failed execution).
+        'max_result_bytes' => (int)\Core\Env::get('GATEWAY_MAX_RESULT_BYTES', 512 * 1024 * 1024),
         // Default max_rows suggested for new DELAYED requests (admin form).
         'default' => ['max_rows' => 100000],
         // Optional per-client submit throttle. 0 = disabled. When enabled, a

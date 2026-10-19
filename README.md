@@ -44,6 +44,13 @@ Two response modes:
   \* The SQL Server driver on Windows also needs the Microsoft ODBC driver
   17/18 for SQL Server installed.
 
+- **`memory_limit` >= 256M** in `php.ini`. Instant mode buffers result rows in
+  memory to build the inline JSON response; the gateway caps that payload at
+  `limits.instant.max_result_bytes` (default 16 MiB, 413 `result_too_large`
+  past it) and caps streamed result files at `limits.max_result_bytes`
+  (default 512 MiB), but the process still needs headroom above the inline cap.
+  `php cli\check.php` warns when `memory_limit` is below 256M.
+
 Verify everything with:
 
 ```

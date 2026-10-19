@@ -29,6 +29,8 @@ $codeSlow = "smk{$run}.instant_slow";
 $codeRl = "smk{$run}.instant_rl";
 $codeInstDl = "smk{$run}.instant_dl";
 $codeNone = "smk{$run}.none";
+$codeBig = "smk{$run}.instant_big";
+$codeCacheMiss = "smk{$run}.instant_cachemiss";
 
 $db = db();
 $clientIds = [];
@@ -97,7 +99,9 @@ $reqBad = $addRequest($codeBad, 'instant', 30, 100, 0, 'SELECT * FROM _table_tha
 $reqSlow = $addRequest($codeSlow, 'instant', 1, 100, 0, 'SELECT SLEEP(5) AS slow');
 $reqRl = $addRequest($codeRl, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
 $reqInstDl = $addRequest($codeInstDl, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
-array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl);
+$reqBig = $addRequest($codeBig, 'instant', 30, 100, 0, "SELECT REPEAT('x', 5000) AS pad");
+$reqCacheMiss = $addRequest($codeCacheMiss, 'instant', 30, 100, 60, 'SELECT 1 AS ping');
+array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss);
 
 $mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
@@ -116,6 +120,10 @@ $db->execute('INSERT INTO client_request_permissions (client_id, request_id, gra
 $db->execute(
     'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)',
     [$A['id'], $reqInst, $now, $A['id'], $reqBad, $now, $A['id'], $reqSlow, $now, $A['id'], $reqInstDl, $now]
+);
+$db->execute(
+    'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?)',
+    [$A['id'], $reqBig, $now, $A['id'], $reqCacheMiss, $now]
 );
 
 // ----------------- dev server + curl harness -----------------
@@ -314,6 +322,22 @@ $check('?download=1 returns the file directly', $code === 200
 $inst2 = json_decode($body, true);
 $check('instant cache hit replays same data', $code === 200 && ($inst2['data'] ?? null) === $inst['data']
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'instant_cache_hit'") >= 1);
+
+// P1-2: inline instant size cap -> 413 (run_all sets GATEWAY_INSTANT_MAX_BYTES=2048).
+[$code, $body] = api('POST', '/api/v1/request/' . $codeBig, $A['key']);
+$check('instant result too large -> 413', $code === 413 && $getErr($body) === 'result_too_large', $body);
+$check('too-large execution marked failed',
+    (int)$db->value("SELECT COUNT(*) FROM executions WHERE request_id = ? AND mode = 'instant' AND status = 'failed'", [$reqBig]) === 1);
+
+// P1-3: cached instant run whose file vanished -> 502, never an empty 200.
+[$code, $body] = api('POST', '/api/v1/request/' . $codeCacheMiss, $A['key']);
+$check('cache-miss fixture run succeeds', $code === 200 && ($body !== ''));
+$missExec = $db->one("SELECT * FROM executions WHERE request_id = ? AND mode = 'instant' AND status = 'ready' ORDER BY id DESC LIMIT 1", [$reqCacheMiss]);
+if ($missExec !== null && $missExec['result_path'] !== null) {
+    \Worker\Cleanup::safeUnlink((string)$missExec['result_path']);
+}
+[$code, $body] = api('POST', '/api/v1/request/' . $codeCacheMiss, $A['key']);
+$check('cache replay without file -> 502', $code === 502 && $getErr($body) === 'result_unavailable', $body);
 
 [$code, $body] = api('POST', '/api/v1/request/' . $codeBad, $A['key']);
 $check('query failure -> 502 generic', $code === 502 && $getErr($body) === 'execution_failed'

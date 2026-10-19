@@ -73,6 +73,9 @@ $env:GATEWAY_STORAGE_DIR = $storageDir
 # tests run with GATEWAY_DEBUG=1 (see Links::base / cli\check.php).
 $env:GATEWAY_BASE_URL = "http://127.0.0.1"
 $env:GATEWAY_DEBUG = "1"
+# Tiny inline cap so api_smoke can exercise the 413 result_too_large path with
+# a small fixture row; real deployments keep the 16 MiB default.
+$env:GATEWAY_INSTANT_MAX_BYTES = "2048"
 # Make sure children pick up the SAME php binary the suites spawn as "php".
 $env:Path = (Split-Path -Parent $PhpExe) + ";" + $env:Path
 
@@ -126,6 +129,9 @@ try {
     }
     Invoke-Suite "sqlguard_test" {
         & $PhpExe (Join-Path $PSScriptRoot "sqlguard_test.php")
+    }
+    Invoke-Suite "resultwriter_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "resultwriter_test.php")
     }
 
     # 3) the four smoke tests.

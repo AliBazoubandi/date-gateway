@@ -101,6 +101,11 @@ final class InstantExecutor
 
         $sql = (string)$request['sql_text'];
         $timeout = max(1, (int)$request['timeout_seconds']);
+        // Rows are buffered in memory to build the inline JSON response; the
+        // instant byte cap turns an unbounded result into an honest 413
+        // instead of an OOM-killed PHP process (P1-2).
+        $inlineMax = max(1, (int)Config::get('limits.instant.max_result_bytes', 16 * 1024 * 1024));
+        $inlineBytes = 0;
         // PHP's own max_execution_time (XAMPP default 30s) must never kill
         // the request before the driver-level statement timeout does. Some
         // SAPIs (e.g. safe-mode-era builds) disable the function entirely.
@@ -108,23 +113,45 @@ final class InstantExecutor
             @set_time_limit($timeout + 10);
         }
         $rows = [];
-        $result = QueryRunner::run(
-            $connection,
-            $sql,
-            $timeout,
-            (int)$request['max_rows'],
-            static function (array $row) use (&$rows, $writer, &$fileOk, &$fileError): void {
-                $rows[] = $row;
-                if ($fileOk) {
-                    try {
-                        $writer->writeRow($row);
-                    } catch (\RuntimeException $e) {
-                        $fileOk = false; // keep serving inline; drop the file
-                        $fileError = Str::truncate($e->getMessage(), 1800);
+        try {
+            $result = QueryRunner::run(
+                $connection,
+                $sql,
+                $timeout,
+                (int)$request['max_rows'],
+                static function (array $row) use (&$rows, $writer, &$fileOk, &$fileError, &$inlineBytes, $inlineMax): void {
+                    $rows[] = $row;
+                    if ($fileOk) {
+                        try {
+                            $inlineBytes += $writer->writeRow($row);
+                        } catch (\RuntimeException $e) {
+                            $fileOk = false; // keep serving inline; drop the file
+                            $fileError = Str::truncate($e->getMessage(), 1800);
+                        }
+                    } else {
+                        $inlineBytes += strlen((string)json_encode($row));
+                    }
+                    if ($inlineBytes > $inlineMax) {
+                        throw new ResultTooLargeException(
+                            "The inline result exceeded the instant limit of {$inlineMax} bytes."
+                        );
                     }
                 }
+            );
+        } catch (ResultTooLargeException $e) {
+            if ($writer->touched()) {
+                $writer->discard(); // remove the partial file
             }
-        );
+            $db->execute(
+                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
+                [Time::now(), Str::truncate($e->getMessage(), 4000), $execId]
+            );
+            Logger::event('failed', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
+                null, null, Str::truncate($e->getMessage(), 2000));
+            Errors::emit(413, 'result_too_large',
+                'The result exceeded the instant size limit (' . number_format($inlineMax) . ' bytes). '
+                . 'Narrow the query or use a delayed request.');
+        }
 
         if ($result['ok']) {
             self::finalizeReady($request, $callId, $token, $execId, $writer, $result, $rows,
@@ -242,34 +269,42 @@ final class InstantExecutor
     /** Replays a cached instant execution (fresh enough; not yet expired). */
     public static function emitFromCache(array $request, int $clientId, string $callId, array $execution, string $ip, bool $asFile = false): void
     {
-        $rows = [];
-        $hasFile = false;
+        $file = null;
         if ($execution['result_path'] !== null) {
             try {
-                $path = Filesystem::resultPath((string)$execution['result_path']);
-                $hasFile = is_file($path);
+                $candidate = Filesystem::resultPath((string)$execution['result_path']);
+                if (is_file($candidate)) {
+                    $file = $candidate;
+                }
             } catch (\RuntimeException) {
-                $hasFile = false; // tampered stored path: replay without a file
+                $file = null; // tampered stored path
             }
         }
-        if ($hasFile) {
-            $decoded = json_decode((string)file_get_contents($path), true);
-            // Newer executions store the standard {"data":[...],"meta":{...}}
-            // envelope; older ones (pre-file era) stored a bare rows array.
-            if (is_array($decoded) && isset($decoded['data']) && is_array($decoded['data'])) {
-                $rows = $decoded['data'];
-            } elseif (is_array($decoded)) {
-                $rows = $decoded;
+        if ($file === null) {
+            // The cached run has nothing replayable. An empty 200 would lie
+            // to the client (row_count says otherwise) — refuse honestly (P1-3).
+            Logger::event('failed', $clientId, (int)$request['id'], $callId, (int)$execution['id'], $ip,
+                null, null, 'cache replay but no stored result file');
+            Errors::emit(502, 'result_unavailable',
+                'The gateway could not provide the cached result. Retry the request.');
+        }
+
+        $decoded = json_decode((string)file_get_contents($file), true);
+        $rows = [];
+        // Newer executions store the standard {"data":[...],"meta":{...}}
+        // envelope; older ones (pre-file era) stored a bare rows array.
+        if (is_array($decoded) && array_key_exists('data', $decoded)) {
+            if (!is_array($decoded['data'])) {
+                self::cacheCorrupt($request, $clientId, $callId, $execution, $ip);
             }
+            $rows = $decoded['data'];
+        } elseif (is_array($decoded)) {
+            $rows = $decoded;
+        } else {
+            self::cacheCorrupt($request, $clientId, $callId, $execution, $ip);
         }
 
         if ($asFile) {
-            if (!$hasFile) {
-                Logger::event('failed', $clientId, (int)$request['id'], $callId, (int)$execution['id'], $ip,
-                    null, null, 'cache replay with ?download=1 but no stored file');
-                Errors::emit(502, 'result_unavailable',
-                    'The gateway could not provide the result file. Retry without ?download=1.');
-            }
             Download::streamResult($execution, $callId, $ip, 'result delivered (direct via ?download=1, cached run)');
             return;
         }
@@ -277,8 +312,17 @@ final class InstantExecutor
         Logger::event('instant_cache_hit', $clientId, (int)$request['id'], $callId, (int)$execution['id'], $ip,
             null, (int)$execution['row_count'], 'replayed cached instant result');
 
-        $link = $hasFile ? Links::forCall($callId) : null;
+        $link = Links::forCall($callId);
         self::emitReady($callId, null, (int)$execution['row_count'], (int)$execution['truncated'] === 1, $rows, $link);
+    }
+
+    /** @return never */
+    private static function cacheCorrupt(array $request, int $clientId, string $callId, array $execution, string $ip): void
+    {
+        Logger::event('failed', $clientId, (int)$request['id'], $callId, (int)$execution['id'], $ip,
+            null, null, 'cache replay: stored result file is not valid JSON');
+        Errors::emit(502, 'result_unavailable',
+            'The stored cached result is unreadable. Retry the request.');
     }
 
     private static function emitReady(string $callId, ?string $executedAt, int $rowCount, bool $truncated, array $rows, ?string $link): void
