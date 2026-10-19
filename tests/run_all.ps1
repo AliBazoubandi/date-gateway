@@ -159,6 +159,9 @@ try {
     Invoke-Suite "sapi_bootstrap_test" {
         & $PhpExe (Join-Path $PSScriptRoot "sapi_bootstrap_test.php")
     }
+    Invoke-Suite "transaction_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "transaction_test.php")
+    }
 
     # 3) the four smoke tests.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in

@@ -133,7 +133,7 @@ final class Submit
             [$request['id']]
         );
         if ($active !== null) {
-            self::attachCall($request, $client, $callId, $ip, $active, 1);
+            self::attachCall($request, $client, $callId, $ip, (int)$active['id'], 1);
             $status = (string)$active['status'];
             Logger::event('shared', (int)$client['id'], $requestId, $callId, (int)$active['id'], $ip,
                 null, null, 'attached to ' . $status . ' execution (cache rule 1, link arrives with the webhook)');
@@ -181,13 +181,18 @@ final class Submit
 
         // Rule 3: new execution.
         $scheduledAt = Time::mysql(Time::addMinutes($now, (int)$request['delay_minutes']));
-        $db->execute(
-            "INSERT INTO executions (request_id, mode, status, scheduled_at) VALUES (?, 'delayed', 'scheduled', ?)",
-            [$request['id'], $scheduledAt]
-        );
-        $execId = $db->insertId();
-        $exec = $db->one('SELECT * FROM executions WHERE id = ?', [$execId]);
-        self::attachCall($request, $client, $callId, $ip, $exec, 0);
+        // Execution and call commit together: a scheduled row with no call
+        // attached is a real query run for nobody (and the worker claims it),
+        // while a call with no execution can never be answered.
+        $execId = $db->transaction(static function () use ($db, $request, $scheduledAt, $client, $callId, $ip): int {
+            $db->execute(
+                'INSERT INTO executions (request_id, mode, status, scheduled_at) VALUES (?, ?, ?, ?)',
+                [(int)$request['id'], 'delayed', 'scheduled', $scheduledAt]
+            );
+            $newId = $db->insertId();
+            self::attachCall($request, $client, $callId, $ip, $newId, 0);
+            return $newId;
+        });
         Logger::event('submitted', (int)$client['id'], $requestId, $callId, $execId, $ip,
             null, null, 'new execution scheduled for ' . $scheduledAt);
         $release();
@@ -201,7 +206,7 @@ final class Submit
         ]);
     }
 
-    private static function attachCall(array $request, array $client, string $callId, string $ip, ?array $exec, int $wasShared): void
+    private static function attachCall(array $request, array $client, string $callId, string $ip, ?int $executionId, int $wasShared): void
     {
         // Every delayed call gets its own download token at creation: the
         // SHA-256 hash for lookup, an AES-256-GCM copy so the webhook and the
@@ -210,7 +215,7 @@ final class Submit
         Db::instance()->execute(
             'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-            [$callId, $client['id'], $request['id'], $exec !== null ? $exec['id'] : null,
+            [$callId, $client['id'], $request['id'], $executionId,
                 hash('sha256', $token), Encryption::encrypt($token), Time::now(), $ip, $wasShared]
         );
     }

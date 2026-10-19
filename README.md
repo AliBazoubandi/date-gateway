@@ -369,6 +369,15 @@ so resubmit (or poll `GET /api/v1/calls/{call_id}`, which now reports the same
 `error`). Receivers written before failure notifications only ever saw
 `status: "ready"`; they must branch on `status` instead of assuming it.
 
+One gap to know about: if the worker cannot record the finished run at all —
+the database refuses either the `ready` status update or the delivery insert —
+the whole write is rolled back (no half-recorded result), the execution is
+recorded as `failed` with `result could not be recorded: …`, and **no webhook
+row is queued**: repeating the insert that just failed would abort the pass and
+stall every other due execution behind it. That client must fall back to
+`GET /api/v1/calls/{call_id}`. `tests\transaction_test.php` injects the failure
+with a database trigger and asserts nothing half-applied survives it.
+
 `link` is the absolute download URL and is `null` when the gateway cannot
 build one (no `GATEWAY_BASE_URL` configured, or the call predates download
 tokens). Receivers must tolerate a missing link and poll
@@ -478,6 +487,11 @@ notifications are lost.
 2. A submit while a `ready`, unexpired execution exists attaches to it and
    the response carries a fresh download link immediately.
 3. Otherwise a new execution is scheduled.
+
+Rules 1 and 2 attach a call to an execution that already exists; rule 3 writes
+two rows — the new scheduled execution and the call waiting for it — as one
+transaction, so either both exist or neither does. An execution with no call
+attached is a real query run for nobody, and the worker would still claim it.
 
 Instant results follow the same spirit via the time-windowed cache.
 
@@ -617,6 +631,9 @@ to a closed port proving it gives up in seconds),
 response — §6),
 `sapi_bootstrap_test` (a startup config failure under both the CLI and a real
 `php -S` web request — §1),
+`transaction_test` (the InnoDB engines plus `Core\Db::transaction()`, driven
+through the real submit endpoint and a real worker pass with the second
+statement refused by a database trigger — §5, §7),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised

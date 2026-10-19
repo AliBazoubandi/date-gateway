@@ -246,6 +246,34 @@ final class Db
     }
 
     /**
+     * Run $fn as one transaction: commit when it returns, roll everything back
+     * when it throws and let the exception propagate. Multi-step writes must
+     * not be left half applied - a scheduled execution with no call attached
+     * runs a real query for nobody, and an execution marked ready with no
+     * webhook row leaves the client waiting for a notification that will never
+     * arrive. Do not nest (MySQL has no savepoints here) and do not mix in
+     * DDL, which commits implicitly.
+     *
+     * @param callable(): mixed $fn
+     */
+    public function transaction(callable $fn): mixed
+    {
+        $this->begin();
+        try {
+            $result = $fn();
+        } catch (\Throwable $e) {
+            try {
+                $this->rollback();
+            } catch (\Throwable) {
+                // The connection is already gone: there is nothing left to undo.
+            }
+            throw $e;
+        }
+        $this->commit();
+        return $result;
+    }
+
+    /**
      * GET_LOCK wrapper. Returns true when the lock was acquired.
      */
     public function lock(string $name, int $waitSeconds = 30): bool

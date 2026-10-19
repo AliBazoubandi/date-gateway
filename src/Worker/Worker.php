@@ -352,16 +352,35 @@ final class Worker
 
         $token = Str::hex(24); // 48 hex chars; only its SHA-256 is stored
         $size = (int)(@filesize($absolute) ?: 0);
-        Db::instance()->execute(
-            'UPDATE executions SET status = ?, finished_at = ?, ready_at = ?, expires_at = ?,
-                    result_path = ?, result_size_bytes = ?, row_count = ?, truncated = ?,
-                    download_token_hash = ?
-             WHERE id = ?',
-            ['ready', $readyAt, $readyAt, $expiresAt, 'results/' . $execId . '.json',
-                $size, (int)$result['row_count'], $result['truncated'] ? 1 : 0, hash('sha256', $token), $execId]
-        );
-
-        self::enqueueWebhooks($execId);
+        try {
+            Db::instance()->transaction(static function () use ($execId, $readyAt, $expiresAt, $size, $result, $token): void {
+                Db::instance()->execute(
+                    'UPDATE executions SET status = ?, finished_at = ?, ready_at = ?, expires_at = ?,
+                            result_path = ?, result_size_bytes = ?, row_count = ?, truncated = ?,
+                            download_token_hash = ?
+                     WHERE id = ?',
+                    ['ready', $readyAt, $readyAt, $expiresAt, 'results/' . $execId . '.json',
+                        $size, (int)$result['row_count'], $result['truncated'] ? 1 : 0, hash('sha256', $token), $execId]
+                );
+                // Same transaction as the status flip: a ready row nobody was
+                // told about is indistinguishable from a lost run, and the
+                // calls waiting on it never time out.
+                self::enqueueWebhooks($execId);
+            });
+        } catch (\Throwable $e) {
+            // Nothing was recorded, so the published file has no row pointing
+            // at it: remove it and fail the execution instead of leaving a
+            // result no client can ever download. The failure is stored without
+            // a webhook row - the delivery insert is the statement that just
+            // failed, and repeating it would abort the pass for every other
+            // due execution. The status endpoint still reports the truth.
+            Cleanup::safeUnlink('results/' . $execId . '.json');
+            $message = 'result could not be recorded: ' . Str::truncate($e->getMessage(), 1800);
+            self::markFailed($execId, $message, ExecutionError::FAILED, null, false);
+            Logger::event('failed', null, (int)$exec['request_id'], null, $execId, null, null, null,
+                $message . ' (no webhook queued; poll the status endpoint)');
+            return;
+        }
 
         Logger::event('succeeded', null, (int)$exec['request_id'], null, $execId, null,
             (int)$result['duration_ms'], (int)$result['row_count'],
@@ -380,11 +399,18 @@ final class Worker
             null, null, null, Str::truncate($message, 2000));
     }
 
+    /**
+     * Record a failed execution. $notify = false is for the one caller that is
+     * failing *because* the delivery insert was refused: queueing again would
+     * throw a second time and take the whole pass down with it, while the
+     * status endpoint still tells the client the truth.
+     */
     private static function markFailed(
         int $execId,
         string $message,
         string $code = ExecutionError::FAILED,
-        ?string $expectStatus = null
+        ?string $expectStatus = null,
+        bool $notify = true
     ): int {
         $sql = "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ?,
                     result_path = NULL, result_size_bytes = NULL
@@ -395,7 +421,7 @@ final class Worker
             $args[] = $expectStatus;
         }
         $flipped = Db::instance()->execute($sql, $args);
-        if ($flipped > 0) {
+        if ($flipped > 0 && $notify) {
             self::enqueueWebhooks($execId);
         }
         return $flipped;
