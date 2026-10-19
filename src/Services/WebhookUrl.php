@@ -3,6 +3,7 @@ declare(strict_types=1);
 namespace Services;
 
 use Core\Config;
+use Core\IpRange;
 
 /**
  * SSRF gate for webhook receiver URLs.
@@ -122,15 +123,15 @@ final class WebhookUrl
     /** '' when the address may receive a delivery, otherwise the reason. */
     private static function addressRejection(string $ip): string
     {
-        if (self::inRanges($ip, self::LOOPBACK)) {
+        if (IpRange::inRanges($ip, self::LOOPBACK)) {
             return self::flag('webhook.allow_loopback')
                 ? ''
                 : "Webhook URL points at a loopback address ({$ip}). Set webhook.allow_loopback for a receiver on this host.";
         }
-        if (self::inRanges($ip, self::BLOCKED)) {
+        if (IpRange::inRanges($ip, self::BLOCKED)) {
             return "Webhook URL points at a blocked address ({$ip}) - link-local, metadata and reserved ranges are never reachable from the gateway.";
         }
-        if (self::inRanges($ip, self::PRIVATE)) {
+        if (IpRange::inRanges($ip, self::PRIVATE)) {
             return self::flag('webhook.allow_private_hosts')
                 ? ''
                 : "Webhook URL points at a private-network address ({$ip}) while webhook.allow_private_hosts is off.";
@@ -154,38 +155,5 @@ final class WebhookUrl
     private static function flag(string $key): bool
     {
         return (bool)Config::get($key, false);
-    }
-
-    /** @param list<string> $ranges CIDR list */
-    private static function inRanges(string $ip, array $ranges): bool
-    {
-        foreach ($ranges as $range) {
-            if (self::inCidr($ip, $range)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static function inCidr(string $ip, string $range): bool
-    {
-        [$network, $bits] = explode('/', $range, 2);
-        $ipBytes = @inet_pton($ip);
-        $netBytes = @inet_pton($network);
-        if ($ipBytes === false || $netBytes === false || strlen($ipBytes) !== strlen($netBytes)) {
-            return false; // v6 address against a v4 range and similar
-        }
-        $bits = (int)$bits;
-        $wholeBytes = intdiv($bits, 8);
-        if ($wholeBytes > 0 && substr($ipBytes, 0, $wholeBytes) !== substr($netBytes, 0, $wholeBytes)) {
-            return false;
-        }
-        $remainingBits = $bits % 8;
-        if ($remainingBits === 0) {
-            return true;
-        }
-        $mask = (0xFF << (8 - $remainingBits)) & 0xFF;
-        $index = $wholeBytes;
-        return (ord($ipBytes[$index]) & $mask) === (ord($netBytes[$index]) & $mask);
     }
 }

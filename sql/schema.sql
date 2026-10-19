@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS `admin_users` (
   `last_login_at`   DATETIME     NULL DEFAULT NULL,
   `failed_attempts` INT          NOT NULL DEFAULT 0,
   `locked_until`    DATETIME     NULL DEFAULT NULL,
+  -- Bumped whenever the password is replaced (cli\create_admin.php). The value
+  -- lives in the admin session too, so an old cookie stops working on the next
+  -- request instead of staying valid until its idle window ends.
+  `session_version` INT          NOT NULL DEFAULT 0,
   `created_at`      DATETIME     NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_admin_username` (`username`)
@@ -216,10 +220,10 @@ CREATE TABLE IF NOT EXISTS `admin_audit_log` (
   `id`            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `timestamp`     DATETIME     NOT NULL,
   `admin_user_id` INT UNSIGNED NULL DEFAULT NULL,
-  `entity_type`   VARCHAR(32)  NOT NULL COMMENT 'request|connection|client|permission',
+  `entity_type`   VARCHAR(32)  NOT NULL COMMENT 'request|connection|client|permission|admin',
   `entity_id`     INT UNSIGNED NULL DEFAULT NULL,
   `entity_name`   VARCHAR(200) NULL DEFAULT NULL,
-  `action`        VARCHAR(16)  NOT NULL COMMENT 'create|update|delete|test_run',
+  `action`        VARCHAR(16)  NOT NULL COMMENT 'create|update|delete|test_run|login|login_failed|logout|password_change',
   `before_json`   LONGTEXT     NULL,
   `after_json`    LONGTEXT     NULL,
   PRIMARY KEY (`id`),
@@ -314,4 +318,11 @@ ALTER TABLE `client_rate_limits`
 --     ADD COLUMN `error_code` VARCHAR(32) NULL DEFAULT NULL AFTER `error_message`;
 -- (the sanitized failure code clients see. Old failed rows keep NULL and are
 -- reported as execution_failed; no backfill is needed.)
+--
+--   ALTER TABLE `admin_users`
+--     ADD COLUMN `session_version` INT NOT NULL DEFAULT 0 AFTER `locked_until`;
+-- (the admin session epoch. Run it BEFORE deploying the new code: every
+-- authenticated admin page reads the column, so a missing one breaks the panel.
+-- Existing sessions carry no version and are signed out on their next request,
+-- which just means admins log in once more.)
 -- ---------------------------------------------------------------------------

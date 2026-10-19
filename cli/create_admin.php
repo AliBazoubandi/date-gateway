@@ -4,7 +4,9 @@
 //   php cli\create_admin.php --username=admin --password=********
 //   php cli\create_admin.php --username=admin --password=******** --reset-lockout
 // The password is stored with password_hash(); it is never transmitted
-// through the web server.
+// through the web server. Replacing a password also advances the account's
+// session_version, so every admin session signed in with the old password is
+// dropped on its next request. Both actions land in admin_audit_log.
 // ============================================================================
 
 require __DIR__ . '/../src/Core/bootstrap.php';
@@ -36,18 +38,28 @@ if (strlen($password) < 10) {
 }
 
 $db = db();
-$existing = $db->one('SELECT id, username, is_active FROM admin_users WHERE username = ?', [$username]);
+$existing = $db->one('SELECT id, username, is_active, session_version FROM admin_users WHERE username = ?', [$username]);
 
 if ($existing === null) {
     $db->execute(
         'INSERT INTO admin_users (username, password_hash, is_active, created_at) VALUES (?, ?, 1, ?)',
         [$username, password_hash($password, PASSWORD_DEFAULT), now_str()]
     );
-    echo "Admin user created: {$username} (id ", $db->insertId(), ")\n";
+    $id = (int)$db->insertId();
+    echo "Admin user created: {$username} (id {$id})\n";
+    \Services\AuditLogger::record('admin', 'create', $id, $username, null,
+        ['username' => $username, 'via' => 'cli'], 0);
 } else {
-    $db->execute('UPDATE admin_users SET password_hash = ?, is_active = 1 WHERE id = ?',
-        [password_hash($password, PASSWORD_DEFAULT), $existing['id']]);
-    echo "Password updated for: {$username} (id ", $existing['id'], ")\n";
+    // Replacing the password also advances session_version, which invalidates
+    // every admin session that was issued before this run.
+    $db->execute(
+        'UPDATE admin_users SET password_hash = ?, is_active = 1, session_version = session_version + 1 WHERE id = ?',
+        [password_hash($password, PASSWORD_DEFAULT), $existing['id']]
+    );
+    $id = (int)$existing['id'];
+    echo "Password updated for: {$username} (id {$id})\n";
+    \Services\AuditLogger::record('admin', 'password_change', $id, $username, null,
+        ['session_version' => (int)$existing['session_version'] + 1, 'via' => 'cli'], 0);
 }
 
 if (isset($args['reset-lockout'])) {

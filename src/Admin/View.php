@@ -17,6 +17,10 @@ final class View
             header('X-Frame-Options: DENY');
             header('X-Content-Type-Options: nosniff');
             header('Referrer-Policy: no-referrer');
+            // Admin pages hold connection names, client secrets and result
+            // counts; a shared browser or a proxy must never keep a copy that
+            // outlives the session.
+            header('Cache-Control: no-store');
             header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'");
         }
         // $title/$csrf/$admin are pinned by the explicit writes below, but

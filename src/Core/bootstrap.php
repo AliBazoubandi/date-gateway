@@ -99,10 +99,16 @@ function iso8601(?string $mysqlDatetime): ?string
     return Core\Time::iso($mysqlDatetime);
 }
 
-// Client IP (REMOTE_ADDR only; do not trust proxy headers by default).
+// Client IP for throttling, logs and audit rows. REMOTE_ADDR unless the peer
+// is on admin.trusted_proxies, in which case the proxy's X-Forwarded-For is
+// read (see Core\TrustedProxies) — an empty list keeps the old behaviour.
 function client_ip(): string
 {
-    return (string)($_SERVER['REMOTE_ADDR'] ?? '');
+    return Core\TrustedProxies::resolve(
+        (string)($_SERVER['REMOTE_ADDR'] ?? ''),
+        (string)($_SERVER['HTTP_X_FORWARDED_FOR'] ?? ''),
+        Core\TrustedProxies::configured()
+    );
 }
 
 // Guard for destructive test scripts (smoke tests): refuse to run unless the

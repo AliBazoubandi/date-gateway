@@ -60,8 +60,8 @@ $cell = static function (string $v): string {
     <summary>
       <?= e(substr((string)$row['timestamp'], 0, 16)) ?>
       · <?= Admin\View::badge((string)$row['entity_type'], (string)$row['entity_type']) ?>
-      <?php if ((string)$row['action'] === 'delete'): ?>
-        <?= Admin\View::badge('error', 'delete') ?>
+      <?php if ((string)$row['action'] === 'delete' || str_ends_with((string)$row['action'], '_failed')): ?>
+        <?= Admin\View::badge('error', (string)$row['action']) ?>
       <?php elseif ((string)$row['action'] === 'test_run'): ?>
         <?= Admin\View::badge('timeout', 'test_run') ?>
       <?php else: ?>

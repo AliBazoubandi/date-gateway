@@ -17,6 +17,9 @@ final class LoginController
         Session::start();
         $error = (string)($_SESSION['login_error'] ?? '');
         unset($_SESSION['login_error']);
+        if ($error === '' && (string)($_GET['expired'] ?? '') === '1') {
+            $error = 'Your session expired. Please log in again.';
+        }
         View::render('login', ['error' => $error, 'username' => (string)($_SESSION['login_username'] ?? '')], 'Login');
         unset($_SESSION['login_username']);
     }

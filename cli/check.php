@@ -113,6 +113,15 @@ try {
     $ok('executions.error_code present (failure payloads)', $hasErrorCode === 1,
         'run the ALTER at the end of sql\\schema.sql if missing');
 
+    // Post-schema upgrade: admin_users.session_version (the admin session
+    // epoch). Every authenticated admin page reads it.
+    $hasSessionVersion = (int)db()->value(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'admin_users' AND column_name = 'session_version'"
+    );
+    $ok('admin_users.session_version present (admin session epoch)', $hasSessionVersion === 1,
+        'run the ALTER at the end of sql\\schema.sql if missing');
+
     // A webhook delivery stays 'pending' when the receiver is down or the
     // client lost its URL/secret: a growing backlog means clients are not
     // being told, and it also blocks call pruning.
@@ -206,6 +215,15 @@ echo '     webhook receivers: ',
     ', private/LAN ', Core\Config::get('webhook.allow_private_hosts', true) ? 'allowed' : 'blocked',
     ', allowlist ', ($allowedHosts === [] ? 'any host' : implode(',', $allowedHosts)),
     ' (link-local and reserved ranges are always blocked)', PHP_EOL;
+
+// How the admin panel decides who a request came from, and how long a signed-in
+// page stays alive: worth printing because a proxy in front of the panel
+// silently turns the login throttle into a global one otherwise.
+$proxies = (array)Core\Config::get('admin.trusted_proxies', []);
+echo '     admin sessions: idle timeout ',
+    (string)(int)Core\Config::get('admin.session_idle_minutes', 30), ' min, client IP = ',
+    ($proxies === [] ? 'REMOTE_ADDR' : 'X-Forwarded-For behind ' . implode(',', $proxies)),
+    PHP_EOL;
 
 echo $failures === 0 ? '=== ALL CHECKS PASSED ===' : "=== {$failures} CHECK(S) FAILED ===",
     PHP_EOL;

@@ -113,7 +113,9 @@ XAMPP at `C:\xampp`.
    ```
 
    (add `--reset-lockout` to unlock a locked-out account). Then open
-   `http://gw.internal/admin` and log in.
+   `http://gw.internal/admin` and log in. Running the same command again for an
+   existing username replaces the password **and** signs out every admin
+   session that was already open (§13).
 
 5. **In the admin panel**
 
@@ -516,6 +518,24 @@ Existing rows keep `error_code = NULL` and are reported as
 `execution_failed` — the generic code — so nothing breaks if the ALTER
 lags behind the deploy.
 
+If the DB was created before admin session invalidation, add the session
+epoch **before** deploying the new code (every authenticated admin page reads
+it, so a missing column breaks the panel):
+
+```sql
+ALTER TABLE `admin_users`
+  ADD COLUMN `session_version` INT NOT NULL DEFAULT 0 AFTER `locked_until`;
+```
+
+**Admin sessions and audit (2026-10):** no other schema change. Two behavior
+changes are live out of the box (see §13): signed-in admin pages now expire
+after `admin.session_idle_minutes` (default 30) without a request, and
+existing sessions — which carry no `session_version` — are dropped on the
+first request after the deploy, so admins simply log in once again. Logins,
+refused logins, logouts and password replacements are written to
+`admin_audit_log`; `cleanup.retention.audit_days` (default `0` = keep) is the
+knob that prunes them.
+
 **Retention + free-space floor (2026-10):** no schema change. Every
 `cleanup.retention.*` window defaults to `0`, so an upgrade deletes nothing
 until an admin turns a window on (back the metadata DB up first — pruning a
@@ -557,6 +577,9 @@ a throwaway environment itself — random `data_gateway_test_<random>` schema
 runs everything against it: `php -l` on every file, `smoke_db`,
 `encryption_test --db`, `links_test`, `filesystem_test`, `sqlguard_test`,
 `readonly_driver_test`, `pool_test`, `resultwriter_test`, `throttle_test`,
+`proxy_test` (the address-range math of `Core\IpRange` and who
+`Core\TrustedProxies`/`client_ip()` believe, plus the shipped admin session
+defaults read from a `GATEWAY_*`-free child process),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised
@@ -618,7 +641,13 @@ longer supported — the guards above refuse it on purpose.
    `GATEWAY_RETENTION_*_DAYS`, and confirm the next cleanup pass reports
    `pruned …` counts on `php cli\cleanup.php`. Back the DB up before the
    first real prune.
-7. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
+7. **Decide the admin session rules.** `GATEWAY_ADMIN_SESSION_IDLE_MINUTES`
+   (default 30) is the idle window; `GATEWAY_TRUSTED_PROXIES` must list the
+   proxy addresses **if and only if** something else terminates TLS in front of
+   the panel — otherwise the login throttle counts every admin as one client
+   (§13). Then confirm `php cli\check.php` prints the intended
+   `admin sessions:` line.
+8. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
    includes a set, valid, https `GATEWAY_BASE_URL` — the check FAILS while
    it is missing) **and** all four smoke tests pass.
 
@@ -690,4 +719,73 @@ A rejected statement is not a query failure: the API answers
 `502 query_rejected`, the admin sees a validation error at save time, and the
 delayed execution is marked failed. In all three cases nothing was sent to the
 target database.
+
+## 13. Admin panel: sessions, auditing, known limitations
+
+The panel is a single-user-per-account, cookie-authenticated app with no
+framework in front of it. What it does guarantee:
+
+**Session lifetime.** A signed-in session expires after
+`admin.session_idle_minutes` (`GATEWAY_ADMIN_SESSION_IDLE_MINUTES`, default
+`30`) without a request; browsing keeps the window sliding. An expired session
+is destroyed, the operator lands on the login page with
+*"Your session expired. Please log in again."*, and the drop is audited. Set
+the value to `0` only on a machine nobody else can sit at.
+
+**Session invalidation.** `admin_users.session_version` is copied into the
+session at login and compared on every request. `php cli\create_admin.php`
+with the same or a new password replaces the hash **and** advances the epoch,
+so a suspected leak can be closed by running it once: every other browser is
+signed out on its next request. Setting `is_active = 0` on an account signs it
+out immediately too.
+
+**Cookies and headers.** HttpOnly, SameSite=Lax, `Secure` whenever HTTPS is
+in use or `GATEWAY_BASE_URL` is `https://`, session id regenerated at login,
+`session.use_strict_mode=1`, and `Cache-Control: no-store` plus the CSP,
+`X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff` and
+`Referrer-Policy: no-referrer` on every rendered page.
+
+**Audit trail.** `admin_audit_log` rows with `entity_type = 'admin'` cover
+`login`, `login_failed`, `logout`, `password_change` and `create`. A row
+carries the resolved client IP and, for failures, a reason
+(`wrong_password`, `wrong_password_locked`, `unknown_username`,
+`inactive_account`, `locked_account`) or `idle`/`manual` for logouts — never a
+password, never a hash. `admin_smoke` asserts that. The one thing deliberately
+*not* audited is the per-IP throttle refusal (3 failures per address per
+5 minutes), because that endpoint is reachable without credentials and every
+refused probe would add a row. `cleanup.retention.audit_days` prunes the table
+(`0` = keep forever).
+
+**Who a request came from.** `admin.trusted_proxies`
+(`GATEWAY_TRUSTED_PROXIES`, comma-separated addresses/CIDRs) decides whether
+`X-Forwarded-For` is believed at all: only when `REMOTE_ADDR` is on the list,
+and then the **rightmost** entry the list does not explain is used — the left
+side of that header is text the client typed. With the default (empty list)
+everything is recorded and throttled on `REMOTE_ADDR`. Behind a TLS-terminating
+proxy, leave it empty and the login throttle becomes global (one person's three
+bad passwords lock every admin out) and the logs show only the proxy.
+
+**Not implemented, on purpose or for now:**
+
+- **No second factor.** One factor — the password — guards the whole gateway.
+  Put the panel behind a VPN, a reverse-proxy authentication layer, or Windows
+  Firewall IP restrictions instead.
+- **One role.** Every active admin sees and can change everything: connection
+  credentials, pre-approved SQL, client keys. There is no read-only or
+  per-request ownership model.
+- **No in-panel account management.** Creating an admin, changing a password
+  and clearing a lockout are CLI operations (`php cli\create_admin.php`), which
+  is also why there is no "change my password" form or recovery flow: someone
+  with host access is the reset path.
+- **Sessions are PHP files** in the server's session save path. They survive a
+  process restart and vanish with an ephemeral temp dir; there is no admin-side
+  "active sessions" list, only the per-account epoch above.
+- **The timeout is idle-based.** A page refreshed every 29 minutes keeps a
+  session alive indefinitely — there is no absolute lifetime cap. To end one
+  for sure, replace the password (`cli\create_admin.php`).
+- **No rate limit on the panel as a whole** beyond the login throttle (per
+  account: 5 failures then a 15-minute lock; per address: 3 failures in a
+  5-minute window). If the panel is reachable from a wide network, throttle it
+  at the proxy.
+
 

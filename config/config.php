@@ -152,6 +152,18 @@ return [
         'session_name' => 'datagateway_admin',
         'max_attempts' => 5,        // failed logins before lockout
         'lockout_minutes' => 15,
+        // Minutes an authenticated admin page may sit without a request
+        // before the session is dropped and the operator has to log in again
+        // (0 = never expire; a shared/kiosk machine should not be left open).
+        'session_idle_minutes' => (int)\Core\Env::get('GATEWAY_ADMIN_SESSION_IDLE_MINUTES', 30),
+        // Addresses/CIDRs of the proxies sitting in front of the panel, e.g.
+        // "127.0.0.1, ::1, 10.0.0.5/32". Only when REMOTE_ADDR is one of them
+        // is X-Forwarded-For believed (see Core\TrustedProxies). Empty (the
+        // default) means the peer address is used for the login throttle and
+        // every log/audit row.
+        'trusted_proxies' => \Core\IpRange::parseList(
+            (string)\Core\Env::get('GATEWAY_TRUSTED_PROXIES', '')
+        ),
         // The request test-run button samples the SQL with its own tight
         // limits (independent of the request's configured timeout/rows).
         'test_run' => ['max_rows' => 20, 'max_seconds' => 10],

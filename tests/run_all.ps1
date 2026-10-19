@@ -147,6 +147,9 @@ try {
     Invoke-Suite "throttle_test" {
         & $PhpExe (Join-Path $PSScriptRoot "throttle_test.php")
     }
+    Invoke-Suite "proxy_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "proxy_test.php")
+    }
 
     # 3) the four smoke tests.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in

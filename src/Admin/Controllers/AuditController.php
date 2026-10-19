@@ -17,8 +17,9 @@ final class AuditController
 {
     private const PER_PAGE = 50;
 
-    private const ENTITIES = ['request', 'connection', 'client', 'permission'];
-    private const ACTIONS = ['create', 'update', 'delete', 'test_run'];
+    private const ENTITIES = ['request', 'connection', 'client', 'permission', 'admin'];
+    private const ACTIONS = ['create', 'update', 'delete', 'test_run',
+        'login', 'login_failed', 'logout', 'password_change'];
 
     public static function index(): void
     {

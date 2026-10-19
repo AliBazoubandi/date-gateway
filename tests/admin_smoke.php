@@ -18,6 +18,7 @@ $root = BASE_PATH;
 // wipe: real data is never matched or touched).
 $run = substr(\Core\Str::hex(4), 0, 8);
 $adminName = "smoke_admin_{$run}";
+$ghostName = "smoke_ghost_{$run}";
 $connName = "smk {$run} mariadb";
 $code = "smk{$run}.ping";
 $clientName = "smk {$run} agent";
@@ -27,7 +28,7 @@ $adminId = 0;
 $clientId = 0;
 $requestId = 0;
 $connectionId = 0;
-$cleanup = static function () use ($db, &$adminId, &$clientId, &$requestId, &$connectionId): void {
+$cleanup = static function () use ($db, &$adminId, &$clientId, &$requestId, &$connectionId, $adminName, $ghostName): void {
     if ($requestId > 0) {
         $db->execute('DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE request_id = ?)', [$requestId]);
         $db->execute('DELETE FROM calls WHERE request_id = ?', [$requestId]);
@@ -51,6 +52,11 @@ $cleanup = static function () use ($db, &$adminId, &$clientId, &$requestId, &$co
         $db->execute('DELETE FROM admin_audit_log WHERE admin_user_id = ?', [$adminId]);
         $db->execute('DELETE FROM admin_users WHERE id = ?', [$adminId]);
     }
+    // Authentication rows for an account that no longer exists (the unknown
+    // username probe, and cli\create_admin.php) carry no admin_user_id, so they
+    // are matched by their own entity_name instead.
+    $db->execute('DELETE FROM admin_audit_log WHERE entity_type = ? AND entity_name IN (?, ?)',
+        ['admin', $adminName, $ghostName]);
 };
 register_shutdown_function($cleanup);
 chdir($root);
@@ -97,6 +103,42 @@ function csrf(string $html): string {
     }
     fwrite(STDERR, "cannot find CSRF token\n");
     exit(2);
+}
+
+// Same GET as http(), but the response headers come back instead of the body.
+function headers(string $path): array {
+    $ch = curl_init('http://127.0.0.1:' . $GLOBALS['port'] . $path);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER => true,
+        CURLOPT_COOKIEFILE => $GLOBALS['cookie'],
+        CURLOPT_COOKIEJAR => $GLOBALS['cookie'],
+        CURLOPT_TIMEOUT => 20,
+    ]);
+    $out = (string)curl_exec($ch);
+    $size = (int)curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+    $code = (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    curl_close($ch);
+    return [$code, substr($out, 0, $size)];
+}
+
+// The session id curl is sending, read back from the cookie jar. Used to age
+// the session file directly instead of waiting out the idle window.
+function sid_from_jar(): string {
+    $name = (string)\Core\Config::get('admin.session_name', 'datagateway_admin');
+    $lines = file($GLOBALS['cookie'], FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    $last = '';
+    foreach ($lines === false ? [] : $lines as $line) {
+        $line = (string)preg_replace('/^#HttpOnly_/', '', $line);
+        if ($line === '' || $line[0] === '#') {
+            continue;
+        }
+        $f = explode("\t", $line);
+        if (count($f) >= 7 && $f[5] === $name && strlen($f[6]) >= 20) {
+            $last = trim($f[6], '"');
+        }
+    }
+    return $last;
 }
 
 $pass = 0;
@@ -271,6 +313,95 @@ $check('still logged in after CSRF-less logout POST', str_contains($body, 'actio
 $check('POST logout with CSRF lands on login page', str_contains($body, 'Admin login') && !str_contains($body, 'action="/admin/logout"'));
 [, $body] = http('GET', '/admin');
 $check('session is gone after CSRF logout', str_contains($body, 'Admin login') && !str_contains($body, 'action="/admin/logout"'));
+
+// Session hardening: no-store, idle timeout, password rotation ----------------
+// Signing out is audited (manually here, by idleness below).
+$check('manual logout audited',
+    (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin' AND action = 'logout'
+        AND admin_user_id = ? AND after_json LIKE ?", [$adminId, '%manual%']) >= 1);
+
+[, $body] = http('GET', '/admin/login');
+[$code, $body] = http('POST', '/admin/login', [
+    '_csrf' => csrf($body), 'username' => $adminName, 'password' => 'test!pass123',
+]);
+$check('logged in again for the session checks', str_contains($body, 'Dashboard'));
+$check('successful logins audited',
+    (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin' AND action = 'login'
+        AND admin_user_id = ?", [$adminId]) >= 2);
+
+[$hcode, $hdr] = headers('/admin');
+$check('admin pages send Cache-Control: no-store',
+    $hcode === 200 && stripos($hdr, 'Cache-Control: no-store') !== false,
+    trim(preg_replace('/\r?\n/', ' | ', $hdr) ?? ''));
+[, $hdr2] = headers('/admin/login');
+$check('the login page is not cacheable either', stripos($hdr2, 'Cache-Control: no-store') !== false);
+
+// ---- idle timeout: age the session's own last_seen instead of waiting 30 min.
+$sid = sid_from_jar();
+$savePath = (string)session_save_path();
+$sessFile = ($savePath !== '' ? rtrim($savePath, '/\\') : sys_get_temp_dir()) . '/sess_' . $sid;
+$check('session file of this run located', $sid !== '' && is_file($sessFile), $sessFile);
+$aged = false;
+if ($sid !== '' && is_file($sessFile)) {
+    $data = (string)file_get_contents($sessFile);
+    $replaced = preg_replace('/last_seen\|i:\d+;/', 'last_seen|i:' . (time() - 4000) . ';', $data, 1);
+    $aged = is_string($replaced) && $replaced !== $data && file_put_contents($sessFile, $replaced) !== false;
+}
+$check('session aged past the idle window', $aged);
+[, $body] = http('GET', '/admin/connections');
+$check('idle session is logged out with an explanation',
+    str_contains($body, 'Your session expired') && !str_contains($body, 'action="/admin/logout"'),
+    substr(strip_tags($body), 0, 120));
+$check('idle logout audited',
+    (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin' AND action = 'logout'
+        AND admin_user_id = ? AND after_json LIKE ?", [$adminId, '%idle%']) >= 1);
+
+// ---- a replaced password must kill the session that was issued before it.
+[, $body] = http('GET', '/admin/login');
+[$code, $body] = http('POST', '/admin/login', [
+    '_csrf' => csrf($body), 'username' => $adminName, 'password' => 'test!pass123',
+]);
+$check('logged in after the idle logout', str_contains($body, 'Dashboard'));
+$beforeVersion = (int)db()->value('SELECT session_version FROM admin_users WHERE id = ?', [$adminId]);
+shell_exec('php "' . $root . '/cli/create_admin.php" --username=' . $adminName . ' --password=test!pass123');
+$afterVersion = (int)db()->value('SELECT session_version FROM admin_users WHERE id = ?', [$adminId]);
+$check('replacing the password advances session_version', $afterVersion === $beforeVersion + 1,
+    $beforeVersion . ' -> ' . $afterVersion);
+[, $body] = http('GET', '/admin/connections');
+$check('session issued before the password change is dead',
+    str_contains($body, 'Admin login') && !str_contains($body, 'action="/admin/logout"')
+    && !str_contains($body, 'Your session expired'), substr(strip_tags($body), 0, 120));
+$check('password change audited with the new epoch',
+    (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin'
+        AND action = 'password_change' AND entity_id = ? AND after_json LIKE ?",
+        [$adminId, '%session_version%']) >= 1);
+$check('admin account creation audited',
+    (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin'
+        AND action = 'create' AND entity_name = ?", [$adminName]) >= 1);
+
+// ---- refused sign-ins are audited, and never with the typed password.
+[, $body] = http('GET', '/admin/login');
+http('POST', '/admin/login', [
+    '_csrf' => csrf($body), 'username' => $ghostName, 'password' => 'ghost!pass123x',
+]);
+$ghost = db()->one("SELECT admin_user_id, entity_name FROM admin_audit_log
+    WHERE entity_type = 'admin' AND action = 'login_failed' AND entity_name = ?", [$ghostName]);
+$check('unknown username probe audited without an admin id',
+    $ghost !== null && $ghost['admin_user_id'] === null, json_encode($ghost));
+$check('wrong password audited with a reason',
+    (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin'
+        AND action = 'login_failed' AND entity_name = ? AND after_json LIKE ?",
+        [$adminName, '%wrong_password%']) >= 1);
+$leaks = [];
+foreach (db()->rows("SELECT COALESCE(before_json, '') AS b, COALESCE(after_json, '') AS a
+                     FROM admin_audit_log WHERE entity_type = 'admin'") as $r) {
+    $blob = (string)$r['b'] . (string)$r['a'];
+    if (strpos($blob, 'test!pass123') !== false || strpos($blob, 'ghost!pass123x') !== false
+        || strpos($blob, '$2y$') !== false || stripos($blob, 'password_hash') !== false) {
+        $leaks[] = $blob;
+    }
+}
+$check('no admin audit row carries a password or a hash', $leaks === [], implode(' || ', $leaks));
 
 // Audit rows exist for actions -------------------------------------------
 $auditKinds = db()->rows('SELECT entity_type, action, COUNT(*) c FROM admin_audit_log GROUP BY entity_type, action');
