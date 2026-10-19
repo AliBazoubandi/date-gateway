@@ -15,13 +15,21 @@ use Services\ResultTooLargeException;
  * Delayed-execution worker: moves executions scheduled -> running -> ready|failed.
  *
  * Concurrency model:
- *  - Exactly one worker pass runs at a time (file lock + metadata-DB GET_LOCK,
- *    enforced by the CLI wrapper).
+ *  - A pass is sequential inside itself. Parallelism comes from running one
+ *    pass per target connection (cli/worker_pool.php), so a 30-minute query on
+ *    connection A no longer holds connection B's due executions waiting (P1-1).
+ *  - Each pass holds a file lock plus a metadata-DB GET_LOCK. Global mode uses
+ *    `gw_cli_worker` / worker.lock; connection mode uses
+ *    `gw_cli_worker:<id>` / worker-<id>.lock, which is what lets different
+ *    connections run at the same time while two workers never share one.
  *  - Claims are atomic: UPDATE ... WHERE status = 'scheduled' (InnoDB row lock).
  *  - The per-connection cap (connections.max_concurrency, else config default 2)
- *    limits concurrently RUNNING delayed executions; the pass is sequential, so
- *    the cap is maintained as a DB-side guard and stays valid if the worker is
- *    ever parallelized or several hosts share one metadata DB.
+ *    limits concurrently RUNNING delayed executions; it is checked DB-side so it
+ *    stays valid when several hosts share one metadata DB. A single-connection
+ *    pass still runs its own rows one after another: the cap bounds overlap
+ *    across hosts and passes, it does not intra-parallelise one connection.
+ *  - worker.pass_budget_seconds bounds one pass so a long queue cannot outlive
+ *    the schedule interval; the remainder stays scheduled for the next minute.
  *
  * Crash policy:
  *  - 'running' rows older than config worker.stale_running_minutes are leftovers
@@ -38,8 +46,23 @@ use Services\ResultTooLargeException;
  */
 final class Worker
 {
-    /** @return array{due:int,ready:int,failed:int,blocked:int,deferred:int,cleaned_stale:int,cleaned_inactive:int} */
-    public static function run(): array
+    /**
+     * One worker pass.
+     *
+     * Global mode (`$connectionId` = null) is the historical single-worker
+     * behaviour: housekeeping plus every due execution, in one process.
+     * Connection mode (used by cli/worker_pool.php) restricts the pass to one
+     * target connection and leaves housekeeping to the caller, so a slow query
+     * on connection A can never delay a due execution on connection B (P1-1).
+     *
+     * `$budgetSeconds` bounds the pass wall time: the child stops claiming
+     * once it is spent, and what it did not reach stays 'scheduled' for the
+     * next minute. Without it a 50-execution pass can run for hours while the
+     * schedule keeps firing.
+     *
+     * @return array{due:int,ready:int,failed:int,blocked:int,deferred:int,cleaned_stale:int,cleaned_inactive:int}
+     */
+    public static function run(?int $connectionId = null, ?int $budgetSeconds = null): array
     {
         Filesystem::prepare();
         $stats = [
@@ -47,34 +70,52 @@ final class Worker
             'cleaned_stale' => 0, 'cleaned_inactive' => 0,
         ];
 
-        // Housekeeping first, so neither kind can later win a claim.
-        $stats['cleaned_inactive'] = self::failScheduledOnInactive();
-        $stats['cleaned_stale'] = self::recoverStaleRunning();
+        // Housekeeping first, so neither kind can later win a claim. In pool
+        // mode the parent already swept (once per pass, not once per child).
+        if ($connectionId === null) {
+            $swept = self::housekeeping();
+            $stats['cleaned_inactive'] = $swept['cleaned_inactive'];
+            $stats['cleaned_stale'] = $swept['cleaned_stale'];
+        }
 
         $db = Db::instance();
-        $due = $db->rows(
+        $dueSql =
             "SELECT e.id, r.connection_id
              FROM executions e
              JOIN requests r ON r.id = e.request_id
              JOIN connections c ON c.id = r.connection_id
              WHERE e.mode = 'delayed' AND e.status = 'scheduled' AND e.scheduled_at <= NOW()
-               AND r.is_active = 1 AND c.is_active = 1
+               AND r.is_active = 1 AND c.is_active = 1";
+        $dueArgs = [];
+        if ($connectionId !== null) {
+            $dueSql .= ' AND r.connection_id = ?';
+            $dueArgs[] = $connectionId;
+        }
+        $due = $db->rows($dueSql . '
              ORDER BY e.scheduled_at ASC, e.id ASC
-             LIMIT 200"
-        );
+             LIMIT 200', $dueArgs);
         $stats['due'] = count($due);
         if ($due === []) {
             return $stats;
         }
 
         $maxPerRun = max(1, (int)Config::get('worker.max_per_run', 50));
-        $running = self::runningCountByConnection();
+        $deadline = $budgetSeconds !== null && $budgetSeconds > 0
+            ? microtime(true) + $budgetSeconds
+            : null;
+        $running = self::runningCountByConnection($connectionId);
         $caps = [];
         $processed = 0;
 
         foreach ($due as $row) {
             if ($processed >= $maxPerRun) {
                 // Cap the pass; everything left stays due for the next run.
+                $stats['deferred'] = max(0, count($due) - $stats['ready'] - $stats['failed'] - $stats['blocked']);
+                break;
+            }
+            if ($deadline !== null && microtime(true) >= $deadline) {
+                // Wall-clock budget spent: hand the rest to the next pass
+                // instead of running for hours past the schedule interval.
                 $stats['deferred'] = max(0, count($due) - $stats['ready'] - $stats['failed'] - $stats['blocked']);
                 break;
             }
@@ -103,6 +144,21 @@ final class Worker
     // ------------------------------------------------------------------
     // Housekeeping sweeps
     // ------------------------------------------------------------------
+
+    /**
+     * The two global sweeps. Connection-mode children never run these (they
+     * would repeat the same full-table work once per child), so the pool runs
+     * them exactly once per pass.
+     *
+     * @return array{cleaned_stale:int,cleaned_inactive:int}
+     */
+    public static function housekeeping(): array
+    {
+        return [
+            'cleaned_inactive' => self::failScheduledOnInactive(),
+            'cleaned_stale' => self::recoverStaleRunning(),
+        ];
+    }
 
     /** Scheduled executions of inactive requests/connections -> failed. */
     private static function failScheduledOnInactive(): int
@@ -349,20 +405,41 @@ final class Worker
     }
 
     /** @return array<int,int> connection_id => running delayed executions */
-    private static function runningCountByConnection(): array
+    private static function runningCountByConnection(?int $connectionId = null): array
     {
-        $rows = Db::instance()->rows(
-            "SELECT r.connection_id AS cid, COUNT(*) AS n
+        $sql = "SELECT r.connection_id AS cid, COUNT(*) AS n
              FROM executions e
              JOIN requests r ON r.id = e.request_id
-             WHERE e.mode = 'delayed' AND e.status = 'running'
-             GROUP BY r.connection_id"
-        );
+             WHERE e.mode = 'delayed' AND e.status = 'running'";
+        $args = [];
+        if ($connectionId !== null) {
+            $sql .= ' AND r.connection_id = ?';
+            $args[] = $connectionId;
+        }
+        $rows = Db::instance()->rows($sql . ' GROUP BY r.connection_id', $args);
         $out = [];
         foreach ($rows as $r) {
             $out[(int)$r['cid']] = (int)$r['n'];
         }
         return $out;
+    }
+
+    /**
+     * Active connections that can own delayed work, in id order. The pool
+     * spawns one child per id (P1-1).
+     *
+     * @return list<int>
+     */
+    public static function activeConnectionIds(): array
+    {
+        $rows = Db::instance()->rows('SELECT id FROM connections WHERE is_active = 1 ORDER BY id');
+        return array_map(static fn (array $r): int => (int)$r['id'], $rows);
+    }
+
+    /** Per-connection concurrency cap, for the pool's bounded fan-out. */
+    public static function capForConnection(int $connectionId): int
+    {
+        return self::capFor($connectionId);
     }
 
     /**

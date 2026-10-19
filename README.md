@@ -153,13 +153,24 @@ is logged on.
 Or register them by hand (adjust paths):
 
 ```
-schtasks /Create /F /RU SYSTEM /TN "DataGateway-worker"   /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\worker.php\""
+schtasks /Create /F /RU SYSTEM /TN "DataGateway-worker"   /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\worker_pool.php\""
 schtasks /Create /F /RU SYSTEM /TN "DataGateway-cleanup"  /SC MINUTE /MO 5 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\cleanup.php\""
 schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\webhooks.php\""
 ```
 
-- **worker** (every 1 min) — claims due delayed executions, runs them on
-  the target DB, writes result files, then drains due webhook deliveries.
+- **worker** (every 1 min) — `cli\worker_pool.php`: runs the global sweeps once,
+  then starts one `cli\worker.php --connection=ID` child per active target
+  connection (at most `worker.pool_max_children`, default 8, at a time), waits
+  for them, and drains due webhook deliveries once. Because each child is fenced
+  by its own `gw_cli_worker:<id>` / `storage\worker-<id>.lock`, work on
+  connection A no longer waits behind a 30-minute query on connection B.
+  `php cli\worker.php` on its own is still the **manual single pass** over every
+  connection (no budget, no fan-out) — useful for one-off runs, not for the
+  schedule. `worker.pass_budget_seconds` (default 50) bounds each pool child's
+  wall time so a long queue cannot make a pass outlive its own schedule; what a
+  child does not reach stays `scheduled` for the next minute. Note that
+  executions **within** one connection still run one after another — a slow
+  query only queues behind its own connection.
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
   removes failed leftovers, recovers instant executions that died mid-query
   in the web server, and deletes orphaned result/cache files whose
@@ -167,10 +178,10 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   it also prunes `request_logs` older than that many days (batched); `0`
   (default) keeps the log forever.
 - **webhooks** (optional, every 1 min) — retries webhook deliveries between
-  worker passes so clients get notified faster than once a minute. The
-  worker already drains the queue at the end of each pass; this task just
-  closes the gap. Delivery is fenced with `GET_LOCK`, so running worker and
-  webhooks concurrently is safe.
+  worker passes so clients get notified faster than once a minute. The pool
+  already drains the queue at the end of each pass; this task just closes the
+  gap. Delivery is fenced with `GET_LOCK`, so running pool and webhooks
+  concurrently is safe.
 
 Delete a task with `schtasks /Delete /TN "DataGateway-webhooks" /F`.
 

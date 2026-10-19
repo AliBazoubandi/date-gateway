@@ -133,6 +133,9 @@ try {
     Invoke-Suite "readonly_driver_test" {
         & $PhpExe (Join-Path $PSScriptRoot "readonly_driver_test.php")
     }
+    Invoke-Suite "pool_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "pool_test.php")
+    }
     Invoke-Suite "resultwriter_test" {
         & $PhpExe (Join-Path $PSScriptRoot "resultwriter_test.php")
     }

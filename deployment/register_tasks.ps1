@@ -3,7 +3,8 @@
     Registers the three Data Gateway scheduled tasks in Windows Task Scheduler.
 
 .DESCRIPTION
-    worker.php   - claims due delayed executions          (every 1 minute)
+    worker_pool.php - fans out one per-connection worker per due connection
+                      (every 1 minute; cli\worker.php is the manual single pass)
     cleanup.php  - expires results, recovers stale rows   (every 5 minutes)
     webhooks.php - delivers pending webhook notifications (every 1 minute)
 
@@ -66,8 +67,18 @@ if ($RunAs -eq 'System') {
 # TimeLimitMin is a HARD kill switch: if a run wedges (DB hang, stuck socket),
 # Task Scheduler force-terminates it. The next scheduled fire simply claims
 # the work again, so an aggressive cap is safe — an unlimited run is not.
+#
+# The caps must clear the LONGEST legitimate run, not the average one: a delayed
+# request may run up to 1800 s (30 min, the admin cap on timeout_seconds), so the
+# worker entry gets 60 min = 2x that. A run killed early leaves its execution
+# 'running' until worker.stale_running_minutes (90) sweeps it - the client waits
+# that long for a failure, which is why the cap must never sit near 30 min.
+#
+# 'Name' pins the registered task identity so renaming the script behind a task
+# (worker.php -> worker_pool.php, P1-1) updates the existing task in place
+# instead of leaving an orphan registered next to a duplicate.
 $tasks = @(
-    @{ Script = "worker.php";   Minutes = 1; Label = "delayed executions"; TimeLimitMin = 60 },
+    @{ Script = "worker_pool.php"; Name = "worker"; Minutes = 1; Label = "delayed executions"; TimeLimitMin = 60 },
     @{ Script = "cleanup.php";  Minutes = 5; Label = "expiry + recovery";  TimeLimitMin = 30 },
     @{ Script = "webhooks.php"; Minutes = 1; Label = "webhook delivery";   TimeLimitMin = 15 }
 )
@@ -97,7 +108,7 @@ foreach ($t in $tasks) {
         throw "Missing CLI script: $scriptPath"
     }
 
-    $taskName = "$Prefix-$($t.Script -replace '\.php$','')"
+    $taskName = "$Prefix-$(if ($t.Name) { $t.Name } else { $t.Script -replace '\.php$','' })"
 
     $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
         -RepetitionInterval (New-TimeSpan -Minutes $t.Minutes) `

@@ -102,6 +102,17 @@ return [
         // How many executions one worker pass may process (stops a pass from
         // growing unboundedly while new requests keep arriving).
         'max_per_run' => 50,
+        // Wall-clock budget of ONE pass, in seconds. A pass that spends it stops
+        // claiming and leaves the rest scheduled for the next minute, so a long
+        // queue (or one slow query) cannot make a pass outlive the 1-minute
+        // schedule and pile up. Keep it below the schedule interval plus the
+        // longest query you expect to finish within a pass.
+        'pass_budget_seconds' => 50,
+        // How many per-connection workers cli/worker_pool.php runs at the same
+        // time. One child per active connection, started in waves of this size;
+        // raise it only if you have many connections and the target DBs can take
+        // the extra sessions.
+        'pool_max_children' => 8,
         // A delayed 'running' execution older than this is treated as a crashed
         // worker's leftover and is failed by the next pass. Must comfortably
         // exceed the LONGEST request timeout the admin UI allows (delayed is
