@@ -184,7 +184,7 @@ final class AuditController
         if (is_scalar($v)) {
             return (string)$v;
         }
-        return (string)Str::json($v);
+        return Str::json($v);
     }
 
     private static function decode(string $json): ?array

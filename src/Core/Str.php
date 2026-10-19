@@ -20,10 +20,15 @@ final class Str
         // contains malformed UTF-8 (mismatched driver charset): json_encode
         // would otherwise return false and any `: string` caller would blow
         // up with an uncaught TypeError (500 + stuck 'running' executions).
-        return json_encode(
+        $json = json_encode(
             $value,
             $flags | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
         );
+        // Substitution does not cover every failure: INF/NAN, a resource or a
+        // recursive object still return false, which would break the same
+        // `: string` contract. An empty object is the least-surprising answer
+        // for a value that has no JSON representation at all.
+        return is_string($json) ? $json : '{}';
     }
 
     // ---- Input validators (path params must pass these) ---------------------

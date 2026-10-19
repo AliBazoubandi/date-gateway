@@ -452,7 +452,12 @@ notifications are lost.
   `Core\Str::json()` and `json_out()` always encode with
   `JSON_INVALID_UTF8_SUBSTITUTE`, so a malformed value can never fail an
   encoding, blank out a response, or produce a 500 — it is emitted with
-  replacement characters instead.
+  replacement characters instead. `Str::json()` additionally never returns
+  `false`: a value with **no** JSON representation at all (`INF`, `NAN`, a
+  resource, a self-referencing object) becomes `{}`. Without that fallback the
+  `: string` callers (audit before/after, webhook payloads) take a `TypeError`,
+  and a response encoded through it is an empty body with a 200.
+  `tests\str_json_test.php` asserts both halves.
 - The result-file writer (`src/Worker/ResultWriter.php`) goes further for
   file mode: it repairs invalid UTF-8 in values AND in column-name keys
   (mojibake'd SQL aliases become repairable or positional `col_N` names)
@@ -602,6 +607,8 @@ defaults read from a `GATEWAY_*`-free child process),
 `driver_tls_test` (the SQL Server connection options of §14 — encryption and
 certificate validation defaults, the handshake cap, and a real connect attempt
 to a closed port proving it gives up in seconds),
+`str_json_test` (`Core\Str::json()` never returns `false` and never blanks a
+response — §6),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised

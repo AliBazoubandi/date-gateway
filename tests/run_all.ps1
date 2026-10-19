@@ -153,6 +153,9 @@ try {
     Invoke-Suite "driver_tls_test" {
         & $PhpExe (Join-Path $PSScriptRoot "driver_tls_test.php")
     }
+    Invoke-Suite "str_json_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "str_json_test.php")
+    }
 
     # 3) the four smoke tests.
     # (audit_spot is a manual spot-check: it needs audit rows to survive in

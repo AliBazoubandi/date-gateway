@@ -64,7 +64,10 @@ set_exception_handler(static function (\Throwable $e): void {
         http_response_code(500);
         header('Content-Type: application/json; charset=utf-8');
         $detail = (bool)Core\Config::get('app.debug', false) ? $e->getMessage() : null;
-        echo json_encode(['error' => ['code' => 'internal_error', 'message' => $detail ?? 'Internal server error']], JSON_UNESCAPED_SLASHES);
+        // Str::json, not json_encode: a debug-mode exception message can carry
+        // bytes from a target database that are not valid UTF-8, and false
+        // would echo nothing - a 500 with an empty body and no JSON at all.
+        echo Core\Str::json(['error' => ['code' => 'internal_error', 'message' => $detail ?? 'Internal server error']]);
         exit(1);
     }
     http_response_code(500);
@@ -131,10 +134,9 @@ function json_out(array $payload, int $status = 200): never
     header('Content-Type: application/json; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
     header('Cache-Control: no-store');
-    // Substitute (never fail) so invalid data can never blank out a response.
-    echo json_encode(
-        $payload,
-        JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE
-    );
+    // Substitute (never fail) so invalid data can never blank out a response:
+    // a raw json_encode() returning false would echo nothing and still send
+    // 200 + application/json. Core\Str::json() always yields a string.
+    echo Core\Str::json($payload);
     exit;
 }
