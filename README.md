@@ -208,7 +208,14 @@ curl -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/req
 :: poll — returns the download link once the execution is ready
 curl -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/calls/CALL_ID
 -> 200 {"call_id":"...","request_code":"sales.daily","status":"ready",
-        "row_count":123,"ready_at":"...","expires_at":"...","link":"http://gw.internal/api/v1/results/TOKEN"}
+        "row_count":123,"ready_at":"...","expires_at":"...","link":"http://gw.internal/api/v1/results/TOKEN",
+        "error":null}
+
+:: poll a failed call — `error` is the ONLY failure detail clients get; the
+:: raw driver text stays in the admin-visible executions.error_message
+-> 200 {"call_id":"...","request_code":"sales.daily","status":"failed",
+        "row_count":null,"ready_at":null,"expires_at":null,"link":null,
+        "error":{"code":"timeout","message":"The query did not finish within its timeout and was stopped before it produced a result."}}
 
 :: download — stream the result file (until expires_at). Downloads carry
 :: Content-Disposition: attachment; filename="result-{code}-{execution_id}.json"
@@ -216,7 +223,11 @@ curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 ```
 
 Status values: `scheduled` → `running` → `ready` (then `expired`), or
-`failed`. Error responses carry `{"error":{"code":"...","message":"..."}}`
+`failed`. Every poll response carries `error`: `null` unless the run failed,
+then `{"code":"timeout"|"execution_failed"|"query_rejected"|"result_too_large",
+"message":"<fixed wording>"}` (treat an unknown code as `execution_failed`;
+the code set may grow, the wording never contains SQL, host, user or driver
+output). Error *responses* carry `{"error":{"code":"...","message":"..."}}`
 — codes include `unauthorized` (401), `forbidden` (403), `not_found`
 (404), `method_not_allowed` (405), `query_rejected` (502, saved SQL is not
 read-only), `execution_failed` (502), `result_unavailable` (502, the stored
@@ -282,8 +293,8 @@ end of that file) before deploying this code.
 ## 5. Webhooks
 
 If a client has a webhook URL + secret configured, every delayed call gets
-a signed POST when its execution turns `ready` (and on retry after
-failures). Headers:
+a signed POST when its execution settles — `ready` **or `failed`** (and on
+retry after delivery failures). Headers:
 
 - `Content-Type: application/json`
 - `X-Gateway-Signature: sha256=<hex>` — HMAC-SHA256 of
@@ -294,7 +305,7 @@ failures). Headers:
 - `X-Gateway-Call: <call_id>`
 - `X-Gateway-Attempt: <n>` (1-based)
 
-Payload:
+Payload of a ready result:
 
 ```json
 {
@@ -306,6 +317,29 @@ Payload:
   "row_count": 123
 }
 ```
+
+Payload of a failed run (same envelope, no link, plus `error`):
+
+```json
+{
+  "call_id": "...",
+  "request_code": "sales.daily",
+  "status": "failed",
+  "link": null,
+  "error": {
+    "code": "timeout",
+    "message": "The query did not finish within its timeout and was stopped before it produced a result."
+  }
+}
+```
+
+`error.code` is one of `timeout`, `execution_failed`, `query_rejected`,
+`result_too_large` (treat an unknown code as `execution_failed`), and
+`error.message` is fixed gateway wording — never SQL, a host, a user or raw
+driver output. A failed run is final: the gateway does not retry the query,
+so resubmit (or poll `GET /api/v1/calls/{call_id}`, which now reports the same
+`error`). Receivers written before failure notifications only ever saw
+`status: "ready"`; they must branch on `status` instead of assuming it.
 
 `link` is the absolute download URL and is `null` when the gateway cannot
 build one (no `GATEWAY_BASE_URL` configured, or the call predates download
@@ -322,6 +356,16 @@ $ts   = $_SERVER['HTTP_X_GATEWAY_TIMESTAMP'] ?? '';
 if ($ts === '' || abs(time() - (int)$ts) > 300) { http_response_code(401); exit; }
 $good = 'sha256=' . hash_hmac('sha256', $ts . '.' . $raw, $WEBHOOK_SECRET);
 if (!hash_equals($good, $sig)) { http_response_code(401); exit; }
+
+// Only decode after the bytes are verified, and branch on the status:
+// a failed run has no link to download.
+$event = json_decode($raw, true);
+if (($event['status'] ?? '') === 'failed') {
+    notify_failure($event['call_id'], $event['error']['code'] ?? 'execution_failed');
+} else {
+    download($event['call_id'], $event['link']); // link may be null -> poll instead
+}
+http_response_code(202);
 ```
 
 Always read the body from `php://input` — re-serializing a decoded payload
@@ -366,8 +410,12 @@ Instant results follow the same spirit via the time-windowed cache.
 
 ## 8. Upgrading an existing installation
 
+The statements below are also collected at the end of `sql/schema.sql`.
+`php cli\check.php` fails on any of them that is missing, so run it after
+upgrading the code.
+
 If the DB was created before the webhook feature, add the encrypted-token
-column once (also documented at the end of `sql/schema.sql`):
+column once:
 
 ```sql
 ALTER TABLE `calls`
@@ -377,8 +425,36 @@ ALTER TABLE `calls`
 ```
 
 Old calls keep `token_enc = NULL`: they simply get no `link` in webhook
-payloads; everything else keeps working. `php cli\check.php` flags the
-missing column if you forget.
+payloads; everything else keeps working.
+
+If the DB was created before the per-client submit throttle, create its
+counter table **before** deploying the new code (the throttle has no
+fallback):
+
+```sql
+CREATE TABLE IF NOT EXISTS `client_rate_limits` (
+  `client_id`     INT UNSIGNED NOT NULL,
+  `window_start`  DATETIME     NOT NULL,
+  `hits`          INT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`client_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+ALTER TABLE `client_rate_limits`
+  ADD CONSTRAINT `fk_crl_client` FOREIGN KEY (`client_id`)
+    REFERENCES `clients` (`id`) ON DELETE CASCADE;
+```
+
+If the DB was created before failure webhooks, add the sanitized failure
+code:
+
+```sql
+ALTER TABLE `executions`
+  ADD COLUMN `error_code` VARCHAR(32) NULL DEFAULT NULL AFTER `error_message`;
+```
+
+Existing rows keep `error_code = NULL` and are reported as
+`execution_failed` — the generic code — so nothing breaks if the ALTER
+lags behind the deploy.
 
 **Instant result files (2026-10):** no schema change is needed — instant
 runs reuse the existing `calls`/`executions` token columns. Instant

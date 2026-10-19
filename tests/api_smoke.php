@@ -227,7 +227,8 @@ $check('rule-1 call shares the execution',
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1, $A['key']);
 $st = json_decode($body, true);
 $check('status for owner -> scheduled', $code === 200 && ($st['status'] ?? '') === 'scheduled'
-    && $st['ready_at'] === null && $st['request_code'] === $codeDelayed, $body);
+    && $st['ready_at'] === null && $st['request_code'] === $codeDelayed
+    && array_key_exists('error', $st) && $st['error'] === null, $body);
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1, $B['key']);
 $check('status for foreign client -> 404', $code === 404);
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1);
@@ -310,7 +311,8 @@ $check('instant link downloads the file', $code === 200
 [$code, $body] = api('GET', '/api/v1/calls/' . (string)$inst['call_id'], $A['key']);
 $stInst = json_decode($body, true);
 $check('status for instant call carries link', $code === 200 && ($stInst['status'] ?? '') === 'ready'
-    && is_string($stInst['link'] ?? null));
+    && is_string($stInst['link'] ?? null)
+    && array_key_exists('error', $stInst) && $stInst['error'] === null);
 
 [$code, $body, , $hdrs] = api('POST', '/api/v1/request/' . $codeInstDl . '?download=1', $A['key'], true);
 $direct = json_decode($body, true);
@@ -343,6 +345,18 @@ $check('cache replay without file -> 502', $code === 502 && $getErr($body) === '
 $check('query failure -> 502 generic', $code === 502 && $getErr($body) === 'execution_failed'
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'failed' AND request_id = ?", [$reqBad]) >= 1
     && str_contains((string)$db->value('SELECT error_message FROM executions WHERE request_id = ? ORDER BY id DESC LIMIT 1', [$reqBad]), '_table_that_does_not_exist'));
+$badCall = (string)$db->value(
+    "SELECT c.id FROM calls c JOIN executions e ON e.id = c.execution_id
+     WHERE e.request_id = ? AND e.status = 'failed' ORDER BY e.id DESC LIMIT 1",
+    [$reqBad]
+);
+[$code, $body] = api('GET', '/api/v1/calls/' . $badCall, $A['key']);
+$stBad = json_decode($body, true);
+$check('failed call status carries the sanitized error', $code === 200
+    && ($stBad['status'] ?? '') === 'failed'
+    && ($stBad['error']['code'] ?? '') === 'execution_failed'
+    && strlen((string)($stBad['error']['message'] ?? '')) > 10
+    && !str_contains((string)$body, '_table_that_does_not_exist'), substr((string)$body, 0, 220));
 [$code, $body] = api('POST', '/api/v1/request/' . $codeSlow, $A['key']);
 $check('query timeout -> 504', $code === 504 && $getErr($body) === 'timeout'
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'timeout' AND request_id = ?", [$reqSlow]) >= 1);

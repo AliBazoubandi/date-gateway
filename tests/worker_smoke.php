@@ -156,6 +156,14 @@ $db->execute(
      VALUES (?, ?, ?, ?, ?, ?, 0)',
     [$webhookCallId, $clientId, $rReady, $execWebhook, $now, 'cli-test']
 );
+// A second call attached to the FAILING execution: the worker must enqueue its
+// delivery too, so the client is notified instead of polling forever.
+$failCallId = Str::hex(16);
+$db->execute(
+    'INSERT INTO calls (id, client_id, request_id, execution_id, created_at, ip, was_shared)
+     VALUES (?, ?, ?, ?, ?, ?, 0)',
+    [$failCallId, $clientId, $rBad, $execBad, $now, 'cli-test']
+);
 
 $logCount = static fn (string $event, int $execId): int => (int)$db->value(
     'SELECT COUNT(*) FROM request_logs WHERE event = ? AND execution_id = ?',
@@ -217,17 +225,24 @@ $check('ttl3: expires = ready_at + 3min', $ttlDiff($execRow($execTtl)) !== null
 
 $check('webhook: pending delivery row for the attached call',
     (string)$db->value('SELECT state FROM webhook_deliveries WHERE call_id = ?', [$webhookCallId]) === 'pending');
+$check('webhook: failed execution also enqueues its attached call',
+    (string)$db->value('SELECT state FROM webhook_deliveries WHERE call_id = ?', [$failCallId]) === 'pending');
 $check('webhook: nothing enqueued without attached calls',
-    (int)$db->value('SELECT COUNT(*) FROM webhook_deliveries') === 1);
+    (int)$db->value('SELECT COUNT(*) FROM webhook_deliveries') === 2,
+    'deliveries=' . (int)$db->value('SELECT COUNT(*) FROM webhook_deliveries'));
 
 $e = $execRow($execBad);
 $check('bad sql: failed with recorded error, no file', $e['status'] === 'failed'
     && ($e['error_message'] ?? '') !== '' && $e['result_path'] === null,
     (string)($e['error_message'] ?? 'null'));
+$check('bad sql: sanitized error code', (string)$e['error_code'] === 'execution_failed',
+    (string)($e['error_code'] ?? 'null'));
 $check('bad sql: no stray file', !is_file(Filesystem::resultsDir() . '/' . $execBad . '.json'));
 $check('bad sql: failed logged', $logCount('failed', $execBad) === 1);
 
 $check('timeout: failed', $execRow($execSlow)['status'] === 'failed');
+$check('timeout: sanitized error code', (string)$execRow($execSlow)['error_code'] === 'timeout',
+    (string)($execRow($execSlow)['error_code'] ?? 'null'));
 $check('timeout: classified as timeout event', $logCount('timeout', $execSlow) === 1);
 
 $e = $execRow($execTrunc);
@@ -251,6 +266,8 @@ $check('future: stays scheduled and untouched', $execRow($execFuture)['status'] 
 $e = $execRow($execInactive);
 $check('inactive: swept to failed', $e['status'] === 'failed'
     && str_contains((string)$e['error_message'], 'inactive'), (string)$e['error_message']);
+$check('inactive: sanitized error code', (string)$e['error_code'] === 'execution_failed',
+    (string)($e['error_code'] ?? 'null'));
 $e = $execRow($execStale);
 $check('stale: recovered to failed', $e['status'] === 'failed'
     && str_contains((string)$e['error_message'], 'interrupted'), (string)$e['error_message']);

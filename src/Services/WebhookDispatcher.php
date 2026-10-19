@@ -13,9 +13,16 @@ use Core\Time;
  * admins set on the client record.
  *
  * Contract:
- *  - Payload (exact bytes are what gets signed):
+ *  - Payload (exact bytes are what gets signed). For a ready result:
  *      {"call_id":..., "request_code":..., "status":"ready", "link":...,
  *       "expires_at":"...+03:30", "row_count":N}
+ *    For a failed run the worker enqueues the delivery the same way and the
+ *    payload follows the execution status:
+ *      {"call_id":..., "request_code":..., "status":"failed", "link":null,
+ *       "error":{"code":"timeout"|"execution_failed"|..., "message":"..."}}
+ *    `error` carries only the sanitized code and fixed wording
+ *    (Services\ExecutionError) - never the driver text stored in
+ *    executions.error_message.
  *  - Headers: X-Gateway-Signature: sha256=<HMAC-SHA256 of
  *    "<unix timestamp>.<raw body>" with the client's webhook_secret>,
  *    X-Gateway-Timestamp: <unix timestamp — receivers must refuse timestamps
@@ -30,9 +37,9 @@ use Core\Time;
  * webhook_url/webhook_secret) are NOT selected at all - they stay pending and
  * invisible until an admin fixes the client, without consuming the per-pass
  * LIMIT. Rows are still skipped in place (state stays 'pending', no attempt is
- * burned) when the attached execution is not ready yet. A result that EXPIRED
- * before it could be delivered is exhausted immediately (its link would 410
- * anyway).
+ * burned) while the attached execution has not settled (scheduled/running). A
+ * result that EXPIRED before it could be delivered is exhausted immediately
+ * (its link would 410 anyway).
  *
  * Only one process dispatches at a time: cli/worker.php and cli/webhooks.php
  * both hold the 'gw_cli_webhooks' metadata-DB named lock around this call.
@@ -91,31 +98,45 @@ final class WebhookDispatcher
         if ($exec === null) {
             return 'skipped';
         }
-        if ((string)$exec['status'] === 'expired' || (!empty($exec['expires_at']) && $exec['expires_at'] <= Time::now())) {
-            // The link would 410 by the time the receiver uses it; no point retrying.
-            $db->execute(
-                "UPDATE webhook_deliveries SET state = 'exhausted', next_retry_at = NULL, last_error = ?
-                 WHERE id = ? AND state = 'pending'",
-                ['result expired before it could be delivered', $deliveryId]
-            );
-            Logger::event('webhook_failed', (int)$call['client_id'], (int)$exec['request_id'], $callId,
-                (int)$exec['id'], null, null, (int)($exec['row_count'] ?? 0),
-                'delivery abandoned: result expired before delivery');
-            return 'exhausted';
-        }
-        if ((string)$exec['status'] !== 'ready') {
-            return 'skipped'; // enqueueWebhooks only fires on success, but stay defensive
-        }
-
+        $status = (string)$exec['status'];
         $requestCode = (string)$db->value('SELECT code FROM requests WHERE id = ?', [$exec['request_id']]);
-        $payload = Str::json([
-            'call_id' => $callId,
-            'request_code' => $requestCode,
-            'status' => 'ready',
-            'link' => self::callLink($callId), // null when base_url is unconfigured
-            'expires_at' => Time::iso((string)$exec['expires_at']),
-            'row_count' => (int)($exec['row_count'] ?? 0),
-        ]);
+
+        if ($status === 'failed') {
+            // The run never produced a result: notify with the sanitized reason
+            // and no link. Nothing about this payload is retryable for the
+            // client, but the receiver still has to be told.
+            $payload = Str::json([
+                'call_id' => $callId,
+                'request_code' => $requestCode,
+                'status' => 'failed',
+                'link' => null,
+                'error' => ExecutionError::forExecution($exec),
+            ]);
+        } else {
+            if ($status === 'expired' || (!empty($exec['expires_at']) && $exec['expires_at'] <= Time::now())) {
+                // The link would 410 by the time the receiver uses it; no point retrying.
+                $db->execute(
+                    "UPDATE webhook_deliveries SET state = 'exhausted', next_retry_at = NULL, last_error = ?
+                     WHERE id = ? AND state = 'pending'",
+                    ['result expired before it could be delivered', $deliveryId]
+                );
+                Logger::event('webhook_failed', (int)$call['client_id'], (int)$exec['request_id'], $callId,
+                    (int)$exec['id'], null, null, (int)($exec['row_count'] ?? 0),
+                    'delivery abandoned: result expired before delivery');
+                return 'exhausted';
+            }
+            if ($status !== 'ready') {
+                return 'skipped'; // still scheduled/running - deliver when it is settled
+            }
+            $payload = Str::json([
+                'call_id' => $callId,
+                'request_code' => $requestCode,
+                'status' => 'ready',
+                'link' => self::callLink($callId), // null when base_url is unconfigured
+                'expires_at' => Time::iso((string)$exec['expires_at']),
+                'row_count' => (int)($exec['row_count'] ?? 0),
+            ]);
+        }
         $timestamp = (string)time();
         // Sign over "<unix timestamp>.<raw body>" so a captured request
         // cannot be replayed later; receivers must refuse timestamps older

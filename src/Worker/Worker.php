@@ -7,6 +7,7 @@ use Core\Db;
 use Core\Filesystem;
 use Core\Str;
 use Core\Time;
+use Services\ExecutionError;
 use Services\Logger;
 use Services\QueryRunner;
 use Services\ResultTooLargeException;
@@ -42,7 +43,8 @@ use Services\ResultTooLargeException;
  * ready with ready_at/expires_at = ready_at + request ttl_minutes, set
  * result_path/size/row_count/truncated, mint the download token (hash only).
  * Webhook deliveries for the attached calls are enqueued by the worker as
- * 'pending' rows, to be sent by the webhook deliverer.
+ * 'pending' rows on success AND on failure, to be sent by the webhook
+ * deliverer; the payload follows the execution status.
  */
 final class Worker
 {
@@ -173,9 +175,11 @@ final class Worker
         );
         $n = 0;
         foreach ($rows as $row) {
-            $n += $db->execute(
-                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ? AND status = 'scheduled'",
-                [Time::now(), 'Request or connection is inactive; the execution will not run. Resubmit when re-enabled.', $row['id']]
+            $n += self::markFailed(
+                (int)$row['id'],
+                'Request or connection is inactive; the execution will not run. Resubmit when re-enabled.',
+                ExecutionError::FAILED,
+                'scheduled'
             );
             Logger::event('failed', null, (int)$row['request_id'], null, (int)$row['id'], null, null, null,
                 'worker skipped a scheduled execution whose request/connection is inactive');
@@ -201,11 +205,11 @@ final class Worker
             // (crashed right after rename) or the in-flight temp partial.
             Cleanup::safeUnlink("results/{$row['id']}.json");
             Cleanup::safeUnlink("results/{$row['id']}.json.tmp");
-            $n += $db->execute(
-                "UPDATE executions
-                 SET status = 'failed', finished_at = ?, error_message = ?, result_path = NULL
-                 WHERE id = ? AND status = 'running'",
-                [Time::now(), 'The worker was interrupted during this query and it was not completed. Submit the request again.', $row['id']]
+            $n += self::markFailed(
+                (int)$row['id'],
+                'The worker was interrupted during this query and it was not completed. Submit the request again.',
+                ExecutionError::FAILED,
+                'running'
             );
             Logger::event('failed', null, (int)$row['request_id'], null, (int)$row['id'], null, null, null,
                 'worker recovered a stale running execution (interrupted pass)');
@@ -275,7 +279,7 @@ final class Worker
         } catch (ResultTooLargeException $e) {
             $writer->discard(); // remove the partial file
             $message = Str::truncate($e->getMessage(), 4000);
-            self::markFailed($execId, $message);
+            self::markFailed($execId, $message, ExecutionError::TOO_LARGE);
             Logger::event('failed', null, (int)$exec['request_id'], null, $execId, null, null, null, $message);
             return false;
         }
@@ -287,7 +291,11 @@ final class Worker
 
         $writer->discard(); // remove the partial file
         $timedOut = (bool)$result['timed_out'];
-        self::markFailed($execId, $timedOut ? 'The query did not finish in time; no result was produced. Timeout exceeded.' : Str::truncate($result['error'], 4000));
+        $code = $result['rejected'] ? ExecutionError::REJECTED
+            : ($timedOut ? ExecutionError::TIMEOUT : ExecutionError::FAILED);
+        self::markFailed($execId, $timedOut
+            ? 'The query did not finish in time; no result was produced. Timeout exceeded.'
+            : Str::truncate($result['error'], 4000), $code);
         Logger::event(
             $timedOut ? 'timeout' : 'failed',
             null,
@@ -353,26 +361,39 @@ final class Worker
 
     private static function finalizeFailure(array $exec, string $message, bool $timedOut): void
     {
-        $execId = (int)$exec['id'];
-        self::markFailed($execId, $message);
-        Logger::event($timedOut ? 'timeout' : 'failed', null, (int)$exec['request_id'], null, $execId,
+        self::markFailed((int)$exec['id'], $message,
+            $timedOut ? ExecutionError::TIMEOUT : ExecutionError::FAILED);
+        Logger::event($timedOut ? 'timeout' : 'failed', null, (int)$exec['request_id'], null, (int)$exec['id'],
             null, null, null, Str::truncate($message, 2000));
     }
 
-    private static function markFailed(int $execId, string $message): void
-    {
-        Db::instance()->execute(
-            "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?,
+    private static function markFailed(
+        int $execId,
+        string $message,
+        string $code = ExecutionError::FAILED,
+        ?string $expectStatus = null
+    ): int {
+        $sql = "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ?,
                     result_path = NULL, result_size_bytes = NULL
-             WHERE id = ?",
-            [Time::now(), $message, $execId]
-        );
+             WHERE id = ?";
+        $args = [Time::now(), $message, $code, $execId];
+        if ($expectStatus !== null) {
+            $sql .= ' AND status = ?';
+            $args[] = $expectStatus;
+        }
+        $flipped = Db::instance()->execute($sql, $args);
+        if ($flipped > 0) {
+            self::enqueueWebhooks($execId);
+        }
+        return $flipped;
     }
 
     /**
      * One webhook delivery row per attached call (state = pending), for the
      * deliverer to send with retries. Existing rows (older delivery for the
-     * same call) are never duplicated.
+     * same call) are never duplicated. Called for ready AND failed runs: the
+     * payload the deliverer builds follows the execution status, so a client
+     * that is waiting on this call hears back either way.
      */
     private static function enqueueWebhooks(int $execId): void
     {

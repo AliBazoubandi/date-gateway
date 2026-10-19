@@ -5,6 +5,7 @@ namespace Api;
 use Api\Errors;
 use Core\Db;
 use Core\Time;
+use Services\ExecutionError;
 use Services\Logger;
 
 /** GET /api/v1/calls/{call_id} — polling endpoint, owner-only. */
@@ -34,6 +35,7 @@ final class Status
             'ready_at' => null,
             'expires_at' => null,
             'link' => null,
+            'error' => null,
         ];
 
         $request = $db->one('SELECT code FROM requests WHERE id = ?', [$call['request_id']]);
@@ -52,6 +54,9 @@ final class Status
                 $out['row_count'] = $exec['row_count'] !== null ? (int)$exec['row_count'] : null;
                 $out['ready_at'] = $exec['ready_at'] !== null ? Time::iso((string)$exec['ready_at']) : null;
                 $out['expires_at'] = $exec['expires_at'] !== null ? Time::iso((string)$exec['expires_at']) : null;
+                // Failed runs say why in sanitized terms only: the driver text
+                // lives in error_message and is admin-only.
+                $out['error'] = ExecutionError::forExecution($exec);
                 // Ready results hand the owner their stable per-call link
                 // (rebuilt from the encrypted token copy; NULL for instant
                 // mode or rows predating token_enc — they never had one).

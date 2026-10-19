@@ -142,6 +142,10 @@ CREATE TABLE IF NOT EXISTS `executions` (
   `row_count`           INT UNSIGNED NULL DEFAULT NULL,
   `truncated`           TINYINT(1)   NOT NULL DEFAULT 0,
   `error_message`       TEXT         NULL,
+  -- Public, sanitized failure code for the status API and webhook payloads
+  -- (timeout / execution_failed / query_rejected / result_too_large). The raw
+  -- driver text stays in error_message, which is admin-only.
+  `error_code`          VARCHAR(32)  NULL DEFAULT NULL,
   `download_token_hash` CHAR(64)     NULL DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_exec_status_sched` (`status`, `scheduled_at`),
@@ -304,4 +308,9 @@ ALTER TABLE `client_rate_limits`
 -- (the per-client submit throttle counter. Create it BEFORE deploying the new
 -- code: with limits.client_submit_max > 0 every submit touches this table, so
 -- a missing table would fail the submission endpoint.)
+--
+--   ALTER TABLE `executions`
+--     ADD COLUMN `error_code` VARCHAR(32) NULL DEFAULT NULL AFTER `error_message`;
+-- (the sanitized failure code clients see. Old failed rows keep NULL and are
+-- reported as execution_failed; no backfill is needed.)
 -- ---------------------------------------------------------------------------

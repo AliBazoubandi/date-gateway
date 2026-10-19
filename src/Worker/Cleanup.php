@@ -7,6 +7,7 @@ use Core\Db;
 use Core\Filesystem;
 use Core\Str;
 use Core\Time;
+use Services\ExecutionError;
 use Services\Logger;
 
 /**
@@ -140,9 +141,10 @@ final class Cleanup
                 continue; // still within a plausible running window
             }
             $n += $db->execute(
-                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?
+                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ?
                  WHERE id = ? AND status = 'running'",
-                [Time::now(), 'The instantaneous query was interrupted and never finished. Submit the request again.', $row['id']]
+                [Time::now(), 'The instantaneous query was interrupted and never finished. Submit the request again.',
+                    ExecutionError::FAILED, $row['id']]
             );
             self::safeUnlink("results/{$row['id']}.json");
             self::safeUnlink("results/{$row['id']}.json.tmp");

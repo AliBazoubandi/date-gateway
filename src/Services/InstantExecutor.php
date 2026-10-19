@@ -143,8 +143,8 @@ final class InstantExecutor
                 $writer->discard(); // remove the partial file
             }
             $db->execute(
-                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
-                [Time::now(), Str::truncate($e->getMessage(), 4000), $execId]
+                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ? WHERE id = ?",
+                [Time::now(), Str::truncate($e->getMessage(), 4000), ExecutionError::TOO_LARGE, $execId]
             );
             Logger::event('failed', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
                 null, null, Str::truncate($e->getMessage(), 2000));
@@ -166,8 +166,8 @@ final class InstantExecutor
         if ($result['rejected']) {
             // The stored SQL is not read-only: it never reached the target.
             $db->execute(
-                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
-                [Time::now(), Str::truncate($result['error'], 4000), $execId]
+                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ? WHERE id = ?",
+                [Time::now(), Str::truncate($result['error'], 4000), ExecutionError::REJECTED, $execId]
             );
             Logger::event('failed', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
                 $result['duration_ms'], null, 'query_rejected: ' . Str::truncate($result['error'], 1900));
@@ -177,8 +177,8 @@ final class InstantExecutor
 
         if ($result['timed_out']) {
             $db->execute(
-                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
-                [Time::now(), Str::truncate($result['error'], 4000), $execId]
+                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ? WHERE id = ?",
+                [Time::now(), Str::truncate($result['error'], 4000), ExecutionError::TIMEOUT, $execId]
             );
             Logger::event('timeout', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
                 $result['duration_ms'], null, 'query exceeded timeout_seconds');
@@ -187,8 +187,8 @@ final class InstantExecutor
         }
 
         $db->execute(
-            "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
-            [Time::now(), Str::truncate($result['error'], 4000), $execId]
+            "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ?, error_code = ? WHERE id = ?",
+            [Time::now(), Str::truncate($result['error'], 4000), ExecutionError::FAILED, $execId]
         );
         Logger::event('failed', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
             $result['duration_ms'], null, Str::truncate($result['error'], 2000));

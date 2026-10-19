@@ -5,7 +5,8 @@
 // over the exact body bytes, payload fields (call_id, request_code, status,
 // stable per-call link, +03:30 expiry, row_count), sent state, per-attempt
 // logging, 500 -> backoff -> eventual success, exhaustion after max_attempts,
-// and that clients without a webhook URL are skipped (stay pending).
+// clients without a webhook URL skipped (stay pending), and the failure
+// notification (status "failed" + sanitized error, never the driver text).
 // Usage: php tests\webhook_smoke.php
 
 use Core\Filesystem;
@@ -194,13 +195,13 @@ $mkClient = static function (?string $url) use ($db, $now, $secret, $port, $run,
     $clientIds[] = $id;
     return $id;
 };
-$mkCallDelivery = static function (int $clientId) use ($db, $now, $execId, $requestId): array {
+$mkCallDelivery = static function (int $clientId, ?int $exec = null) use ($db, $now, $execId, $requestId): array {
     $callId = Str::hex(16);
     $rawToken = Str::hex(24);
     $db->execute(
         'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, created_at, ip, was_shared)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)',
-        [$callId, $clientId, $requestId, $execId, hash('sha256', $rawToken),
+        [$callId, $clientId, $requestId, $exec ?? $execId, hash('sha256', $rawToken),
             Encryption::encrypt($rawToken), $now, 'whsmk']
     );
     $db->execute(
@@ -304,6 +305,54 @@ $check('CLI exits 0 on skipped rows', $wCode === 0);
 $d = $deliveryRow($callD);
 $check('delivery without URL untouched', ($d['state'] ?? '') === 'pending' && (int)($d['attempt'] ?? 0) === 0,
     'state=' . (string)($d['state'] ?? '-'));
+
+// =================== 5) failed execution -> signed failure POST ==============
+// markFailed enqueues these deliveries too. executions.error_message holds the
+// raw driver text (host, port, user, SQLSTATE) for the admin logs, and none of
+// it may appear in what the receiver gets.
+$leakyError = "Query failed: Duplicate entry 'x' for key 'PRIMARY' on db-prod-01.internal:1433"
+    . " as svc_ro (SQLSTATE[42000])";
+$mkFailedExec = static function (string $code) use ($db, $now, $requestId, $leakyError): int {
+    $db->execute(
+        "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, finished_at,
+            error_message, error_code)
+         VALUES (?, 'delayed', 'failed', ?, ?, ?, ?, ?)",
+        [$requestId, $now, $now, $now, $leakyError, $code]
+    );
+    return $db->insertId();
+};
+
+$failureChecks = static function (string $expectCode) use (
+    $db, $port, $secret, $mkClient, $mkFailedExec, $mkCallDelivery, $exchange, $deliveryRow, $check, $run
+): void {
+    $execFailed = $mkFailedExec($expectCode);
+    $client = $mkClient('http://127.0.0.1:' . $port . '/hook/failed');
+    [$callId] = $mkCallDelivery($client, $execFailed);
+    [, , $req] = $exchange('cli/webhooks.php', '200 OK');
+    $body = (string)($req[3] ?? '');
+    $headers = $req !== null ? $req[2] : [];
+    $p = json_decode($body, true);
+    $check("failure ({$expectCode}): receiver got the POST", $req !== null && $req[1] === '/hook/failed',
+        $req === null ? 'timeout' : (string)$req[1]);
+    $check("failure ({$expectCode}): payload status/error/link", is_array($p)
+        && ($p['call_id'] ?? '') === $callId
+        && ($p['request_code'] ?? '') === "whk{$run}.ready"
+        && ($p['status'] ?? '') === 'failed'
+        && array_key_exists('link', $p) && $p['link'] === null
+        && is_array($p['error'] ?? null) && ($p['error']['code'] ?? '') === $expectCode
+        && strlen((string)($p['error']['message'] ?? '')) > 10, substr($body, 0, 220));
+    $check("failure ({$expectCode}): no driver detail in the payload", $body !== ''
+        && !preg_match('/db-prod-01|svc_ro|SQLSTATE|Duplicate|1433/i', $body));
+    $fTs = (string)($headers['x-gateway-timestamp'] ?? '');
+    $check("failure ({$expectCode}): payload signed like a success", $fTs !== ''
+        && hash_equals('sha256=' . hash_hmac('sha256', $fTs . '.' . $body, $secret),
+            (string)($headers['x-gateway-signature'] ?? 'x')));
+    $d = $deliveryRow($callId);
+    $check("failure ({$expectCode}): delivery marked sent", ($d['state'] ?? '') === 'sent',
+        (string)($d['state'] ?? 'missing'));
+};
+$failureChecks('execution_failed');
+$failureChecks('timeout');
 
 // --------------------------- final self-clean -------------------------------
 fclose($server);

@@ -86,7 +86,7 @@ try {
     echo '     session time_zone = ', (string)$tz, ', now = ', (string)db()->value('SELECT NOW()'), PHP_EOL;
 
     $tables = ['admin_users', 'login_attempts', 'connections', 'requests', 'clients', 'client_request_permissions',
-        'executions', 'calls', 'request_logs', 'admin_audit_log', 'webhook_deliveries'];
+        'executions', 'calls', 'request_logs', 'admin_audit_log', 'webhook_deliveries', 'client_rate_limits'];
     $found = 0;
     foreach ($tables as $t) {
         $n = db()->value('SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?', [$t]);
@@ -102,6 +102,15 @@ try {
          WHERE table_schema = DATABASE() AND table_name = 'calls' AND column_name = 'token_enc'"
     );
     $ok('calls.token_enc present (webhook links)', $hasTokenEnc === 1,
+        'run the ALTER at the end of sql\\schema.sql if missing');
+
+    // Post-schema upgrade: executions.error_code (sanitized failure reason for
+    // the status API and webhook payloads).
+    $hasErrorCode = (int)db()->value(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'executions' AND column_name = 'error_code'"
+    );
+    $ok('executions.error_code present (failure payloads)', $hasErrorCode === 1,
         'run the ALTER at the end of sql\\schema.sql if missing');
 
     // A delayed timeout at or above the stale-running threshold means the worker
