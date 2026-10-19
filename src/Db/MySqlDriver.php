@@ -5,6 +5,11 @@ namespace Db;
 /**
  * MySQL driver for TARGET databases via native mysqli (unbuffered/streaming).
  * (The metadata DB has its own wrapper: Core\Db.)
+ *
+ * Every session is opened inside START TRANSACTION READ ONLY and closed with
+ * ROLLBACK, so the target login cannot run DML even if SqlGuard is bypassed
+ * (P1-6). DDL is outside that guard: it relies on the scanner and on granting
+ * the target account SELECT only.
  */
 final class MySqlDriver implements DriverInterface
 {
@@ -46,6 +51,23 @@ final class MySqlDriver implements DriverInterface
         try {
             $m->query("SET time_zone = '+03:30'");
         } catch (\mysqli_sql_exception) {
+        }
+        // Defense in depth behind SqlGuard (P1-6): the whole session runs
+        // inside a READ ONLY transaction, so DML that somehow slips past the
+        // keyword scanner still fails at the server. Scope limit: this blocks
+        // writes to transactional tables, NOT DDL (which implicitly commits) -
+        // CREATE/DROP/DROP remain the scanner's job, and the target login
+        // should be granted SELECT only (see README). ROLLBACK in close() ends
+        // the transaction. Refusing to start one is fatal on purpose: a
+        // connection without the guard must not silently serve writes.
+        try {
+            $m->query('START TRANSACTION READ ONLY');
+        } catch (\mysqli_sql_exception $e) {
+            @$m->close();
+            throw new DbConnectException(
+                'MySQL target refused START TRANSACTION READ ONLY; the gateway only runs read-only sessions: '
+                . $e->getMessage()
+            );
         }
         $this->m = $m;
         $this->lastError = '';
@@ -120,6 +142,11 @@ final class MySqlDriver implements DriverInterface
     public function close(): void
     {
         if ($this->m !== null) {
+            // End the READ ONLY transaction opened in connect() (P1-6).
+            try {
+                @$this->m->query('ROLLBACK');
+            } catch (\mysqli_sql_exception) {
+            }
             @$this->m->close();
             $this->m = null;
         }

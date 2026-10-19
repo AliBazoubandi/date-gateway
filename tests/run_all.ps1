@@ -130,6 +130,9 @@ try {
     Invoke-Suite "sqlguard_test" {
         & $PhpExe (Join-Path $PSScriptRoot "sqlguard_test.php")
     }
+    Invoke-Suite "readonly_driver_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "readonly_driver_test.php")
+    }
     Invoke-Suite "resultwriter_test" {
         & $PhpExe (Join-Path $PSScriptRoot "resultwriter_test.php")
     }

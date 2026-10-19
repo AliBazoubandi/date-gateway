@@ -461,3 +461,45 @@ Pass `-WebUser "IIS AppPool\gateway"` (or your dedicated service account)
 when PHP does not run as SYSTEM. Afterwards verify the app end to end: a
 read-only code/config tree must not affect submissions, downloads, worker
 passes, or webhook delivery.
+
+## 12. Read-only SQL policy
+
+Stored `sql_text` is executed with the **target** connection's credentials
+whenever any permitted client submits its code, so the gateway only reads.
+Three layers enforce that:
+
+1. **`Services\SqlGuard`** — a quote/comment-aware scanner, run when the
+   request is **saved** (admin validation error) and again on **every
+   execution** (so rows saved before the policy existed are still covered).
+   Allowed: one statement starting with `SELECT`, `WITH … SELECT`, `SHOW`,
+   `EXPLAIN`, `DESCRIBE`/`DESC` (optionally qualified with `FORMAT=…` or
+   `(…)`), plus a table name after `DESCRIBE`/`DESC`. Rejected: any
+   DML/DDL/DCL/session keyword, a second statement (a `;` outside quotes and
+   comments), `SELECT … INTO OUTFILE/DUMPFILE`, `FOR UPDATE`,
+   `LOCK IN SHARE MODE` — and `EXPLAIN ANALYZE`, which on MySQL 8+ and
+   PostgreSQL **executes** the wrapped statement. The body of an allowed
+   `EXPLAIN`/`DESCRIBE` is re-scanned, so `EXPLAIN DELETE FROM t` cannot pass.
+   Bypassing it deliberately would need a keyword hidden in a quoted
+   identifier (which is legal SQL and inert) or a parser-level trick.
+2. **Driver session guards** — defence in depth if the scanner is ever wrong:
+   - MySQL/MariaDB: the session opens with `START TRANSACTION READ ONLY` and
+     closes with `ROLLBACK`. This blocks DML on transactional tables. It does
+     **not** block DDL (DDL implicitly commits outside the transaction) — that
+     stays layer 1's job.
+   - PostgreSQL: `SELECT`/`WITH` run inside `BEGIN READ ONLY` behind the
+     cursor; the non-cursor path only accepts `EXPLAIN`/`SHOW`, everything
+     else is refused before it reaches libpq.
+   - SQL Server: **prefix guard only.** There is no session-level read-only
+     mode for `sqlsrv_*`, so a bypass of layer 1 is not caught here. Use a
+     login that has `SELECT` only (ideally a read-only database user) — that
+     grant, not this software, is the real boundary.
+3. **Target account grants** — create the target logins you enter in the admin
+   panel as read-only (`GRANT SELECT ONLY`). Layer 3 is the one that holds even
+   if both code layers fail; it is also the only one that protects against a
+   compromised gateway host.
+
+A rejected statement is not a query failure: the API answers
+`502 query_rejected`, the admin sees a validation error at save time, and the
+delayed execution is marked failed. In all three cases nothing was sent to the
+target database.
+

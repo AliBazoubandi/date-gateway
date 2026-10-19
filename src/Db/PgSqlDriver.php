@@ -5,9 +5,10 @@ namespace Db;
 /**
  * PostgreSQL driver via the native pg_* extension (no PDO).
  *
- * SELECT/WITH queries run inside a transaction behind a server-side cursor and
- * are fetched in batches, so memory stays bounded for huge result sets.
- * Other statements fall back to a direct exec (result buffered by libpq).
+ * SELECT/WITH queries run inside a READ ONLY transaction behind a server-side
+ * cursor and are fetched in batches, so memory stays bounded for huge result
+ * sets. Only EXPLAIN/SHOW may take the direct path; every other statement is
+ * refused here as well as by SqlGuard (P1-6).
  */
 final class PgSqlDriver implements DriverInterface
 {
@@ -66,7 +67,10 @@ final class PgSqlDriver implements DriverInterface
     {
         $sql = rtrim(trim($sql), ';');
         if (preg_match('/^(select|with)\b/i', $sql) === 1) {
-            if (!@pg_query($this->conn, 'BEGIN')) {
+            // READ ONLY (P1-6): defense in depth behind SqlGuard - a statement
+            // that somehow slips past the scanner still cannot write. The
+            // transaction ends in free() (COMMIT) or close() (ROLLBACK).
+            if (!@pg_query($this->conn, 'BEGIN READ ONLY')) {
                 throw new DbQueryException($this->connError(), $this->timedOut);
             }
             $name = 'gwcur_' . ++self::$seq . '_' . bin2hex(random_bytes(4));
@@ -77,6 +81,13 @@ final class PgSqlDriver implements DriverInterface
             $this->cursor = $name;
             $this->buffer = null;
             return ['type' => 'cursor', 'name' => $name];
+        }
+        // Non-cursor statements are limited to planner/catalog introspection.
+        // Anything else must not reach libpq raw, even if the scanner is
+        // bypassed; EXPLAIN ANALYZE is already refused by SqlGuard because it
+        // executes the wrapped statement.
+        if (preg_match('/^(show|explain)\b/i', $sql) !== 1) {
+            throw new DbQueryException('Statement is not a read-only query or EXPLAIN/SHOW', false);
         }
         $res = @pg_query($this->conn, $sql);
         if ($res === false) {

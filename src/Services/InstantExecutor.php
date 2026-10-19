@@ -163,6 +163,18 @@ final class InstantExecutor
             $writer->discard(); // remove the partial file
         }
 
+        if ($result['rejected']) {
+            // The stored SQL is not read-only: it never reached the target.
+            $db->execute(
+                "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
+                [Time::now(), Str::truncate($result['error'], 4000), $execId]
+            );
+            Logger::event('failed', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip,
+                $result['duration_ms'], null, 'query_rejected: ' . Str::truncate($result['error'], 1900));
+            Errors::emit(502, 'query_rejected',
+                'The stored query was rejected by the gateway read-only policy. Contact the gateway administrator.');
+        }
+
         if ($result['timed_out']) {
             $db->execute(
                 "UPDATE executions SET status = 'failed', finished_at = ?, error_message = ? WHERE id = ?",
@@ -188,7 +200,7 @@ final class InstantExecutor
      * Marks a successful instant run ready, writes the result envelope file
      * and emits the response (inline JSON, or the file itself for ?download=1).
      *
-     * @param array{ok:bool,row_count:int,truncated:bool,duration_ms:int,error:string,timed_out:bool} $result
+     * @param array{ok:bool,row_count:int,truncated:bool,duration_ms:int,error:string,timed_out:bool,rejected:bool} $result
      * @param list<array<string,mixed>> $rows
      */
     private static function finalizeReady(

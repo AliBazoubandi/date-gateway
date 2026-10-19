@@ -17,7 +17,7 @@ use Db\DbQueryException;
 final class QueryRunner
 {
     /**
-     * @return array{ok:bool,row_count:int,truncated:bool,duration_ms:int,error:string,timed_out:bool}
+     * @return array{ok:bool,row_count:int,truncated:bool,duration_ms:int,error:string,timed_out:bool,rejected:bool}
      */
     public static function run(
         array $connectionRow,
@@ -28,7 +28,7 @@ final class QueryRunner
     ): array {
         $t0 = microtime(true);
         $out = ['ok' => false, 'row_count' => 0, 'truncated' => false,
-            'duration_ms' => 0, 'error' => '', 'timed_out' => false];
+            'duration_ms' => 0, 'error' => '', 'timed_out' => false, 'rejected' => false];
         $driver = null;
         try {
             // Every execution path funnels through here, so this is the
@@ -56,6 +56,11 @@ final class QueryRunner
             // Size guard, not a query failure: the caller must see it
             // distinctly (413 for instant, failed execution for delayed).
             throw $e;
+        } catch (SqlRejectedException $e) {
+            // Refused before reaching the target: callers report query_rejected
+            // rather than a generic execution failure (P1-6).
+            $out['rejected'] = true;
+            $out['error'] = $e->getMessage();
         } catch (DbQueryException $e) {
             $out['error'] = $e->getMessage();
             $out['timed_out'] = $e->isTimeout();

@@ -44,7 +44,21 @@ $allowed('backslash-escaped string', "SELECT 'it\\'s ok' AS s");
 $allowed('quoted keyword identifiers', 'SELECT `set`, [update], "delete" FROM t');
 $allowed('window function', 'SELECT id, ROW_NUMBER() OVER (PARTITION BY g ORDER BY ts DESC) AS rn FROM t');
 
-// ---- blocked: anything that is not a single read-only select ----
+// ---- allowed: read-only introspection statements (P1-6) ----
+$allowed('show tables', 'SHOW TABLES');
+$allowed('show full columns', 'SHOW FULL COLUMNS FROM t');
+$allowed('show create table', 'SHOW CREATE TABLE t');
+$allowed("show variables like", "SHOW VARIABLES LIKE '%timeout%'");
+$allowed('explain select', 'EXPLAIN SELECT * FROM t WHERE id = 1');
+$allowed('explain with cte', 'EXPLAIN WITH a AS (SELECT 1 AS n) SELECT * FROM a');
+$allowed('explain format=json', 'EXPLAIN FORMAT=JSON SELECT 1');
+$allowed('explain pg options', 'EXPLAIN (VERBOSE) SELECT 1');
+$allowed('describe table', 'DESCRIBE t');
+$allowed('desc table', 'DESC t');
+$allowed('desc qualified table', 'DESC mydb.mytable');
+$allowed('describe select', 'DESCRIBE SELECT 1');
+
+// ---- blocked: anything that is not a single read-only statement ----
 $blocked('drop table', 'DROP TABLE users');
 $blocked('delete', 'DELETE FROM t WHERE id = 1');
 $blocked('update', 'UPDATE t SET x = 1');
@@ -65,6 +79,28 @@ $blocked('truncate', 'TRUNCATE TABLE t');
 $blocked('comment-only', '-- nothing here');
 $blocked('empty', '   ');
 $blocked('keyword as bare identifier', 'SELECT set FROM params');
+
+// ---- blocked: write statements hidden behind introspection prefixes ----
+$blocked('explain analyze executes', 'EXPLAIN ANALYZE SELECT 1');
+$blocked('explain pg analyze option', 'EXPLAIN (ANALYZE, BUFFERS) SELECT 1');
+$blocked('explain delete', 'EXPLAIN DELETE FROM t');
+$blocked('explain update', 'EXPLAIN UPDATE t SET x = 1');
+$blocked('explain insert', 'EXPLAIN INSERT INTO t (a) VALUES (1)');
+$blocked('explain drop', 'EXPLAIN DROP TABLE t');
+$blocked('describe delete', 'DESCRIBE DELETE FROM t');
+$blocked('explain empty body', 'EXPLAIN');
+
+// ---- blocked: other server-side side-effect statements ----
+$blocked('vacuum', 'VACUUM ANALYZE t');
+$blocked('refresh materialized view', 'REFRESH MATERIALIZED VIEW mv');
+$blocked('cluster', 'CLUSTER t USING idx');
+$blocked('comment on', "COMMENT ON TABLE t IS 'x'");
+$blocked('copy to file', "COPY t TO '/tmp/x.csv'");
+$blocked('create table as select', 'CREATE TABLE x AS SELECT 1');
+$blocked('listen', 'LISTEN chan');
+$blocked('discard all', 'DISCARD ALL');
+$blocked('lock table', 'LOCK TABLE t IN ACCESS EXCLUSIVE MODE');
+$blocked('do block', "DO \$\$ BEGIN END \$\$");
 
 echo $failures === 0 ? '=== SQLGUARD TEST PASS ===' : "=== SQLGUARD TEST FAIL ({$failures}) ===", PHP_EOL;
 exit($failures === 0 ? 0 : 1);
