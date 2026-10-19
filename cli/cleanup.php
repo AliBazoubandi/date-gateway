@@ -41,7 +41,10 @@ try {
 try {
     $s = \Worker\Cleanup::run();
     echo "[cleanup] expired-marked={$s['expired']} leftover-files-removed={$s['files_removed']}",
-        " stale-instant-cleaned={$s['stale_instant']} logs-removed={$s['logs_removed']}", PHP_EOL;
+        " stale-instant-cleaned={$s['stale_instant']}", PHP_EOL,
+        "[cleanup] pruned logs={$s['logs_removed']} deliveries={$s['deliveries_removed']}",
+        " calls={$s['calls_removed']} executions={$s['executions_removed']}",
+        " audit={$s['audit_removed']}", PHP_EOL;
     exit(0);
 } catch (\Throwable $e) {
     fwrite(STDERR, '[cleanup] FAILED: ' . $e->getMessage() . PHP_EOL);

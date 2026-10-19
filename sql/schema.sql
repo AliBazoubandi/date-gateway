@@ -180,8 +180,9 @@ CREATE TABLE IF NOT EXISTS `calls` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
--- Request logs (append-only; kept forever unless cleanup.log_retention_days > 0,
--- which prunes rows older than that window during each cleanup pass)
+-- Request logs (append-only by default; cleanup.retention.request_logs_days,
+-- or the legacy cleanup.log_retention_days, prunes rows older than that window
+-- in batches during each cleanup pass)
 -- events: submitted|denied|shared|started|succeeded|failed|downloaded|expired|
 --         webhook_sent|webhook_failed|instant_executed|instant_cache_hit|
 --         rate_limited|timeout

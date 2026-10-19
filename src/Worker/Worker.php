@@ -11,6 +11,7 @@ use Services\ExecutionError;
 use Services\Logger;
 use Services\QueryRunner;
 use Services\ResultTooLargeException;
+use Services\StorageGuard;
 
 /**
  * Delayed-execution worker: moves executions scheduled -> running -> ready|failed.
@@ -257,6 +258,14 @@ final class Worker
             return false;
         }
 
+        // Refuse before writing anything: on a nearly full volume the stream
+        // would die mid-query and leave a crashed execution behind.
+        $noRoom = StorageGuard::reason();
+        if ($noRoom !== '') {
+            self::finalizeFailure($exec, 'storage_low: ' . $noRoom, false, ExecutionError::STORAGE_LOW);
+            return false;
+        }
+
         $path = Filesystem::resultsDir() . '/' . $execId . '.json';
         $writer = new ResultWriter();
         try {
@@ -359,10 +368,14 @@ final class Worker
             $result['truncated'] ? 'result ready; truncated at max_rows' : 'result ready');
     }
 
-    private static function finalizeFailure(array $exec, string $message, bool $timedOut): void
-    {
+    private static function finalizeFailure(
+        array $exec,
+        string $message,
+        bool $timedOut,
+        ?string $code = null
+    ): void {
         self::markFailed((int)$exec['id'], $message,
-            $timedOut ? ExecutionError::TIMEOUT : ExecutionError::FAILED);
+            $code ?? ($timedOut ? ExecutionError::TIMEOUT : ExecutionError::FAILED));
         Logger::event($timedOut ? 'timeout' : 'failed', null, (int)$exec['request_id'], null, (int)$exec['id'],
             null, null, null, Str::truncate($message, 2000));
     }

@@ -113,6 +113,23 @@ try {
     $ok('executions.error_code present (failure payloads)', $hasErrorCode === 1,
         'run the ALTER at the end of sql\\schema.sql if missing');
 
+    // A webhook delivery stays 'pending' when the receiver is down or the
+    // client lost its URL/secret: a growing backlog means clients are not
+    // being told, and it also blocks call pruning.
+    $pending = (int)db()->value("SELECT COUNT(*) FROM webhook_deliveries WHERE state = 'pending'");
+    $pendingCap = max(1, (int)Core\Config::get('cleanup.pending_delivery_warn_count', 100));
+    if ($pending > $pendingCap) {
+        $warn("webhook backlog: {$pending} pending deliveries",
+            "threshold {$pendingCap}; check the client URLs/secrets and the receiver");
+    }
+    $r = (array)Core\Config::get('cleanup.retention', []);
+    echo '     retention days: logs=', (string)($r['request_logs_days'] ?? 0),
+        ' calls=', (string)($r['calls_days'] ?? 0),
+        ' executions=', (string)($r['executions_days'] ?? 0),
+        ' deliveries=', (string)($r['webhook_deliveries_days'] ?? 0),
+        ' audit=', (string)($r['audit_days'] ?? 0),
+        ' (0 = keep forever)', PHP_EOL;
+
     // A delayed timeout at or above the stale-running threshold means the worker
     // could fail a legitimately-running query; the admin UI caps at 1800s (30min).
     $staleMinutes = max(1, (int)Core\Config::get('worker.stale_running_minutes', 90));
@@ -141,6 +158,23 @@ $storage = Core\Filesystem::storageDir();
 foreach (['results', 'cache'] as $sub) {
     $dir = $storage . '/' . $sub;
     $ok("storage dir writable: {$dir}", is_dir($dir) && is_writable($dir), is_dir($dir) ? '' : 'missing');
+}
+
+// Free-space floor for new result files (limits.min_free_disk_bytes): below it
+// the worker refuses a run with storage_low instead of filling the volume.
+$gib = static fn (int $bytes): string => number_format($bytes / 1073741824, 2) . ' GiB';
+$minFree = (int)Core\Config::get('limits.min_free_disk_bytes', 0);
+$free = Core\Filesystem::freeBytes();
+if ($minFree <= 0) {
+    $warn('limits.min_free_disk_bytes is disabled',
+        'set a floor (2 GiB is the default) or a full volume fails mid-write');
+} elseif ($free < 0) {
+    $warn('free space on the storage volume', 'disk_free_space is unavailable here; the floor cannot be checked');
+} elseif ($free < $minFree) {
+    $warn('storage volume has room for new results',
+        $gib($free) . ' free, floor is ' . $gib($minFree) . ' - new delayed runs fail with storage_low');
+} else {
+    $ok('storage volume has room for new results', true, $gib($free) . ' free, floor is ' . $gib($minFree));
 }
 
 echo $failures === 0 ? '=== ALL CHECKS PASSED ===' : "=== {$failures} CHECK(S) FAILED ===",

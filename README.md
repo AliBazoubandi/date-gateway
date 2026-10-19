@@ -174,9 +174,26 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
   removes failed leftovers, recovers instant executions that died mid-query
   in the web server, and deletes orphaned result/cache files whose
-  `executions` row no longer exists. With `cleanup.log_retention_days > 0`
-  it also prunes `request_logs` older than that many days (batched); `0`
-  (default) keeps the log forever.
+  `executions` row no longer exists. It also applies the optional row
+  retention below.
+- **row retention** (`cleanup.retention.*`, all `0` = keep forever by
+  default, so upgrading changes nothing until you opt in):
+  `request_logs_days`, `calls_days`, `executions_days`,
+  `webhook_deliveries_days`, `audit_days`. Recommended production values are
+  **90 / 365 / 365 / 30 / 0** (the audit log is compliance history). Pruning
+  runs in batches of 1000 rows, at most 20 batches per table per pass, and is
+  referential-safe: a delivery is deleted before the call that owns it, a call
+  with a **pending** delivery is never deleted, an execution is kept while any
+  call still points at it, `scheduled`/`running` executions are never pruned,
+  and a result file is removed before the row that names it. `cleanup.log_retention_days`
+  still works as an alias for `request_logs_days`.
+- The worker also checks `limits.min_free_disk_bytes` (default 2 GiB, `0`
+  disables it) before opening a new result file. Below the floor a delayed
+  execution fails immediately with `error_code = storage_low` and no file is
+  written; an instant run still answers inline (that is its contract) and only
+  loses the downloadable copy. `php cli\check.php` warns when the volume is
+  under the floor or when pending webhook deliveries pass
+  `cleanup.pending_delivery_warn_count` (default 100).
 - **webhooks** (optional, every 1 min) — retries webhook deliveries between
   worker passes so clients get notified faster than once a minute. The pool
   already drains the queue at the end of each pass; this task just closes the
@@ -224,10 +241,12 @@ curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 
 Status values: `scheduled` → `running` → `ready` (then `expired`), or
 `failed`. Every poll response carries `error`: `null` unless the run failed,
-then `{"code":"timeout"|"execution_failed"|"query_rejected"|"result_too_large",
+then `{"code":"timeout"|"execution_failed"|"query_rejected"|"result_too_large"|"storage_low",
 "message":"<fixed wording>"}` (treat an unknown code as `execution_failed`;
 the code set may grow, the wording never contains SQL, host, user or driver
-output). Error *responses* carry `{"error":{"code":"...","message":"..."}}`
+output). `storage_low` means the gateway volume is under
+`limits.min_free_disk_bytes` — it is the gateway's problem to fix, retrying
+the same query immediately will not help. Error *responses* carry `{"error":{"code":"...","message":"..."}}`
 — codes include `unauthorized` (401), `forbidden` (403), `not_found`
 (404), `method_not_allowed` (405), `query_rejected` (502, saved SQL is not
 read-only), `execution_failed` (502), `result_unavailable` (502, the stored
@@ -334,7 +353,8 @@ Payload of a failed run (same envelope, no link, plus `error`):
 ```
 
 `error.code` is one of `timeout`, `execution_failed`, `query_rejected`,
-`result_too_large` (treat an unknown code as `execution_failed`), and
+`result_too_large`, `storage_low` (treat an unknown code as
+`execution_failed`), and
 `error.message` is fixed gateway wording — never SQL, a host, a user or raw
 driver output. A failed run is final: the gateway does not retry the query,
 so resubmit (or poll `GET /api/v1/calls/{call_id}`, which now reports the same
@@ -456,6 +476,14 @@ Existing rows keep `error_code = NULL` and are reported as
 `execution_failed` — the generic code — so nothing breaks if the ALTER
 lags behind the deploy.
 
+**Retention + free-space floor (2026-10):** no schema change. Every
+`cleanup.retention.*` window defaults to `0`, so an upgrade deletes nothing
+until an admin turns a window on (back the metadata DB up first — pruning a
+table with history is not reversible). The only new default that is active out
+of the box is `limits.min_free_disk_bytes` (2 GiB): a volume with less free
+space than that makes new delayed runs fail with `storage_low`. Lower it (or
+set `0`) if the storage volume is small but intentionally nearly full.
+
 **Instant result files (2026-10):** no schema change is needed — instant
 runs reuse the existing `calls`/`executions` token columns. Instant
 responses gain a `link`, `?download=1` works out of the box, and the file
@@ -480,7 +508,10 @@ runs everything against it: `php -l` on every file, `smoke_db`,
 `encryption_test --db`, `links_test`, `filesystem_test`, `sqlguard_test`,
 `readonly_driver_test`, `pool_test`, `resultwriter_test`, `throttle_test`,
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
-`webhook_smoke`) plus `stream_memory_test`, each refusing to run unless
+`webhook_smoke`), `retention_test` (row retention pruning + the free-space
+floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised
+above the real free space) plus `stream_memory_test`, each refusing to run
+unless
 `GATEWAY_TEST_MODE=1` and
 the metadata DB name contains `_test` (they `exit(2)` otherwise). The DB and
 storage dir are always dropped in a `finally` block, and every fixture is
@@ -529,7 +560,14 @@ longer supported — the guards above refuse it on purpose.
    running whether a user is logged on or not — exactly what a server wants.
    Each task carries a hard time limit (worker 60 / cleanup 30 / webhooks 15
    minutes); re-run the script to apply updated limits to existing tasks.
-6. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
+6. **Decide the history retention.** Every `cleanup.retention.*` window ships
+   at `0` (keep forever), so nothing is pruned until you set it. Pick the
+   numbers with whoever owns the metadata DB (§3 recommends
+   `90 / 365 / 365 / 30 / 0`), put them in `config/.env` as
+   `GATEWAY_RETENTION_*_DAYS`, and confirm the next cleanup pass reports
+   `pruned …` counts on `php cli\cleanup.php`. Back the DB up before the
+   first real prune.
+7. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
    includes a set, valid, https `GATEWAY_BASE_URL` — the check FAILS while
    it is missing) **and** all four smoke tests pass.
 

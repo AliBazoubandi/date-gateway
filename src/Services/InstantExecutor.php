@@ -91,12 +91,20 @@ final class InstantExecutor
         $writer = new ResultWriter();
         $fileOk = true;
         $fileError = '';
-        try {
-            Filesystem::prepare();
-            $writer->open(Filesystem::resultsDir() . '/' . $execId . '.json');
-        } catch (\RuntimeException $e) {
+        // Same rule on the free-space floor: a nearly full volume costs the
+        // download link, not the answer.
+        $noRoom = StorageGuard::reason();
+        if ($noRoom !== '') {
             $fileOk = false;
-            $fileError = Str::truncate($e->getMessage(), 1800);
+            $fileError = 'storage_low: ' . $noRoom;
+        } else {
+            try {
+                Filesystem::prepare();
+                $writer->open(Filesystem::resultsDir() . '/' . $execId . '.json');
+            } catch (\RuntimeException $e) {
+                $fileOk = false;
+                $fileError = Str::truncate($e->getMessage(), 1800);
+            }
         }
 
         $sql = (string)$request['sql_text'];

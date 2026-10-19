@@ -156,6 +156,9 @@ try {
     Invoke-Suite "worker_smoke" {
         & $PhpExe (Join-Path $PSScriptRoot "worker_smoke.php")
     }
+    Invoke-Suite "retention_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "retention_test.php")
+    }
     Invoke-Suite "webhook_smoke" {
         & $PhpExe (Join-Path $PSScriptRoot "webhook_smoke.php")
     }

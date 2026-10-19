@@ -16,6 +16,7 @@ final class ExecutionError
     public const FAILED = 'execution_failed';
     public const REJECTED = 'query_rejected';
     public const TOO_LARGE = 'result_too_large';
+    public const STORAGE_LOW = 'storage_low';
 
     /** @var array<string,string> code => client-facing wording */
     private const MESSAGES = [
@@ -23,6 +24,7 @@ final class ExecutionError
         self::FAILED => 'The query failed on the gateway. Details were recorded in the gateway logs.',
         self::REJECTED => 'The stored query was rejected by the gateway read-only policy. Contact the gateway administrator.',
         self::TOO_LARGE => 'The result exceeded the gateway size limit. Narrow the query or reduce max_rows.',
+        self::STORAGE_LOW => 'The gateway does not have enough free disk space to store results right now. Try again later.',
     ];
 
     /** Map a stored executions.error_code to a public code (old rows have none). */

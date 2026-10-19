@@ -79,6 +79,11 @@ return [
         // file). ResultWriter aborts the run past this size instead of
         // filling the disk (413 / failed execution).
         'max_result_bytes' => (int)\Core\Env::get('GATEWAY_MAX_RESULT_BYTES', 512 * 1024 * 1024),
+        // Floor on the free space of the volume holding storage/, checked before
+        // a NEW result file is opened. A delayed execution that finds less than
+        // this free fails with error_code storage_low instead of writing until
+        // the volume fills mid-query. 0 disables the check.
+        'min_free_disk_bytes' => (int)\Core\Env::get('GATEWAY_MIN_FREE_DISK_BYTES', 2 * 1024 * 1024 * 1024),
         // Default max_rows suggested for new DELAYED requests (admin form).
         'default' => ['max_rows' => 100000],
         // Optional per-client submit throttle. 0 = disabled. When enabled, a
@@ -94,11 +99,26 @@ return [
         'rate_limited_retry_after' => 5,
     ],
 
-    // Optional housekeeping. log_retention_days 0 = keep request_logs forever
-    // (the documented append-only behavior); N > 0 prunes rows older than N
-    // days during each cleanup pass, in batches.
+    // Optional housekeeping, all off by default: an upgrade must not delete
+    // history nobody asked to lose. Every knob is a day window pruned in
+    // batches during each cleanup pass; 0 = keep rows forever.
+    // Recommended production values (see README): request_logs 90, calls 365,
+    // executions 365, webhook_deliveries 30, audit 0 (compliance history).
     'cleanup' => [
+        // Deprecated alias for retention.request_logs_days, kept so existing
+        // deployments that already set it keep pruning request_logs.
         'log_retention_days' => 0,
+        'retention' => [
+            'request_logs_days' => (int)\Core\Env::get('GATEWAY_RETENTION_REQUEST_LOGS_DAYS', 0),
+            'calls_days' => (int)\Core\Env::get('GATEWAY_RETENTION_CALLS_DAYS', 0),
+            'executions_days' => (int)\Core\Env::get('GATEWAY_RETENTION_EXECUTIONS_DAYS', 0),
+            'webhook_deliveries_days' => (int)\Core\Env::get('GATEWAY_RETENTION_DELIVERIES_DAYS', 0),
+            'audit_days' => (int)\Core\Env::get('GATEWAY_RETENTION_AUDIT_DAYS', 0),
+        ],
+        // A webhook delivery only leaves 'pending' when the client is
+        // configured and reachable; cli/check.php warns once the backlog of
+        // waiting deliveries grows past this.
+        'pending_delivery_warn_count' => 100,
     ],
 
     'worker' => [

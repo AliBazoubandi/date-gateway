@@ -71,4 +71,20 @@ final class Filesystem
     {
         return str_replace('\\', '/', substr($absolute, strlen(self::storageDir()) + 1));
     }
+
+    /**
+     * Free bytes on the volume holding storage/. Returns -1 when the host
+     * cannot tell (disk_free_space is frequently disabled or returns false for
+     * UNC paths): callers must read that as "unknown", never as "full", or a
+     * quirk of the platform would stop every execution.
+     */
+    public static function freeBytes(): int
+    {
+        $dir = self::storageDir();
+        if (!is_dir($dir)) {
+            return -1;
+        }
+        $free = @disk_free_space($dir);
+        return $free === false ? -1 : max(-1, (int)$free);
+    }
 }
