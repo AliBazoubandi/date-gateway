@@ -164,6 +164,24 @@ return [
         'timeout_seconds' => 10,
         // Deliveries processed per pass (cli/worker.php + cli/webhooks.php).
         'max_per_pass' => 10,
+        // ---- SSRF policy for receiver URLs (see Services\WebhookUrl). ----
+        // Any admin can type a URL here, and the gateway then POSTs to it from
+        // inside the network — so addresses that are never a legitimate
+        // receiver (loopback unless allowed, link-local, cloud metadata, other
+        // reserved ranges) are refused both on save and before each send.
+        'allow_http' => (string)\Core\Env::get('GATEWAY_WEBHOOK_ALLOW_HTTP', '0') === '1',
+        'allow_loopback' => (string)\Core\Env::get('GATEWAY_WEBHOOK_ALLOW_LOOPBACK', '0') === '1',
+        // TRUE by default for this deployment: the receivers are expected to
+        // live on the LAN. Set GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS=0 to allow
+        // public receivers only (RFC1918/ULA addresses then refused too).
+        // 169.254.169.254 and the other reserved ranges stay blocked either way.
+        'allow_private_hosts' => (string)\Core\Env::get('GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS', '1') === '1',
+        // Comma-separated exact host names (lowercase, no wildcards). Empty =
+        // any host that passes the checks above is accepted.
+        'allowed_hosts' => array_values(array_filter(array_map(
+            static fn (string $h): string => strtolower(trim($h)),
+            explode(',', (string)\Core\Env::get('GATEWAY_WEBHOOK_ALLOWED_HOSTS', ''))
+        ), static fn (string $h): bool => $h !== '')),
     ],
 
     // Optional: connections used by tests/driver_test.php (see that file).

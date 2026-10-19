@@ -354,6 +354,27 @@ $failureChecks = static function (string $expectCode) use (
 $failureChecks('execution_failed');
 $failureChecks('timeout');
 
+// ============ 6) receiver URL the SSRF policy blocks -> never sent ============
+// 169.254.169.254 stays blocked whatever webhook.allow_* says, so this is the
+// proof the gate runs before curl: no attempt is burned, no curl error is
+// logged, and the row is terminal with the reason for the admin.
+$clientBlocked = $mkClient('http://169.254.169.254/latest/meta-data/');
+[$callBlocked] = $mkCallDelivery($clientBlocked);
+[$wCode, $wOut] = $exchange('cli/webhooks.php', null);
+$check('blocked URL: CLI exits 0', $wCode === 0 && !str_contains($wOut, 'ERR::'), substr($wOut, 0, 200));
+$d = $deliveryRow($callBlocked);
+$check('blocked URL: exhausted with the reason', ($d['state'] ?? '') === 'exhausted'
+    && str_contains((string)($d['last_error'] ?? ''), 'blocked'),
+    'state=' . (string)($d['state'] ?? '-') . ' err=' . (string)($d['last_error'] ?? '-'));
+$check('blocked URL: no send attempt burned', (int)($d['attempt'] ?? 0) === 0,
+    'attempt=' . (string)($d['attempt'] ?? '-'));
+$logs = $db->rows("SELECT event, message FROM request_logs WHERE call_id = ?", [$callBlocked]);
+$check('blocked URL: one log row, no curl failure', count($logs) === 1
+    && ($logs[0]['event'] ?? '') === 'webhook_failed'
+    && str_contains((string)($logs[0]['message'] ?? ''), 'webhook url blocked')
+    && !str_contains((string)($logs[0]['message'] ?? ''), 'curl'),
+    json_encode($logs));
+
 // --------------------------- final self-clean -------------------------------
 fclose($server);
 if (is_file(Filesystem::absoluteFromRelative($resultRel))) {

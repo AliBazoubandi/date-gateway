@@ -32,6 +32,12 @@ use Core\Time;
  *    failed attempt: retried up to config webhook.max_attempts times with the
  *    configured backoff, then the row goes to state='exhausted'.
  *  - Every attempt is logged (webhook_sent / webhook_failed).
+ *  - The receiver URL is re-checked before every send by Services\WebhookUrl
+ *    (scheme, optional host allowlist, and no loopback / link-local / reserved
+ *    address; private ranges only while webhook.allow_private_hosts is on). A
+ *    URL that fails never reaches curl: the delivery goes to 'exhausted' with
+ *    the reason in last_error. An accepted address is pinned for the send with
+ *    CURLOPT_RESOLVE, redirects are off, and only http(s) can be spoken.
  *
  * Deliveries of clients that cannot receive anything (inactive, or empty
  * webhook_url/webhook_secret) are NOT selected at all - they stay pending and
@@ -46,6 +52,9 @@ use Core\Time;
  */
 final class WebhookDispatcher
 {
+    /** Bytes of receiver response we are willing to read; the body is unused. */
+    private const MAX_RESPONSE_BYTES = 65536;
+
     /** @return array{sent:int,failed:int,exhausted:int,skipped:int} */
     public static function deliverDue(?int $maxPerPass = null): array
     {
@@ -91,6 +100,26 @@ final class WebhookDispatcher
         if ($call === null || (int)$call['is_active'] !== 1 || $url === '' || $secret === '') {
             return 'skipped'; // nothing configured to send to; retry when an admin sets it up
         }
+
+        // Checked again on every send, not only when the client was saved: a
+        // stored URL can predate the policy (or be edited straight in the DB),
+        // and curl must never be handed an address the gate blocks. A blocked
+        // row is exhausted rather than left pending forever — the reason lands
+        // in last_error and the logs for the admin to fix on the client.
+        $gate = WebhookUrl::check($url);
+        if ($gate['error'] !== '') {
+            $db->execute(
+                "UPDATE webhook_deliveries
+                 SET state = 'exhausted', status_code = NULL, next_retry_at = NULL, last_error = ?
+                 WHERE id = ? AND state = 'pending'",
+                [Str::truncate('blocked: ' . $gate['error'], 500), $deliveryId]
+            );
+            Logger::event('webhook_failed', (int)$call['client_id'], (int)$call['request_id'], $callId,
+                $call['execution_id'] === null ? null : (int)$call['execution_id'],
+                null, null, null, 'webhook url blocked: ' . $gate['error']);
+            return 'exhausted';
+        }
+        $resolve = $gate['resolve'];
 
         $exec = $call['execution_id'] !== null
             ? $db->one('SELECT * FROM executions WHERE id = ?', [$call['execution_id']])
@@ -144,7 +173,7 @@ final class WebhookDispatcher
         $signature = 'sha256=' . hash_hmac('sha256', $timestamp . '.' . $payload, $secret);
 
         $t0 = microtime(true);
-        [$httpCode, $transportError] = self::post($url, $payload, $signature, $callId, $attempt + 1, $timestamp);
+        [$httpCode, $transportError] = self::post($url, $payload, $signature, $callId, $attempt + 1, $timestamp, $resolve);
         $durationMs = (int)round((microtime(true) - $t0) * 1000);
 
         if ($httpCode >= 200 && $httpCode < 300) {
@@ -211,19 +240,37 @@ final class WebhookDispatcher
     /**
      * POST the payload. @return array{0:int,1:string} HTTP code (0 = transport
      * failure) and a short transport-error string ('' when the server answered).
+     *
+     * @param list<string> $resolve CURLOPT_RESOLVE entries pinning the validated
+     *        host to the address WebhookUrl checked, so a rebinding DNS answer
+     *        cannot point this send somewhere the gate refused.
      */
-    private static function post(string $url, string $payload, string $signature, string $callId, int $sendNo, string $timestamp): array
-    {
+    private static function post(
+        string $url,
+        string $payload,
+        string $signature,
+        string $callId,
+        int $sendNo,
+        string $timestamp,
+        array $resolve = []
+    ): array {
         if (!function_exists('curl_init')) {
             return [0, 'the curl extension is not enabled in php.ini'];
         }
         $timeout = max(1, (int)Config::get('webhook.timeout_seconds', 10));
+        $protocols = CURLPROTO_HTTPS;
+        if ((bool)Config::get('webhook.allow_http', false)) {
+            $protocols |= CURLPROTO_HTTP;
+        }
         $ch = curl_init($url);
         if ($ch === false) {
             return [0, 'curl init failed'];
         }
+        // The response body is never used - only the status code. Reading it
+        // through a callback that stops after a small budget keeps a chatty or
+        // hostile receiver from making this process buffer whatever it sends.
+        $read = 0;
         curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => $payload,
             CURLOPT_HTTPHEADER => [
@@ -235,13 +282,28 @@ final class WebhookDispatcher
             ],
             CURLOPT_CONNECTTIMEOUT => min(5, $timeout),
             CURLOPT_TIMEOUT => $timeout,
+            CURLOPT_PROTOCOLS => $protocols,
+            // Redirects stay off: following one would re-resolve and re-scheme
+            // outside the checks above.
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_WRITEFUNCTION => static function (string $chunk) use (&$read): int {
+                $read += strlen($chunk);
+                return $read <= self::MAX_RESPONSE_BYTES ? strlen($chunk) : 0;
+            },
         ]);
-        $body = curl_exec($ch);
+        if ($resolve !== []) {
+            curl_setopt($ch, CURLOPT_RESOLVE, $resolve);
+        }
+        $ok = curl_exec($ch);
         $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        if ($body === false) {
+        if ($ok === false) {
             $err = (string)curl_error($ch);
             curl_close($ch);
-            return [0, 'curl: ' . Str::truncate($err, 200)];
+            // Stopping the body read makes libcurl report a write error; a 2xx
+            // answer is still an acknowledged delivery, so do not retry it.
+            return $code >= 200 && $code < 300
+                ? [$code, '']
+                : [0, 'curl: ' . Str::truncate($err, 200)];
         }
         curl_close($ch);
         return [$code, ''];

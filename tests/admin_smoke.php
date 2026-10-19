@@ -216,6 +216,26 @@ $check('stored webhook secret never rendered',
 // here we just assert the masked placeholder is present).
 $check('secret field renders as masked', str_contains($body, 'leave empty to keep'));
 
+// Webhook URL policy on save (Services\WebhookUrl) ------------------------
+// 169.254.169.254 is refused whatever webhook.allow_* says. The loopback
+// receiver below is accepted only because the runner turns on
+// webhook.allow_loopback/allow_http for the suites, which is exactly what
+// webhook_smoke's local receiver needs.
+[$code, $body] = http('POST', '/admin/clients', [
+    '_csrf' => csrf($body), 'id' => $cliId, 'name' => $clientName, 'type' => 'agent',
+    'webhook_url' => 'http://169.254.169.254/latest/meta-data/', 'webhook_secret' => '', 'is_active' => 1,
+]);
+$check('blocked webhook URL refused on save',
+    str_contains($body, 'blocked')
+    && (string)db()->value('SELECT webhook_url FROM clients WHERE id = ?', [$cliId]) === '',
+    substr(strip_tags((string)$body), 0, 160));
+[$code, $body] = http('POST', '/admin/clients', [
+    '_csrf' => csrf($body), 'id' => $cliId, 'name' => $clientName, 'type' => 'agent',
+    'webhook_url' => 'http://127.0.0.1:9/hook', 'webhook_secret' => '', 'is_active' => 1,
+]);
+$check('policy-allowed webhook URL saved',
+    (string)db()->value('SELECT webhook_url FROM clients WHERE id = ?', [$cliId]) === 'http://127.0.0.1:9/hook');
+
 // Key reveal page shows the same key only when just regenerated -----------
 [$code, $body] = http('POST', '/admin/clients/regen-key', ['_csrf' => $token, 'id' => $cliId]);
 $check('regen key once-page', preg_match('/The previous key stopped working/', $body) === 1);

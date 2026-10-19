@@ -130,6 +130,26 @@ try {
         ' audit=', (string)($r['audit_days'] ?? 0),
         ' (0 = keep forever)', PHP_EOL;
 
+    // A delivery whose URL the SSRF policy blocks is exhausted instead of
+    // sent, so surface saved client URLs that would fail today (loopback,
+    // link-local/metadata and other reserved ranges are refused whatever the
+    // config says). Bounded: every name costs a DNS lookup.
+    $configured = 0;
+    $blockedNames = [];
+    foreach (db()->rows("SELECT name, webhook_url FROM clients WHERE webhook_url <> '' ORDER BY id LIMIT 50") as $client) {
+        $configured++;
+        if (Services\WebhookUrl::check((string)$client['webhook_url'])['error'] !== '') {
+            $blockedNames[] = (string)$client['name'];
+        }
+    }
+    if ($blockedNames === []) {
+        $ok('client webhook URLs pass the SSRF policy', true, $configured . ' configured');
+    } else {
+        $warn(count($blockedNames) . ' client webhook URL(s) the gateway will refuse to post to',
+            Core\Str::truncate(implode(', ', $blockedNames), 200)
+            . ' - fix the URL on the client, or relax webhook.allow_*');
+    }
+
     // A delayed timeout at or above the stale-running threshold means the worker
     // could fail a legitimately-running query; the admin UI caps at 1800s (30min).
     $staleMinutes = max(1, (int)Core\Config::get('worker.stale_running_minutes', 90));
@@ -176,6 +196,16 @@ if ($minFree <= 0) {
 } else {
     $ok('storage volume has room for new results', true, $gib($free) . ' free, floor is ' . $gib($minFree));
 }
+
+// The active receiver rules (Services\WebhookUrl): printed because the defaults
+// differ from what an internal deployment often has stored in clients.
+$allowedHosts = (array)Core\Config::get('webhook.allowed_hosts', []);
+echo '     webhook receivers: ',
+    Core\Config::get('webhook.allow_http', false) ? 'http+https' : 'https only',
+    ', loopback ', Core\Config::get('webhook.allow_loopback', false) ? 'allowed' : 'blocked',
+    ', private/LAN ', Core\Config::get('webhook.allow_private_hosts', true) ? 'allowed' : 'blocked',
+    ', allowlist ', ($allowedHosts === [] ? 'any host' : implode(',', $allowedHosts)),
+    ' (link-local and reserved ranges are always blocked)', PHP_EOL;
 
 echo $failures === 0 ? '=== ALL CHECKS PASSED ===' : "=== {$failures} CHECK(S) FAILED ===",
     PHP_EOL;

@@ -399,6 +399,46 @@ Note on links: each call's download token is stored twice — a SHA-256 hash
 worker can rebuild the webhook `link` even for calls that attached to a
 ready execution). Neither form exposes the raw token at rest.
 
+### Which URLs the gateway will post to (SSRF policy)
+
+The receiver URL is typed in by an admin and the gateway then POSTs to it
+**from inside the network**, so an unchecked URL turns the gateway into a proxy
+against its own host — `http://169.254.169.254/...` would fetch cloud instance
+credentials, and `http://127.0.0.1:<port>` would reach whatever the server has
+listening. `Services\WebhookUrl` therefore validates every URL **when the
+client is saved and again before every send**:
+
+| Knob (`config/config.php` → `webhook`) | Env override | Default | Meaning |
+| --- | --- | --- | --- |
+| `allow_http` | `GATEWAY_WEBHOOK_ALLOW_HTTP=1` | `false` | https only unless on |
+| `allow_loopback` | `GATEWAY_WEBHOOK_ALLOW_LOOPBACK=1` | `false` | `127.0.0.0/8`, `::1` |
+| `allow_private_hosts` | `GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS=0` | `true` | RFC1918 / `fc00::/7` |
+| `allowed_hosts` | `GATEWAY_WEBHOOK_ALLOWED_HOSTS=a.test,b.test` | `[]` | exact lowercase host names, no wildcards |
+
+A host name is resolved and **every** address it resolves to must pass; the
+address that was validated is then pinned for the send with
+`CURLOPT_RESOLVE`, so a rebinding DNS answer cannot move the connection after
+the check. Only http(s) can be spoken (`CURLOPT_PROTOCOLS`), redirects are
+never followed (following one would re-resolve and re-scheme outside these
+rules), and the response body is discarded after 64 KiB because only the
+status code is used.
+
+**Tradeoff, on purpose:** `allow_private_hosts` defaults to `true` because this
+deployment's receivers live on the LAN. Set
+`GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS=0` if the receivers are publicly reachable
+— then only public addresses are accepted. Loopback stays off by default:
+enable it only on a machine where the receiver really is local (the test suites
+do, to exercise delivery). Link-local (`169.254.0.0/16`, which includes every
+cloud metadata endpoint), carrier-grade NAT, multicast and other reserved
+ranges are refused **whatever these knobs say**.
+
+A delivery whose stored URL fails the policy is not retried: the row goes to
+`state = 'exhausted'` with `last_error = 'blocked: <reason>'`, the reason is
+logged as a `webhook_failed` entry, and curl is never called. `cli/check.php`
+prints the active policy and lists the configured client URLs that the gateway
+would refuse today, so fix them in the admin UI (or relax a knob) before the
+notifications are lost.
+
 ## 6. Character encoding (non-ASCII data)
 
 - SQL Server connections are opened with `'CharacterSet' => 'UTF-8'` forced
@@ -499,6 +539,16 @@ stay compatible unchanged.
 than ~5 minutes (replay protection). Signatures from the old scheme will
 no longer verify.
 
+**Webhook URL policy (2026-10):** no schema change, but the SSRF gate of §5
+applies to URLs that are already stored. A `webhook_url` the policy refuses —
+plain `http://`, or a loopback address — is no longer posted to: its pending
+deliveries go to `exhausted` with `blocked: <reason>` in `last_error`. LAN
+receivers keep working unchanged (`webhook.allow_private_hosts` defaults to
+`true`). Check before deploying — `php cli\check.php` lists the configured
+clients whose URL would be refused — and relax with
+`GATEWAY_WEBHOOK_ALLOW_HTTP=1` / `GATEWAY_WEBHOOK_ALLOW_LOOPBACK=1` in
+`config/.env` if the deployment really needs one of those receivers.
+
 ## 9. Tests
 
 **Safe path — `tests\run_all.ps1`** (PowerShell, no elevation needed): builds
@@ -510,7 +560,8 @@ runs everything against it: `php -l` on every file, `smoke_db`,
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised
-above the real free space) plus `stream_memory_test`, each refusing to run
+above the real free space), `webhook_url_test` (the webhook SSRF policy of §5,
+one child process per policy) plus `stream_memory_test`, each refusing to run
 unless
 `GATEWAY_TEST_MODE=1` and
 the metadata DB name contains `_test` (they `exit(2)` otherwise). The DB and

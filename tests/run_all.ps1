@@ -76,6 +76,11 @@ $env:GATEWAY_DEBUG = "1"
 # Tiny inline cap so api_smoke can exercise the 413 result_too_large path with
 # a small fixture row; real deployments keep the 16 MiB default.
 $env:GATEWAY_INSTANT_MAX_BYTES = "2048"
+# webhook_smoke's receiver listens on 127.0.0.1 over http, which the webhook
+# SSRF policy blocks by default (see Services\WebhookUrl) — allow precisely that
+# here; private/LAN hosts stay allowed as in the production default.
+$env:GATEWAY_WEBHOOK_ALLOW_HTTP = "1"
+$env:GATEWAY_WEBHOOK_ALLOW_LOOPBACK = "1"
 # Make sure children pick up the SAME php binary the suites spawn as "php".
 $env:Path = (Split-Path -Parent $PhpExe) + ";" + $env:Path
 
@@ -161,6 +166,9 @@ try {
     }
     Invoke-Suite "webhook_smoke" {
         & $PhpExe (Join-Path $PSScriptRoot "webhook_smoke.php")
+    }
+    Invoke-Suite "webhook_url_test" {
+        & $PhpExe (Join-Path $PSScriptRoot "webhook_url_test.php")
     }
 
     # 4) streaming memory probe (reduced row count, throwaway target schema)

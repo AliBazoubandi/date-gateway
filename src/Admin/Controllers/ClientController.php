@@ -9,6 +9,7 @@ use Core\Http;
 use Core\Str;
 use Core\Time;
 use Services\AuditLogger;
+use Services\WebhookUrl;
 
 final class ClientController
 {
@@ -235,8 +236,14 @@ final class ClientController
         if ($db->value('SELECT id FROM clients WHERE name = ? AND id <> ?', [$in['name'], $id]) !== null) {
             $e[] = 'Name already exists.';
         }
-        if ($in['webhook_url'] !== '' && !preg_match('#^https?://\S+$#i', $in['webhook_url'])) {
-            $e[] = 'Webhook URL must start with http:// or https://.';
+        if ($in['webhook_url'] !== '') {
+            // Full SSRF gate, not just a prefix check: an admin must not be
+            // able to point the gateway at its own host, a metadata endpoint
+            // or any other address the policy blocks (Services\WebhookUrl).
+            $error = WebhookUrl::check($in['webhook_url'])['error'];
+            if ($error !== '') {
+                $e[] = $error;
+            }
         }
         return $e;
     }
