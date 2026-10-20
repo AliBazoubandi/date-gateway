@@ -32,8 +32,10 @@ final class QueryRunner
         $driver = null;
         try {
             // Every execution path funnels through here, so this is the
-            // enforcement point for the read-only guarantee (P1-6).
-            SqlGuard::assertReadOnly($sql);
+            // enforcement point for the read-only guarantee (P1-6). The
+            // dialect comes from the connection: the same bytes mean different
+            // things on MySQL, PostgreSQL and SQL Server (see SqlGuard).
+            SqlGuard::assertReadOnly($sql, (string)($connectionRow['db_type'] ?? ''));
             $driver = ConnectionFactory::fromConnectionRow($connectionRow, $timeoutSeconds);
             $driver->setQueryTimeout($timeoutSeconds);
             $stmt = $driver->query($sql);

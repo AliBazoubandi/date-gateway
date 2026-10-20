@@ -10,22 +10,63 @@ $check = static function (string $label, bool $pass, string $detail = '') use (&
         $failures++;
     }
 };
-$allowed = static function (string $label, string $sql) use ($check): void {
+$allowed = static function (string $label, string $sql, string $dialect = 'mysql') use ($check): void {
     try {
-        \Services\SqlGuard::assertReadOnly($sql);
+        \Services\SqlGuard::assertReadOnly($sql, $dialect);
         $check($label, true);
     } catch (\RuntimeException $e) {
         $check($label, false, 'unexpectedly rejected: ' . $e->getMessage());
     }
 };
-$blocked = static function (string $label, string $sql) use ($check): void {
+$blocked = static function (string $label, string $sql, string $dialect = 'mysql') use ($check): void {
     try {
-        \Services\SqlGuard::assertReadOnly($sql);
+        \Services\SqlGuard::assertReadOnly($sql, $dialect);
         $check($label, false, 'unexpectedly allowed');
     } catch (\RuntimeException $e) {
         $check($label, true, $e->getMessage());
     }
 };
+
+// ---- blocked: MySQL/MariaDB executable comments (never a read-only need) ----
+// The server EXECUTES the body of /*! ... */ and /*M! ... */, so stripping it
+// as an ordinary comment let `SELECT 1 /*!50000 INTO OUTFILE ... */` pass the
+// scanner as a bare SELECT. The check must reject, not interpret.
+$blocked('executable comment (mysql) hides INTO OUTFILE', "SELECT 1 /*!50000 INTO OUTFILE '/tmp/x' */");
+$blocked('executable comment (mysql) hides a second statement', "SELECT 1 /*!50000 ; DROP TABLE x */");
+$blocked('executable comment (mariadb M!) hides a second statement', "SELECT 1 /*M!100000 ; DROP TABLE x */");
+$blocked('executable comment (mariadb M!, lower case)', "SELECT 1 /*m!100000 ; DROP TABLE x */");
+$blocked('executable comment inside a WHERE clause', "SELECT a FROM t WHERE b = 1 /*!50000 OR 1=1 */");
+$blocked('executable comment hides a write after the SHOW allowlist',
+    'SHOW TABLES /*!50000 ; DROP TABLE x */');
+$blocked('executable comment behind an EXPLAIN prefix', "EXPLAIN SELECT 1 /*!50000 ; DROP TABLE x */");
+
+// ---- dialect: the same bytes mean different things per server ----
+// MySQL only starts a -- comment when the second dash is followed by
+// whitespace: `SELECT 1 --x; DROP TABLE t` is 1 - (-x) and a real second
+// statement, so the scanner must see it.
+$blocked('mysql -- without whitespace is not a comment', 'SELECT 1 --x; DROP TABLE t');
+// PostgreSQL arrays use [ ], not SQL Server identifier quoting.
+$allowed('pgsql: array subscript survives the scan', "SELECT data[1] FROM t", 'pgsql');
+// SQL Server: [...] is an identifier, so a blocked keyword inside is inert.
+$allowed('sqlserver: bracketed identifier', 'SELECT [delete], [update] FROM t', 'sqlserver');
+// Strings are opaque in every dialect, whatever the comment markers inside.
+$allowed('string holding a block-comment marker', "SELECT '/* not a comment */' AS x");
+$allowed('string holding a line-comment marker', "SELECT '-- not a comment' AS x");
+$allowed('string holding a semicolon', "SELECT 'a; b' AS x");
+$allowed('string holding both comment markers', "SELECT '/* a */ -- b' AS x");
+// PostgreSQL dollar-quoted bodies are strings too.
+$allowed('pgsql: dollar-quoted body with a semicolon', 'SELECT $$a;b$$ AS x', 'pgsql');
+$allowed('pgsql: tagged dollar-quoted body', 'SELECT $tag$ a;b $tag$ AS x', 'pgsql');
+$blocked('pgsql: dollar-quoted body cannot hide a second statement',
+    'SELECT $$x$$; DROP TABLE x', 'pgsql');
+// PostgreSQL's #> operator is not a comment.
+$allowed('pgsql: #> operator is not a comment', "SELECT data #> '{a}' FROM t", 'pgsql');
+$allowed('pgsql: #>> operator is not a comment', "SELECT data #>> '{a,b}' FROM t", 'pgsql');
+// MySQL's # comment is.
+$allowed('mysql: # trailing comment', 'SELECT 1 # trailing comment');
+$allowed('mysql: ## and a newline', "# note\nSELECT 1 ## another\n");
+// An unknown dialect falls back to the documented conservative default.
+$allowed('unknown dialect falls back to the default scan', 'SELECT 1');
 
 // ---- allowed: plain selects and their read-only decorations ----
 $allowed('simple select', 'SELECT 1 AS ping');
