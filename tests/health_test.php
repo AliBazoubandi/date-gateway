@@ -166,8 +166,11 @@ $check('the refusal is still JSON', str_contains($post['type'], 'application/jso
 $check('a 405 does not report a health verdict', statusOf($post) === null);
 
 // ----------------- the worker check ------------------------------------------
+// A pool that stopped firing is stale in BOTH timestamps: the start is the
+// evidence a pass is alive, so it cannot stay fresh while the pass is gone.
 $twoHoursAgo = Time::mysql(Time::nowDt()->modify('-2 hours'));
-$db->execute('UPDATE worker_state SET last_pass_finished_at = ? WHERE id = 1', [$twoHoursAgo]);
+$db->execute('UPDATE worker_state SET last_pass_started_at = ?, last_pass_finished_at = ? WHERE id = 1',
+    [$twoHoursAgo, $twoHoursAgo]);
 $stale = healthFetch($port);
 $c = checks($stale);
 $check('a pool that stopped firing answers 503', $stale['code'] === 503, 'got ' . $stale['code']);
@@ -179,6 +182,52 @@ $check('the age is reported so a monitor can chart it',
 $check('the other three checks still pass', ($c['database'] ?? null) === true
     && ($c['storage_writable'] ?? null) === true
     && ($c['storage_space'] ?? null) === true);
+
+// BUG 5: a pass that is STILL RUNNING (start fresh, finish old) is work in
+// progress, not an outage. A 30-minute query used to turn /health red for the
+// whole run and get the node pulled from the load balancer.
+$db->execute('UPDATE worker_state SET last_pass_started_at = NOW(), last_pass_finished_at = ? WHERE id = 1',
+    [$twoHoursAgo]);
+$running = healthFetch($port);
+$c = checks($running);
+$check('a pass still running answers 200', $running['code'] === 200,
+    'got ' . $running['code'] . ' ' . substr($running['body'], 0, 200));
+$check('a pass still running is recent', ($c['worker_recent'] ?? null) === true);
+$check('and its start is reported additively',
+    (bool)preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+03:30$/',
+        (string)($c['worker_last_pass_started_at'] ?? '')), json_encode($c));
+$runningAge = $c['worker_last_pass_age_seconds'] ?? null;
+$check('the effective age is the newer of start and finish',
+    is_int($runningAge) && $runningAge <= 60, var_export($runningAge, true));
+$check('the previous finish is still visible for a monitor',
+    (string)($c['worker_last_pass_at'] ?? '') !== '' && (string)$c['worker_last_pass_at'] !== (string)($c['worker_last_pass_started_at'] ?? ''));
+$check('no heartbeat at all has no age', WorkerState::passAgeSeconds(null) === null);
+$check('a row without a start falls back to its finish',
+    (int)WorkerState::passAgeSeconds([
+        'last_pass_started_at' => null,
+        'last_pass_finished_at' => $twoHoursAgo,
+        'last_pass_failures' => 0,
+    ]) >= 7100);
+
+// WorkerState::markStarted keeps the previous finish on an existing row and
+// seeds both timestamps on a fresh one.
+$db->execute('DELETE FROM worker_state');
+WorkerState::markStarted(Time::now());
+$marked = WorkerState::lastPass();
+$check('markStarted seeds a fresh row with start and finish',
+    $marked !== null && (string)$marked['last_pass_started_at'] === (string)$marked['last_pass_finished_at'],
+    json_encode($marked));
+WorkerState::markStarted(Time::now());
+$db->execute('UPDATE worker_state SET last_pass_finished_at = ? WHERE id = 1', [$twoHoursAgo]);
+WorkerState::markStarted(Time::now());
+$marked = WorkerState::lastPass();
+$check('markStarted on an existing row keeps the previous finish',
+    $marked !== null && (string)$marked['last_pass_finished_at'] === $twoHoursAgo
+    && WorkerState::ageSeconds($marked['last_pass_started_at']) <= 60, json_encode($marked));
+// Put the stale row back: the knob test below must still be about an age the
+// wider window tolerates, not about a pass that just ran.
+$db->execute('UPDATE worker_state SET last_pass_started_at = ?, last_pass_finished_at = ? WHERE id = 1',
+    [$twoHoursAgo, $twoHoursAgo]);
 
 // worker.max_silence_seconds is read per request, not baked into the code.
 [$knobPort] = serve(['GATEWAY_WORKER_MAX_SILENCE_SECONDS' => '86400'], $baseEnv);
@@ -234,6 +283,9 @@ $after = WorkerState::lastPass();
 $poolAge = WorkerState::ageSeconds((string)($after['last_pass_finished_at'] ?? ''));
 $check('and records the heartbeat GET /health reads',
     $after !== null && $poolAge !== null && $poolAge < 60, json_encode($after));
+$check('a real pool pass records BOTH the start and the finish',
+    $after !== null && WorkerState::ageSeconds((string)($after['last_pass_started_at'] ?? '')) < 60
+    && (string)$after['last_pass_started_at'] !== '', json_encode($after));
 $check('a clean pool pass records no failures', (int)($after['last_pass_failures'] ?? -1) === 0,
     json_encode($after));
 $check('that pass then answers 200', healthFetch($port)['code'] === 200);

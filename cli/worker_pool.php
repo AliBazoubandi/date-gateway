@@ -68,6 +68,17 @@ $failures = 0;
 // the pass reports: the executions are already done, and a monitoring
 // convenience is not a reason to fail the schedule.
 $passStarted = Core\Time::now();
+// Record the pass start BEFORE any work: a legitimate 30-minute query must not
+// make GET /health answer 503 for 30 minutes (it used to look at the finish
+// only). Leaving the previous finish in place is deliberate - the pair then
+// says "started at X, last finished at Y", which is what a long pass is. A pool
+// that dies without finishing stops updating this row too, so the answer still
+// goes stale after worker.max_silence_seconds.
+try {
+    \Services\WorkerState::markStarted($passStarted);
+} catch (\Throwable $e) {
+    fwrite(STDERR, $tag . ' cannot record the pass start: ' . $e->getMessage() . PHP_EOL);
+}
 $recordHeartbeat = static function () use ($passStarted, &$failures, $tag): void {
     try {
         \Services\WorkerState::record($passStarted, $failures);

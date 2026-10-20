@@ -42,7 +42,9 @@ final class Health
         // Only read the heartbeat when the DB answered: with the metadata server
         // down, Db::instance() would try to connect again and only delay the 503.
         $pass = $db ? WorkerState::lastPass() : null;
-        $age = WorkerState::ageSeconds($pass['last_pass_finished_at'] ?? null);
+        // A pass that is still running counts as recent through its START: a
+        // legitimate 30-minute query must not make the gateway look dead.
+        $age = WorkerState::passAgeSeconds($pass);
         $recent = $age !== null && $age <= WorkerState::maxSilenceSeconds();
 
         $free = Filesystem::freeBytes();
@@ -60,6 +62,9 @@ final class Health
                 'storage_free_bytes' => $free >= 0 ? $free : null,
                 'storage_space' => $space,
                 'worker_last_pass_at' => Time::iso($pass['last_pass_finished_at'] ?? null),
+                // Additive: the pass start, so a monitor can tell a long pass
+                // from a heartbeat that only moved because a pass began.
+                'worker_last_pass_started_at' => Time::iso($pass['last_pass_started_at'] ?? null),
                 'worker_last_pass_age_seconds' => $age,
                 'worker_last_pass_failures' => $pass['last_pass_failures'] ?? null,
                 'worker_recent' => $recent,
@@ -95,10 +100,12 @@ final class Health
         } catch (\Throwable) {
             return false;
         }
-        // Inside results/, next to the result files themselves. The name cannot
-        // collide with one (those are <execution id>.json[.tmp]) and the cleanup
-        // sweep only looks at those, so a probe is never mistaken for a result.
-        $probe = Filesystem::resultsDir() . '/health.tmp';
+        // Inside results/, next to the result files themselves. The cleanup
+        // sweep only looks at numeric <execution id>.json[.tmp] names, so a
+        // probe is never mistaken for a result. The name is unique per request
+        // (pid + random): with a fixed `health.tmp`, two concurrent probes
+        // unlink each other's file and one of them reports a false outage.
+        $probe = Filesystem::resultsDir() . '/health.' . getmypid() . '.' . bin2hex(random_bytes(6)) . '.tmp';
         if (@file_put_contents($probe, 'x') === false) {
             return false;
         }
