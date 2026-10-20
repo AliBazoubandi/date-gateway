@@ -95,7 +95,9 @@ try {
             $found++;
         }
     }
-    $ok('schema tables present', $found === count($tables), $found . '/' . count($tables) . ' found; import sql\\schema.sql if lower');
+    $migration = 'apply sql\\migrations\\2026-10-20-production-hardening.sql';
+    $ok('schema tables present', $found === count($tables),
+        $found . '/' . count($tables) . ' found; ' . $migration);
 
     // Post-schema upgrade: calls.token_enc (webhook/status download links).
     $hasTokenEnc = (int)db()->value(
@@ -103,16 +105,18 @@ try {
          WHERE table_schema = DATABASE() AND table_name = 'calls' AND column_name = 'token_enc'"
     );
     $ok('calls.token_enc present (webhook links)', $hasTokenEnc === 1,
-        'run the ALTER at the end of sql\\schema.sql if missing');
+        'run the one-off ALTER in the pointer block at the end of sql\\schema.sql');
 
     // Post-schema upgrade: executions.error_code (sanitized failure reason for
-    // the status API and webhook payloads).
+    // the status API and webhook payloads). Failure paths write it, so a
+    // missing column does not just hide the code: a run that fails cannot be
+    // marked failed and can stay `running` until cleanup recovers it.
     $hasErrorCode = (int)db()->value(
         "SELECT COUNT(*) FROM information_schema.columns
          WHERE table_schema = DATABASE() AND table_name = 'executions' AND column_name = 'error_code'"
     );
     $ok('executions.error_code present (failure payloads)', $hasErrorCode === 1,
-        'run the ALTER at the end of sql\\schema.sql if missing');
+        'failure paths write it; missing means failed runs cannot be marked - ' . $migration);
 
     // Post-schema upgrade: admin_users.session_version (the admin session
     // epoch). Every authenticated admin page reads it.
@@ -121,16 +125,17 @@ try {
          WHERE table_schema = DATABASE() AND table_name = 'admin_users' AND column_name = 'session_version'"
     );
     $ok('admin_users.session_version present (admin session epoch)', $hasSessionVersion === 1,
-        'run the ALTER at the end of sql\\schema.sql if missing');
+        'a missing column breaks the panel - ' . $migration);
 
     // Post-schema upgrade: calls.idempotency_key_hash (Idempotency-Key
-    // submits). Keyless submits never touch it, so only those break.
+    // submits). EVERY call INSERT names the column (NULL without the header),
+    // so a missing one breaks all submits, keyed or not.
     $hasIdemKey = (int)db()->value(
         "SELECT COUNT(*) FROM information_schema.columns
          WHERE table_schema = DATABASE() AND table_name = 'calls' AND column_name = 'idempotency_key_hash'"
     );
     $ok('calls.idempotency_key_hash present (idempotent submits)', $hasIdemKey === 1,
-        'run the ALTER at the end of sql\\schema.sql if missing');
+        'every submit INSERT names this column; keyless submits break too - ' . $migration);
 
     // A webhook delivery stays 'pending' when the receiver is down or the
     // client lost its URL/secret: a growing backlog means clients are not
@@ -179,9 +184,14 @@ try {
             'any host on the path to the target database can impersonate it; install the certificate in the'
             . ' Windows trust store and unset GATEWAY_SQLSRV_TRUST_SERVER_CERT');
     }
-    echo '     sql server targets: ', (string)$sqlsrvActive, ' active, transport ',
+    // This is the CONFIGURED stance, not a connectivity test: check.php must
+    // not open target connections by default (an unreachable server would make
+    // the pre-deploy gate slow or hang). A real login is proved by the admin
+    // Test button or by running one request.
+    echo '     sql server targets: ', (string)$sqlsrvActive, ' active, config: ',
         Core\Config::get('connections.sqlsrv_encrypt', true) ? 'encrypted' : 'PLAINTEXT',
-        ', certificate ', ($trustBad ? 'accepted without validation' : 'validated'),
+        ', certificate ', ($trustBad ? 'accepted without validation' : 'validation on'),
+        ' (connectivity not tested - use the admin Test button or a real request)',
         ', handshake cap ', (string)(int)Core\Config::get('connections.sqlsrv_login_timeout', 15), 's', PHP_EOL;
 
     // A delayed timeout at or above the stale-running threshold means the worker
@@ -199,19 +209,20 @@ try {
     // The heartbeat GET /health reads. check.php runs on the machine that owns
     // the schedule, so a silent worker_state here means the task is not firing
     // (or the upgrade did not create the table) - the same thing monitoring
-    // would page about, visible before anyone probes /health.
-    $age = \Services\WorkerState::ageSeconds(
-        \Services\WorkerState::lastPass()['last_pass_finished_at'] ?? null
-    );
+    // would page about, visible before anyone probes /health. The age is the
+    // newer of the pass's start and finish, exactly as GET /health computes it,
+    // so a long pass that is still running is not reported as stale.
+    $pass = \Services\WorkerState::lastPass();
+    $age = \Services\WorkerState::passAgeSeconds($pass);
     $maxSilence = \Services\WorkerState::maxSilenceSeconds();
     if ($age === null) {
         $warn('worker heartbeat is recorded (worker_state)',
-            'no pass in worker_state yet - register the worker task and run the CREATE TABLE at the end of sql\\schema.sql');
+            'no pass in worker_state yet - register the worker task and ' . $migration);
     } elseif ($age > $maxSilence) {
         $warn('worker heartbeat is recent',
-            "last pool pass finished {$age}s ago, worker.max_silence_seconds is {$maxSilence}s - GET /health answers 503");
+            "last pool pass started/finished {$age}s ago, worker.max_silence_seconds is {$maxSilence}s - GET /health answers 503");
     } else {
-        $ok('worker heartbeat is recent', true, "last pool pass finished {$age}s ago, limit {$maxSilence}s");
+        $ok('worker heartbeat is recent', true, "newest pass evidence {$age}s old, limit {$maxSilence}s");
     }
 } catch (\Throwable $e) {
     $ok('metadata DB', false, $e->getMessage());
@@ -226,9 +237,27 @@ try {
 }
 
 // Storage dir (result files live here; nothing else is written to storage/).
+// A real create-and-remove probe, not is_writable(): the stat-based answer
+// still says "writable" for some read-only mounts and ACLs, which is exactly
+// the failure this check exists to catch. GET /health probes the same way, so
+// the pre-deploy gate and the runtime answer cannot disagree.
 $resultsDir = Core\Filesystem::resultsDir();
-$ok("storage dir writable: {$resultsDir}",
-    is_dir($resultsDir) && is_writable($resultsDir), is_dir($resultsDir) ? '' : 'missing');
+$storageDetail = '';
+try {
+    Core\Filesystem::prepare();
+    // Unique per process: two concurrent checks must not unlink each other's
+    // probe (and cleanup never touches these names - it only sweeps numeric
+    // <execution id>.json[.tmp] files).
+    $probe = $resultsDir . '/check.' . getmypid() . '.' . bin2hex(random_bytes(6)) . '.tmp';
+    if (@file_put_contents($probe, 'x') === false) {
+        $storageDetail = "cannot create a file in {$resultsDir}";
+    } elseif (!@unlink($probe)) {
+        $storageDetail = "cannot remove a file from {$resultsDir}";
+    }
+} catch (\Throwable $e) {
+    $storageDetail = $e->getMessage();
+}
+$ok("storage dir writable: {$resultsDir}", $storageDetail === '', $storageDetail);
 
 // Free-space floor for new result files (limits.min_free_disk_bytes): below it
 // the worker refuses a run with storage_low instead of filling the volume.

@@ -6,6 +6,12 @@
 --   mysql -u root -p data_gateway < sql\schema.sql
 -- (or paste into phpMyAdmin's SQL tab with data_gateway selected)
 -- All timestamps are stored as DATETIME in Tehran local time (+03:30, no DST).
+--
+-- FRESH INSTALLS ONLY. Running this file on a database that already exists
+-- fails: the foreign-key ALTERs at the end re-add constraints that are already
+-- there (ERROR 1005 ... Duplicate key). Upgrade an existing installation with
+--   sql\migrations\2026-10-20-production-hardening.sql
+-- instead (see the pointer at the end of this file, and README section 8).
 -- ============================================================================
 
 SET NAMES utf8mb4;
@@ -312,67 +318,27 @@ ALTER TABLE `client_rate_limits`
   ADD CONSTRAINT `fk_crl_client` FOREIGN KEY (`client_id`) REFERENCES `clients` (`id`) ON DELETE CASCADE;
 
 -- ---------------------------------------------------------------------------
--- Upgrading an EXISTING installation (CREATE TABLE IF NOT EXISTS above does
--- not touch tables that already exist). Run once:
+-- Upgrading an EXISTING installation
+--
+-- Everything an older schema can be missing lives in ONE re-runnable file:
+--
+--   sql\migrations\2026-10-20-production-hardening.sql
+--
+-- It adds client_rate_limits (+ fk_crl_client), executions.error_code,
+-- admin_users.session_version, calls.idempotency_key_hash (+ its index) and
+-- worker_state, each only when information_schema says it is absent, so the
+-- file can be applied again safely. Apply it BEFORE deploying the code and
+-- then run `php cli\check.php` (13/13 tables + the four upgrade columns).
+--
+-- A database created before the webhook feature also needs this one-off
+-- ALTER, which the migration deliberately does not repeat (it is not part of
+-- the 2026-10-20 hardening set):
 --   ALTER TABLE `calls`
 --     ADD COLUMN `token_enc` TEXT NULL DEFAULT NULL
 --       COMMENT 'AES-256-GCM copy of the per-call token; lets webhooks rebuild the link'
 --       AFTER `token_hash`;
--- Older rows keep token_enc = NULL: their calls simply get no link in the
--- webhook payload; everything else keeps working.
 --
---   CREATE TABLE IF NOT EXISTS `client_rate_limits` (
---     `client_id`    INT UNSIGNED NOT NULL,
---     `window_start` DATETIME     NOT NULL,
---     `hits`         INT UNSIGNED NOT NULL DEFAULT 1,
---     PRIMARY KEY (`client_id`)
---   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
---   ALTER TABLE `client_rate_limits`
---     ADD CONSTRAINT `fk_crl_client` FOREIGN KEY (`client_id`)
---       REFERENCES `clients` (`id`) ON DELETE CASCADE;
--- (the per-client submit throttle counter. Create it BEFORE deploying the new
--- code: with limits.client_submit_max > 0 every submit touches this table, so
--- a missing table would fail the submission endpoint.)
---
---   ALTER TABLE `executions`
---     ADD COLUMN `error_code` VARCHAR(32) NULL DEFAULT NULL AFTER `error_message`;
--- (the sanitized failure code clients see. Old failed rows keep NULL and are
--- reported as execution_failed; no backfill is needed.)
---
---   ALTER TABLE `admin_users`
---     ADD COLUMN `session_version` INT NOT NULL DEFAULT 0 AFTER `locked_until`;
--- (the admin session epoch. Run it BEFORE deploying the new code: every
--- authenticated admin page reads the column, so a missing one breaks the panel.
--- Existing sessions carry no version and are signed out on their next request,
--- which just means admins log in once more.)
---
+-- Retired, drop only AFTER the new code is deployed (the previous worker
+-- version still writes it):
 --   ALTER TABLE `executions` DROP COLUMN `download_token_hash`;
--- (OPTIONAL, and only after the new code is deployed: no code path reads or
--- writes it any more. An execution-level download token was stored but never
--- handed to any client, so the column held a hash of a credential nobody could
--- use; downloads resolve the per-call token in `calls` instead. Do not run it
--- before deploying - the previous worker version writes the column.)
---
---   ALTER TABLE `calls`
---     ADD COLUMN `idempotency_key_hash` CHAR(64) NULL DEFAULT NULL
---       COMMENT 'SHA-256 of the submit Idempotency-Key header; scopes duplicate submits'
---       AFTER `token_enc`,
---     ADD INDEX `idx_calls_idempotency` (`client_id`, `request_id`, `idempotency_key_hash`);
--- (the duplicate-submit guard. Run it BEFORE deploying: every submit that
--- carries an Idempotency-Key reads and writes this column, so a missing one
--- fails those submits. Submits without the header never touch it, and old rows
--- simply have no key to match.)
---
---   CREATE TABLE IF NOT EXISTS `worker_state` (
---     `id`                    TINYINT UNSIGNED NOT NULL,
---     `last_pass_started_at`  DATETIME     NOT NULL,
---     `last_pass_finished_at` DATETIME     NOT NULL,
---     `last_pass_failures`    INT          NOT NULL DEFAULT 0,
---     PRIMARY KEY (`id`)
---   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
--- (the worker heartbeat. Create it BEFORE deploying: the pool writes the row at
--- the end of every pass and GET /health reads it, so without the table every
--- pass prints a warning and /health reports the worker as stale. The write is
--- caught, so executions, the API and the panel keep working either way - the
--- only thing missing is the health answer.)
 -- ---------------------------------------------------------------------------
