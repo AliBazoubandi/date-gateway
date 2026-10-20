@@ -226,11 +226,15 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   child does not reach stays `scheduled` for the next minute. Note that
   executions **within** one connection still run one after another — a slow
   query only queues behind its own connection.
-  At the end of every pass the pool also records the single-row `worker_state`
-  heartbeat — start, finish, failure count — that `GET /health` reads (§4). The
-  write is caught, so a missing `worker_state` table costs only the health
-  answer, never the executions; and a manual `php cli\worker.php` does **not**
-  record it, because one ad-hoc run is not evidence that the schedule is alive.
+  At the **start** of every pass the pool records the single-row `worker_state`
+  heartbeat's start stamp, and at the end it closes the same row with the
+  finish and the failure count — the pair `GET /health` reads (§4). Recording
+  the start first is what keeps a legitimate 30-minute query from making
+  `/health` answer 503 for 30 minutes (a load balancer would remove a node that
+  is actually working). Both writes are caught, so a missing `worker_state`
+  table costs only the health answer, never the executions; and a manual
+  `php cli\worker.php` does **not** record it, because one ad-hoc run is not
+  evidence that the schedule is alive.
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
   removes failed leftovers, recovers instant executions that died mid-query
   in the web server, and deletes orphaned result/cache files whose
@@ -324,8 +328,10 @@ read-only), `execution_failed` (502), `result_unavailable` (502, the stored
 result file is missing or unreadable — an empty 200 is never returned),
 `result_too_large` (413, instant result past
 `limits.instant.max_result_bytes`), `timeout`
-(504), `rate_limited` (429, with `Retry-After`), and `410 Gone` for an
-expired link.
+(504), `rate_limited` (429, with `Retry-After`), `submission_in_progress`
+(409, the `Idempotency-Key`'s first submission is still running — with
+`Retry-After`; added in 2026-10, see the idempotency section below), and
+`410 Gone` for an expired link.
 
 ### Instant mode
 
@@ -387,8 +393,9 @@ This is independent of the per-connection concurrency cap above. **Currently
 enabled at 60 submissions per 60s window** in `config/config.php`; set
 `client_submit_max` (or the `GATEWAY_CLIENT_SUBMIT_MAX` environment override)
 to `0` to disable. Upgrading an existing installation requires the
-`client_rate_limits` table from `sql/schema.sql` (see the upgrade block at the
-end of that file) before deploying this code.
+`client_rate_limits` table, which
+`sql/migrations/2026-10-20-production-hardening.sql` creates (§8) — create it
+before deploying this code.
 
 ### Idempotent submits (`Idempotency-Key`)
 
@@ -410,7 +417,7 @@ What a retry answers, by the state of the original run:
 | instant, `ready` | the same rows inline, or the same file with `?download=1`, and the same `link` |
 | instant, `failed` | the error the original POST returned (`504 timeout`, `413 result_too_large`, `502 …`) |
 | instant, `expired` | `410 expired` — the stored result is gone, so there is nothing to replay |
-| instant, still running | no finished result to hand back: it submits like a normal one |
+| instant, still running | `409 submission_in_progress` with `Retry-After: 5` — **no** new run (2026-10) |
 | its `executions` row pruned by retention | a normal submit — the key's history went with the call |
 
 A replay starts no work, so it does not consume the per-client submit throttle
@@ -421,14 +428,20 @@ submit with a new key; the old call is left exactly as it was.
 
 Concurrency: the replay lookup and this submit's own call write are fenced by a
 per-(client, key) `GET_LOCK` (`gw_idem_…`, 10 s wait), so two simultaneous
-retries cannot both conclude "no prior call". If the first attempt is an
-in-flight instant run that outlives that wait, or the metadata DB stalls the
-lock, the second behaves like an un-keyed submit — a duplicate call, never a
-lost or wrong answer. This is "one key, one answer once the first attempt is
-recorded", not a queue.
+retries cannot both conclude "no prior call". A retry that arrives **while the
+first instant run is still executing** (the common case for an expensive
+query: the retry outlives the 10 s lock wait) now gets `409
+submission_in_progress` with `Retry-After: 5` and starts nothing — before
+2026-10 it fell through and ran the query a second time, producing two
+executions and two calls for one logical submission. A retry that waits out the
+lock and finds the run finished simply replays it. This is "one key, one
+answer once the first attempt is recorded", not a queue: a 409 is not a
+failure, it asks the client to poll or retry the submit shortly.
 
-Upgrading: run the `calls.idempotency_key_hash` ALTER from the §8 upgrade block
-before deploying. Submits without the header never read or write the column.
+Upgrading: apply `sql/migrations/2026-10-20-production-hardening.sql` (it adds
+`calls.idempotency_key_hash`) before deploying. **Every** call INSERT names that
+column — without the header it is simply `NULL` — so a database missing it
+breaks all submits, keyed or not.
 
 ### Health check (`GET /health`)
 
@@ -450,6 +463,7 @@ connection rows, no driver error text.
     "storage_free_bytes": 41231686656,
     "storage_space": true,
     "worker_last_pass_at": "2026-10-20T09:11:58+03:30",
+    "worker_last_pass_started_at": "2026-10-20T09:12:30+03:30",
     "worker_last_pass_age_seconds": 43,
     "worker_last_pass_failures": 0,
     "worker_recent": false
@@ -460,16 +474,19 @@ connection rows, no driver error text.
 | check | what has to be true | why it is written that way |
 |---|---|---|
 | `database` | the metadata DB answers a ping | everything else is unreadable without it |
-| `storage_writable` | a probe file can be created **and removed** inside `storage\results` | a stat-based `is_writable()` still says "writable" for some read-only mounts and ACLs; a gateway that cannot open a result file cannot deliver a result. The check creates `storage\results` first, exactly as the worker and cleanup do, so a fresh installation is not reported as broken |
+| `storage_writable` | a probe file can be created **and removed** inside `storage\results` | a stat-based `is_writable()` still says "writable" for some read-only mounts and ACLs; a gateway that cannot open a result file cannot deliver a result. The check creates `storage\results` first, exactly as the worker and cleanup do, so a fresh installation is not reported as broken. The probe name carries the pid and random bytes, so two concurrent probes cannot unlink each other's file and report a false outage |
 | `storage_space` | free space on the storage volume is at or above `limits.min_free_disk_bytes` | the **same floor** the worker applies before writing (`Services\StorageGuard`), so the answer and the behaviour cannot drift; `0` disables the floor, and a volume whose free space cannot be measured (`storage_free_bytes: null`) counts as unknown, not full |
-| `worker_recent` | `cli\worker_pool.php` finished a pass within `worker.max_silence_seconds` (default 300) | the schedule fires every minute, so 300 tolerates four missed fires before it pages; the row read is `worker_state`, written once per pass (see §3) |
+| `worker_recent` | the **newer** of `worker_state`'s pass start and pass finish is within `worker.max_silence_seconds` (default 300) | the schedule fires every minute, so 300 tolerates four missed fires before it pages. Using the newer of the two is what keeps a legitimate long pass from reading as an outage: the finish is still yesterday's while the pass is genuinely working. Once the pool stops (crash, task disabled), no new start appears either, so the answer still turns stale after the window. `worker_last_pass_age_seconds` is that effective age (added 2026-10: it used to be the finish only) |
 
-`worker_last_pass_failures` counts the pass's own problems (a child worker that
-exited non-zero, or a pool that crashed) and is **informational**: a pass that
-ran and reported failures is still a live scheduler, so it does not turn the
-answer red. `worker_last_pass_at: null` with `worker_recent: false` means no
-heartbeat has ever been recorded — the task is not running, or `worker_state`
-has not been created by the §8 upgrade.
+`worker_last_pass_at` is the last **finished** pass, `worker_last_pass_started_at`
+the last **started** one (additive, 2026-10); a monitor can chart the pair to
+tell a long pass from a dead scheduler. `worker_last_pass_failures` counts the
+pass's own problems (a child worker that exited non-zero, or a pool that
+crashed) and is **informational**: a pass that ran and reported failures is
+still a live scheduler, so it does not turn the answer red.
+`worker_last_pass_at: null` with `worker_recent: false` means no heartbeat has
+ever been recorded — the task is not running, or `worker_state` has not been
+created by the §8 migration.
 
 Point the monitor at `GET /health` and page on any non-`200`; `status` is the
 same verdict in the body if the probe only reads JSON. A `503` on
@@ -600,6 +617,13 @@ never followed (following one would re-resolve and re-scheme outside these
 rules), and the response body is discarded after 64 KiB because only the
 status code is used.
 
+Addresses are classified in their canonical form: an IPv4-mapped IPv6 literal
+(`https://[::ffff:a.b.c.d]/…`) is the IPv4 address it embeds, because that is
+where the OS and curl route it. Before 2026-10 the mapped form slipped past
+every range check — `https://[::ffff:127.0.0.1]/` reached loopback and
+`[::ffff:169.254.169.254]` the metadata endpoint — so the gate now normalizes
+first (`Core\IpRange::normalize()`) and refuses an address it cannot parse.
+
 **Tradeoff, on purpose:** `allow_private_hosts` defaults to `true` because this
 deployment's receivers live on the LAN. Set
 `GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS=0` if the receivers are publicly reachable
@@ -609,12 +633,19 @@ do, to exercise delivery). Link-local (`169.254.0.0/16`, which includes every
 cloud metadata endpoint), carrier-grade NAT, multicast and other reserved
 ranges are refused **whatever these knobs say**.
 
-A delivery whose stored URL fails the policy is not retried: the row goes to
+A delivery whose stored URL fails the **policy** is not retried: the row goes to
 `state = 'exhausted'` with `last_error = 'blocked: <reason>'`, the reason is
 logged as a `webhook_failed` entry, and curl is never called. `cli/check.php`
 prints the active policy and lists the configured client URLs that the gateway
 would refuse today, so fix them in the admin UI (or relax a knob) before the
 notifications are lost.
+
+A name that merely **does not resolve right now** is different (2026-10): that
+is a transient DNS condition, not a decision, so the delivery keeps its pending
+state, burns one attempt and schedules the next retry with the normal backoff
+(`1, 2, 5, 10, 30 min`) — `last_error` says `receiver did not resolve: …` and
+the log line ends with `retry in N min`. Before that change the first DNS hiccup
+exhausted the delivery, so the client was never told even after DNS recovered.
 
 ## 6. Character encoding (non-ASCII data)
 
@@ -688,12 +719,40 @@ key — does.
 
 ## 8. Upgrading an existing installation
 
-The statements below are also collected at the end of `sql/schema.sql`.
-`php cli\check.php` fails on any of them that is missing, so run it after
-upgrading the code.
+**`sql/schema.sql` is the fresh-install script. Do not import it over an
+existing database.** Its trailing `ALTER TABLE … ADD CONSTRAINT` statements
+re-add foreign keys that are already there, so a re-import fails at the first
+one (`ERROR 1005 … Duplicate key`) and everything after it — including the
+upgrade block that used to live at the end of that file — is never run.
 
-If the DB was created before the webhook feature, add the encrypted-token
-column once:
+Every additive change an older schema can be missing is collected in **one
+re-runnable migration**:
+
+```
+C:\xampp\mysql\bin\mysql.exe -u root -p data_gateway < sql\migrations\2026-10-20-production-hardening.sql
+```
+
+It checks `information_schema` before each change, so applying it twice is a
+no-op. Run it **before** deploying the code, then run `php cli\check.php` and
+require 13/13 tables plus these four columns. What it adds, and what breaks
+while it is missing:
+
+| object | without it |
+|---|---|
+| `client_rate_limits` (+ `fk_crl_client`) | every submit fails while `limits.client_submit_max > 0` (60/60s by default) — the throttle has no fallback |
+| `executions.error_code` | failure handling cannot record anything: `Worker::markFailed`, the instant failure updates and the stale-instant cleanup all write this column, so a failed run is not marked and its row can sit `running`. It is **not** true that only the code is missing while the ALTER lags — failure handling itself breaks |
+| `admin_users.session_version` | every authenticated admin page reads it, so the panel breaks |
+| `calls.idempotency_key_hash` (+ `idx_calls_idempotency`) | **every** call INSERT names this column (NULL without the header), so all submits break, keyed or not |
+| `worker_state` | `cli\worker_pool.php` cannot record the heartbeat and `GET /health` reports `worker_recent: false` (503). This one is caught: executions, the API and the panel keep working, only the health answer is lost |
+
+The migration needs no backfill: old `executions` rows keep `error_code = NULL`
+and are reported as the generic `execution_failed`; old `calls` rows simply have
+no key to match; `worker_state` starts empty and means "no pass recorded yet".
+
+A database created **before the webhook feature** needs one extra, one-off ALTER
+that the migration deliberately does not repeat (it is not part of the
+2026-10-20 set). Old calls keep `token_enc = NULL` and simply get no `link` in
+webhook payloads:
 
 ```sql
 ALTER TABLE `calls`
@@ -701,80 +760,6 @@ ALTER TABLE `calls`
     COMMENT 'AES-256-GCM copy of the per-call token; lets webhooks rebuild the link'
     AFTER `token_hash`;
 ```
-
-Old calls keep `token_enc = NULL`: they simply get no `link` in webhook
-payloads; everything else keeps working.
-
-If the DB was created before the per-client submit throttle, create its
-counter table **before** deploying the new code (the throttle has no
-fallback):
-
-```sql
-CREATE TABLE IF NOT EXISTS `client_rate_limits` (
-  `client_id`     INT UNSIGNED NOT NULL,
-  `window_start`  DATETIME     NOT NULL,
-  `hits`          INT UNSIGNED NOT NULL DEFAULT 1,
-  PRIMARY KEY (`client_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
-ALTER TABLE `client_rate_limits`
-  ADD CONSTRAINT `fk_crl_client` FOREIGN KEY (`client_id`)
-    REFERENCES `clients` (`id`) ON DELETE CASCADE;
-```
-
-If the DB was created before failure webhooks, add the sanitized failure
-code:
-
-```sql
-ALTER TABLE `executions`
-  ADD COLUMN `error_code` VARCHAR(32) NULL DEFAULT NULL AFTER `error_message`;
-```
-
-Existing rows keep `error_code = NULL` and are reported as
-`execution_failed` — the generic code — so nothing breaks if the ALTER
-lags behind the deploy.
-
-If the DB was created before admin session invalidation, add the session
-epoch **before** deploying the new code (every authenticated admin page reads
-it, so a missing column breaks the panel):
-
-```sql
-ALTER TABLE `admin_users`
-  ADD COLUMN `session_version` INT NOT NULL DEFAULT 0 AFTER `locked_until`;
-```
-
-If the DB was created before idempotent submits, add the key column **before**
-deploying (a submit carrying `Idempotency-Key` reads and writes it, so only
-those submits break without it):
-
-```sql
-ALTER TABLE `calls`
-  ADD COLUMN `idempotency_key_hash` CHAR(64) NULL DEFAULT NULL
-    COMMENT 'SHA-256 of the submit Idempotency-Key header; scopes duplicate submits'
-    AFTER `token_enc`,
-  ADD INDEX `idx_calls_idempotency` (`client_id`, `request_id`, `idempotency_key_hash`);
-```
-
-If the DB was created before `GET /health`, create its heartbeat table **before**
-deploying (`cli\worker_pool.php` writes it at the end of every pass and §4 reads
-it):
-
-```sql
-CREATE TABLE IF NOT EXISTS `worker_state` (
-  `id`                    TINYINT UNSIGNED NOT NULL,
-  `last_pass_started_at`  DATETIME     NOT NULL,
-  `last_pass_finished_at` DATETIME     NOT NULL,
-  `last_pass_failures`    INT          NOT NULL DEFAULT 0,
-  PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-```
-
-It needs no backfill: no row simply means "no pass recorded yet", which
-`/health` reports as `worker_recent: false`. The pool's write is caught, so even
-if the ALTER lags behind the deploy the only cost is that health answer and a
-warning per pass — executions, the API and the panel are unchanged. The other
-three checks read nothing new, so an upgrade with no `worker_state` still gives
-a correct answer about the database, storage and free space.
 
 **Admin sessions and audit (2026-10):** no other schema change. Two behavior
 changes are live out of the box (see §13): signed-in admin pages now expire
@@ -858,9 +843,11 @@ than holding a worker slot for the whole timeout.
 **Safe path — `tests\run_all.php`** (portable: Windows, Linux, macOS; no
 elevation needed): builds a throwaway environment itself — random
 `data_gateway_test_<random>` schema (imported from `sql\schema.sql`), throwaway
-`storage\test-<random>` dir — and
+storage directory in the **system temp dir** (`gw-test-<random>`, never inside
+the project's `storage/`) — and
 runs everything against it: `php -l` on every file, `smoke_db`,
-`encryption_test --db`, `links_test`, `filesystem_test`, `sqlguard_test`,
+`encryption_test --db`, `links_test`, `filesystem_test`, `sqlguard_test`
+(including MySQL/MariaDB executable comments and the per-dialect #/-- rules),
 `readonly_driver_test`, `pool_test`, `resultwriter_test`, `throttle_test`,
 `proxy_test` (the address-range math of `Core\IpRange` and who
 `Core\TrustedProxies`/`client_ip()` believe, plus the shipped admin session
@@ -880,22 +867,34 @@ real MySQL driver, `QueryRunner` and `ResultWriter`),
 `instant_ttl_test` (the instant cache window of §4 never exceeding the result
 file lifetime, including the shipped default read from a `GATEWAY_*`-free child
 process),
+`instant_file_leak_test` (BUG 4 of the 2026-10 review: a result file the writer
+abandons — tiny `GATEWAY_MAX_RESULT_BYTES` — is discarded with the request, the
+inline answer is still 200, and a cleanup pass finds no `{id}.json.tmp`),
 `health_test` (the four `GET /health` checks of §4 and the 200/503 verdict, over
 a real `php -S` server: the 405, the heartbeat written by a real pool pass, the
-single-row `worker_state` guarantee, and that the unauthenticated body carries
-no database name, user, host, path or key — one child server per degraded
-branch),
-then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
-`webhook_smoke`), `retention_test` (row retention pruning + the free-space
+single-row `worker_state` guarantee, a pass that is still running reading as
+recent, and that the unauthenticated body carries no database name, user, host,
+path or key — one child server per degraded branch),
+then the four end-to-end smokes (`api_smoke` — including the idempotency rules
+of §4: an in-flight instant run answers `409 submission_in_progress` and starts
+nothing, a ready one replays the same call and link, and two same-key submits
+produce exactly one execution — `admin_smoke` — whose `php -S` gets its own
+`session.save_path` under the run's storage, so it does not need a writable
+global session directory — `worker_smoke`, `webhook_smoke` — including a
+non-resolving receiver URL staying `pending` with a retry instead of being
+exhausted), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised
 above the real free space), `webhook_url_test` (the webhook SSRF policy of §5,
-one child process per policy) plus `stream_memory_test`, each refusing to run
+one child process per policy, including IPv4-mapped IPv6 and the
+`retryable` flag) plus `stream_memory_test`, each refusing to run
 unless
 `GATEWAY_TEST_MODE=1` and
 the metadata DB name contains `_test` (they `exit(2)` otherwise). The DB and
-storage dir are always dropped by a shutdown handler, even when a suite fails
-or the runner is interrupted, and every fixture is run-scoped, so a green run
-touches nothing outside its sandbox:
+storage dir are always dropped by a shutdown handler **registered before either
+is created**, so an import failure, a failed `mkdir` or an `exit(2)` in between
+still cleans up (it used to be registered after them, which leaked schemas), and
+every fixture is run-scoped, so a green run touches nothing outside its
+sandbox:
 
 ```
 powershell -ExecutionPolicy Bypass -File tests\run_all.ps1
@@ -906,6 +905,18 @@ powershell -ExecutionPolicy Bypass -File tests\run_all.ps1
 the same code. Run the PHP runner directly for the other options
 (`--list`, `--only=name,name`, `--rows=N`, `--keep`, `--root-host/--root-port`
 for an admin connection that is not the local socket default).
+
+**A hard kill cannot be caught.** `SIGKILL` / `Task Manager → End task` skips
+every shutdown handler, so that one run's throwaway schema survives. That is
+what `--drop-stale` is for: it lists `data_gateway_test_*` schemas, keeps any
+younger than `--stale-minutes` (default 60, so a run that is still active is
+never touched), shows what it would drop and asks before doing it — pass
+`--force` in a script, where there is no one to answer:
+
+```
+php tests\run_all.php --drop-stale            :: list + confirm
+php tests\run_all.php --drop-stale --force    :: non-interactive
+```
 
 **CI — `.github/workflows/ci.yml`.** On every push, pull request and manual
 dispatch, Ubuntu runners on PHP **8.1 and 8.2** (extensions `mysqli`,
@@ -968,9 +979,9 @@ opens a live connection to a target and needs its actual credentials.
    minutes); re-run the script to apply updated limits to existing tasks. Then
    point monitoring at `GET /health` (§4) — it answers `503` while the metadata
    DB is unreachable, storage cannot be written, the volume is under
-   `limits.min_free_disk_bytes`, or the pool has not finished a pass within
-   `worker.max_silence_seconds`, which is how you notice a scheduled task that
-   stopped firing.
+   `limits.min_free_disk_bytes`, or the pool has neither started nor finished a
+   pass within `worker.max_silence_seconds`, which is how you notice a scheduled
+   task that stopped firing (a pass that is still running counts as alive: §4).
 6. **Decide the history retention.** Every `cleanup.retention.*` window ships
    at `0` (keep forever), so nothing is pruned until you set it. Pick the
    numbers with whoever owns the metadata DB (§3 recommends
@@ -1001,25 +1012,42 @@ runtime compromise expensive when permissions are left at XAMPP defaults.
 `deployment\harden_acl.ps1` enforces the least-privilege split (idempotent,
 run it again after any reinstall or move):
 
-- **Administrators + SYSTEM** — Full Control on the whole tree.
-- **PHP identity** (`-WebUser`, default `NT AUTHORITY\SYSTEM` as XAMPP runs
-  Apache) — Read&Execute everywhere, including `config/` so `.env` stays
-  readable, but **no write** outside `storage/`; `storage/` gets Modify for
-  result files, cache and lock files. A rogue worker cannot rewrite its own
-  code, `.env`, or the CLI/deployment scripts.
-- **Everyone else** — `BUILTIN\Users` and `Authenticated Users` grants are
-  stripped; nothing re-inherits broad rights from the volume root.
+- **Administrators** — Full Control on the whole tree. The only identity that
+  may write code or configuration.
+- **SYSTEM** — Read & Execute on the whole tree, including `config/` so `.env`
+  stays readable, and **Modify on `storage/` only** (result files, cache, lock
+  files). XAMPP's Apache and the scheduled tasks run as SYSTEM, so this is the
+  PHP identity by default.
+- **PHP identity** (`-WebUser`, default `NT AUTHORITY\SYSTEM`) — the same split
+  as SYSTEM: RX on the tree, M on `storage/`. When you pass a dedicated account,
+  it gets exactly these grants and SYSTEM keeps them too.
+- **Everyone else** — `BUILTIN\Users`, `NT AUTHORITY\Authenticated Users` and
+  `Everyone` grants are removed from every object (`/T`), and inheritance is
+  removed first (`/inheritance:r /T`), so nothing flows in from the volume root
+  and no child keeps a stale copy of an old grant.
 
-Run from an **elevated** PowerShell (it refuses otherwise):
+**No Full Control for SYSTEM or the PHP identity, anywhere.** That is the
+whole point: with `SYSTEM:(OI)(CI)F` a compromised worker can rewrite `src/`,
+`config/.env` and `deployment/` — including the code that is supposed to catch
+it — so the earlier version of this script did not actually enforce the claim
+that "a rogue worker cannot rewrite its own code". The script now also
+re-reads the resulting ACL and **throws** if either identity still has Full
+Control on the project or `config/`, instead of printing a reassuring "Done".
+
+If Apache runs as SYSTEM, this RX/M split is the only protection the filesystem
+gives you; a dedicated service account (`-WebUser "IIS AppPool\gateway"`, or a
+local account with "Log on as a service") is still the stronger setup. Run from
+an **elevated** PowerShell (it refuses otherwise):
 
 ```
 powershell -ExecutionPolicy Bypass -File deployment\harden_acl.ps1
 ```
 
-Pass `-WebUser "IIS AppPool\gateway"` (or your dedicated service account)
-when PHP does not run as SYSTEM. Afterwards verify the app end to end: a
-read-only code/config tree must not affect submissions, downloads, worker
-passes, or webhook delivery.
+Then verify, from an **unprivileged** prompt, that code and `config/` really are
+read-only for that identity and `storage/` is writable — the script prints the
+effective ACLs of the root, `storage/` and `config/.env` so the answer is in
+front of you. Afterwards exercise the app end to end: a read-only code/config
+tree must not affect submissions, downloads, worker passes, or webhook delivery.
 
 ### What never belongs in the repository
 
@@ -1045,9 +1073,17 @@ Stored `sql_text` is executed with the **target** connection's credentials
 whenever any permitted client submits its code, so the gateway only reads.
 Three layers enforce that:
 
-1. **`Services\SqlGuard`** — a quote/comment-aware scanner, run when the
-   request is **saved** (admin validation error) and again on **every
-   execution** (so rows saved before the policy existed are still covered).
+1. **`Services\SqlGuard`** — a dialect-aware, single-pass scanner, run when the
+   request is **saved** (admin validation error, with the connection's `db_type`
+   as the dialect) and again on **every** execution (so rows saved before the
+   policy existed are still covered). It walks the SQL once and blanks comments
+   and every quotable region — `'…'` (with `''`, and backslash escapes on
+   MySQL), `"…"`, `` `…` `` (MySQL), `[…]` (SQL Server) and `$tag$…$tag$`
+   (PostgreSQL) — so what it checks is only what the server would execute.
+   Dialect matters: `#` starts a comment on MySQL only (on PostgreSQL it is the
+   `#>`/`#>>` operators), and MySQL only treats `--` as a comment when a
+   whitespace/control character follows, so `SELECT 1 --x; DROP TABLE t` is
+   seen as two statements.
    Allowed: one statement starting with `SELECT`, `WITH … SELECT`, `SHOW`,
    `EXPLAIN`, `DESCRIBE`/`DESC` (optionally qualified with `FORMAT=…` or
    `(…)`), plus a table name after `DESCRIBE`/`DESC`. Rejected: any
@@ -1056,8 +1092,12 @@ Three layers enforce that:
    `LOCK IN SHARE MODE` — and `EXPLAIN ANALYZE`, which on MySQL 8+ and
    PostgreSQL **executes** the wrapped statement. The body of an allowed
    `EXPLAIN`/`DESCRIBE` is re-scanned, so `EXPLAIN DELETE FROM t` cannot pass.
-   Bypassing it deliberately would need a keyword hidden in a quoted
-   identifier (which is legal SQL and inert) or a parser-level trick.
+   **MySQL/MariaDB executable comments are rejected outright** (2026-10): the
+   server *executes* the body of `/*! … */` and `/*M! … */`, so stripping them
+   as ordinary comments let `SELECT 1 /*!50000 INTO OUTFILE … */` pass as a
+   bare `SELECT` — and `SELECT … INTO OUTFILE` is a file write the read-only
+   transaction does not necessarily stop. No read-only query needs them, so the
+   guard refuses instead of interpreting.
 2. **Driver session guards** — defence in depth if the scanner is ever wrong:
    - MySQL/MariaDB: the session opens with `START TRANSACTION READ ONLY` and
      closes with `ROLLBACK`. This blocks DML on transactional tables. It does
