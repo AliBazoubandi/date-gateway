@@ -62,9 +62,38 @@ $cleanup = static function () use ($db, &$adminId, &$clientId, &$requestId, &$co
 };
 register_shutdown_function($cleanup);
 chdir($root);
+
+// Sessions for the child server live in the run's own storage, not in the
+// global php.ini session.save_path. A locked-down host (the production shape)
+// has a php.ini save path the CLI user cannot write: session_start() then fails
+// and every POST answers 419, which looks like an application failure but is a
+// harness one. The production Session class is unchanged - this only pins the
+// save path for the server this test starts.
+$sessionsDir = \Core\Filesystem::storageDir() . '/sessions';
+if (!is_dir($sessionsDir) && !@mkdir($sessionsDir, 0770, true) && !is_dir($sessionsDir)) {
+    fwrite(STDERR, "cannot create the test session directory {$sessionsDir}\n");
+    exit(2);
+}
+// A real write probe, not is_writable(): the stat-based answer is exactly what
+// fails on a tightened temp dir/ACL, which is the environment this harness
+// change exists for.
+$probe = $sessionsDir . '/probe.' . getmypid() . '.' . bin2hex(random_bytes(4)) . '.tmp';
+if (@file_put_contents($probe, 'x') === false || !@unlink($probe)) {
+    fwrite(STDERR, "test session directory is not writable: {$sessionsDir}\n");
+    exit(2);
+}
+// Pass the LONG path to the child: PHP's `-d` handling mangles a value that
+// contains `~` (an 8.3 short name such as C:\Users\ALIBAZ~1) and the child then
+// opens sessions in a truncated directory. realpath() expands the short name.
+$sessionsDir = realpath($sessionsDir) ?: $sessionsDir;
+if (str_contains($sessionsDir, '~')) {
+    fwrite(STDERR, "cannot pass a session path containing '~' to the child: {$sessionsDir}\n");
+    exit(2);
+}
 // Array command form: no cmd.exe wrapper, so proc_terminate() really kills
 // php -S (string form orphans the server, which then wedges later runs).
-$proc = proc_open(['php', '-S', '127.0.0.1:' . $port, '-t', 'public', 'tests/dev_router.php'],
+$proc = proc_open([PHP_BINARY, '-d', 'session.save_path=' . $sessionsDir,
+        '-S', '127.0.0.1:' . $port, '-t', 'public', 'tests/dev_router.php'],
     [1 => ['file', 'php://temp', 'w'], 2 => ['file', 'php://temp', 'w']], $pipes);
 if (!is_resource($proc)) {
     fwrite(STDERR, "cannot start php -S\n");
@@ -360,8 +389,10 @@ $check('the login page is not cacheable either', stripos($hdr2, 'Cache-Control: 
 
 // ---- idle timeout: age the session's own last_seen instead of waiting 30 min.
 $sid = sid_from_jar();
-$savePath = (string)session_save_path();
-$sessFile = ($savePath !== '' ? rtrim($savePath, '/\\') : sys_get_temp_dir()) . '/sess_' . $sid;
+// The child server was started with its save_path pinned to this run's
+// storage, so that is where its session file is - never the global php.ini one.
+$savePath = $sessionsDir;
+$sessFile = $savePath . '/sess_' . $sid;
 $check('session file of this run located', $sid !== '' && is_file($sessFile), $sessFile);
 $aged = false;
 if ($sid !== '' && is_file($sessFile)) {
