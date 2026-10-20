@@ -984,7 +984,12 @@ opens a live connection to a target and needs its actual credentials.
    the panel — otherwise the login throttle counts every admin as one client
    (§13). Then confirm `php cli\check.php` prints the intended
    `admin sessions:` line.
-8. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
+8. **Decide the backup.** A dump of `data_gateway` alone is not a backup of the
+   gateway: `storage/` and `config/.env` have to come from the same window, and
+   the master key has to be kept where the dump cannot reach it (§15). Set up the
+   job before go-live, then actually restore it once on a second machine — the
+   only proof that a backup works.
+9. **Final gate:** `php cli\check.php` reports ALL CHECKS PASSED (this
    includes a set, valid, https `GATEWAY_BASE_URL` — the check FAILS while
    it is missing) **and** all four smoke tests pass.
 
@@ -1020,8 +1025,8 @@ passes, or webhook delivery.
 
 `storage/` is the directory most worth keeping out of git: a file under
 `storage\results` is the literal output of a reviewed query — the same business
-data an API response carries — and `storage\cache` holds instant-mode copies of
-it. `.gitignore` therefore ignores the whole tree **except** `storage/.htaccess`,
+data an API response carries — and instant-mode results are copies of exactly
+that (`storage\cache` exists for the sweep's benefit but nothing writes it, §15). `.gitignore` therefore ignores the whole tree **except** `storage/.htaccess`,
 the deny-all safety net a fresh checkout needs. An empty `storage/` is a valid
 start: `Core\Filesystem::prepare()` (called by the worker, cleanup and the
 instant path) creates `results/`, and the `*.lock` files appear when the CLI
@@ -1197,5 +1202,201 @@ network: require TLS server-side (`require_secure_transport=ON` for
 MySQL/MariaDB, `ssl = on` + `hostssl` lines in `pg_hba.conf`), or carry the
 connection over a tunnel you control (IPsec, stunnel, an SSH port-forward to
 `127.0.0.1`). `connections.sqlsrv_*` knobs do not affect them.
+
+---
+
+## 15. Backing up and restoring
+
+The gateway's own state lives in three places that only make sense together, so
+a backup is one operation over all three at one instant, and a restore is the
+same list in order.
+
+| What | Where | Irreplaceable? |
+|------|-------|----------------|
+| Metadata database | MariaDB schema `data_gateway` — the 13 tables `sql/schema.sql` creates (§8 lists the ones an older schema can be missing): admin accounts, target connections (passwords as ciphertext), approved SQL, clients (API-key hashes + webhook secrets), calls, executions, webhook deliveries, `request_logs`, `admin_audit_log`, `client_rate_limits`, `worker_state` | **Yes.** The query *results* live in the target databases; the history — who asked, what ran, what was delivered, what was changed — exists nowhere else |
+| Result files | `storage\results\<execution id>.json` | Only inside the TTL — see "How long a copy of `storage/` is worth" |
+| Secrets | `config\.env` — `GATEWAY_MASTER_KEY`, `GATEWAY_DB_PASSWORD`, `GATEWAY_BASE_URL` | **Yes**, and worse: without the master key the stored connection passwords cannot be read again (§2) |
+| Scheduled tasks | Windows Task Scheduler | No — `deployment\register_tasks.ps1` rebuilds them (§3) |
+| Code | git | No |
+
+### Taking a backup
+
+Stop the writers first. A dump taken while the gateway is working is a dump of a
+moving system, and then the file copy belongs to a different instant than the
+rows that name those files:
+
+```
+schtasks /Change /TN "DataGateway-worker"   /Disable
+schtasks /Change /TN "DataGateway-cleanup"  /Disable
+schtasks /Change /TN "DataGateway-webhooks" /Disable
+:: then stop Apache however this host runs it: XAMPP Control panel > Apache >
+:: Stop, or "net stop Apache2.4" when it is installed as a service.
+
+"C:\xampp\mysql\bin\mysqldump.exe" -u root -p --single-transaction ^
+  --default-character-set=utf8mb4 data_gateway > "G:\gw-backup\gw-db.sql"
+
+robocopy "C:\path\to\data-gateway\storage" "G:\gw-backup\storage" /MIR /R:2 /W:2 /XF *.lock
+
+:: restart Apache, then re-enable the three tasks:
+schtasks /Change /TN "DataGateway-worker"   /Enable
+schtasks /Change /TN "DataGateway-cleanup"  /Enable
+schtasks /Change /TN "DataGateway-webhooks" /Enable
+```
+
+- **Why Apache stops too:** the web path is a writer as well, not only a reader —
+  an instant submission runs its query and opens its result file inside the
+  request. If that lands between the dump and the copy, the restored gateway has
+  a live-looking row with no file, and the client holding that link gets `410`.
+- `--single-transaction` asks InnoDB for one consistent snapshot without locking
+  the tables, so the dump is not a mix of pre-pass and post-pass rows. The
+  schema has no stored routines or events, so no `--routines`/`--events`; the
+  only trigger this project creates belongs to `tests\transaction_test.php` and
+  is dropped when that suite ends.
+- `/XF *.lock` leaves out the fence files (`worker.lock`, `worker-<id>.lock`,
+  `cleanup.lock`, `webhooks.lock`) — they mean nothing without their process,
+  and restoring one onto a host whose tasks are running invites a stale lock.
+- **Nothing writes `storage\cache`.** Instant results and the
+  `requests.instant_cache_seconds` window reuse the *same* file under
+  `results/` (§7), so that directory stays empty even though cleanup sweeps it
+  defensively. `/MIR` costs nothing there.
+- `robocopy` reports **success with exit code 1** (and 2-7 for other normal
+  outcomes); a scheduled backup job that treats non-zero as failure will page
+  every night. Check for `< 8`.
+- The dump **is** a secret-bearing artefact: `clients.webhook_secret` is stored
+  in plaintext (deliveries have to sign with it) while connection passwords and
+  call tokens are AES-256-GCM ciphertext under `GATEWAY_MASTER_KEY`. Keep the
+  `.sql` where you keep any database backup, and keep `config\.env` separately —
+  a password manager or an offline envelope, never inside the same archive.
+
+### How long a copy of `storage/` is worth
+
+Every result's downloadable life is bounded: `requests.ttl_minutes` (default
+**15**) for a delayed run, `limits.instant.result_ttl_minutes` (default **60**)
+for an instant one. After that, cleanup expires the row, deletes the file, and a
+link still held by a client answers `410`. So a copy of `storage/` older than the
+longest TTL in use cannot restore anything a client can still open: a daily copy
+next to the daily dump is enough, and losing `storage/` completely is an
+inconvenience (resubmit), not a data loss. The metadata database is the part that
+cannot be re-run.
+
+### Why the DB and `storage/` must come from the same instant
+
+| Mismatch | What the gateway actually does |
+|---|---|
+| Rows restored, files missing | Downloads answer **410** `This result is no longer available.` (`src\Api\Download.php`). The next cleanup pass marks those rows `expired` and nulls `result_path`, so the gap closes itself — the client just has to resubmit. |
+| Files restored, rows missing | `Cleanup::sweepOrphanFiles()` deletes any `results/<numeric id>.json` (or `.tmp`) whose `executions` row does not exist, **with no age grace** — the next pass is five minutes away. Each deletion is logged as `orphaned results/<id>.json removed (no executions row)` in `request_logs`. Load the rows first, keep cleanup disabled until they are in. |
+| DB older than the files | Restored rows keep their own `expires_at`; anything past it answers **410** `This result has expired.`, and the download path deletes the file while answering, so no expired result survives on disk. Restoring an old database does not resurrect old results — it retires them. |
+| `storage/` restored to another path | Fine. `executions.result_path` is stored **relative to `storage/`**, so point `GATEWAY_STORAGE_DIR` (§2's `storage.dir`) at the new location and the same rows resolve. Absolute values are refused: `Filesystem::resultPath()` throws rather than following a path that escapes the tree. |
+
+### If the restored `.env` carries a different master key
+
+`GATEWAY_MASTER_KEY` seals `connections.password_encrypted` and `calls.token_enc`
+(§2). When it is not the key that encrypted the rows in the dump:
+
+| Still works | Breaks |
+|---|---|
+| **Download links a client already holds** — authentication uses `calls.token_hash`, a SHA-256 of the raw token that needs no key | **Everything**, if the key is the placeholder or the retired `5122ef88…` value: bootstrap refuses to start, `php cli\check.php` and the CLI print `Data Gateway cannot start: …`, and the web path answers a 500 `Configuration error.` |
+| Reading the audit trail, `request_logs`, request definitions, client records | **Every target connection**: `ConnectionFactory::fromConnectionRow()` raises `DbConnectException` ("… the `security.master_key` does not match the one used to store this password"), so all executions on them fail. Clients see the sanitized `execution_failed` (§5), never the decryption text. |
+| | **New links**: `Links::forCall()` swallows the decryption failure and returns `null`, so the status API and webhook payloads carry `link: null` (§5). The result exists and is unreachable until the key is right. |
+
+Recovery: put the original key back, or re-enter each connection's password in
+the admin panel so it is resealed under the current key. There is no re-key tool.
+If the key is genuinely lost, treat every stored connection password as lost too
+and rotate those accounts on the target databases.
+
+### What a restore does not bring back
+
+- **A client's API key.** `clients.api_key_hash` is one-way SHA-256 (§2): no dump
+  can hand back a key a client lost. Re-issue it.
+- **Sessions.** PHP session files live in the server's session save path, not in
+  this project (§13) — everyone signs in again. A *stale* dump additionally rolls
+  `admin_users.session_version` back, which signs out any admin holding a newer
+  session. That is the safe direction, but expect the question.
+- **A quiet login page.** The per-account lockout lives on `admin_users`
+  (`failed_attempts`, `locked_until`) and the per-address throttle on
+  `login_attempts`, so an older dump can bring back a lock that was live when it
+  was taken; `php cli\create_admin.php` clears the account side (§13).
+- **Fresh counters.** `client_rate_limits` windows and the `worker_state`
+  heartbeat rewind with the dump, so `GET /health` answers **503** on
+  `worker_recent` until the pool finishes its first pass after the tasks are
+  re-enabled (within `worker.max_silence_seconds`, default 300 s). Point
+  monitoring at the *second* failing minute, not the first — a restore that pages
+  immediately is a restore that trains people to ignore the alert.
+
+### Retention decides how big the dump gets
+
+Every `cleanup.retention.*` window ships at `0` = keep forever, so the metadata DB
+— and the backup with it — only grows (§3). Recommended production values are
+**90 / 365 / 365 / 30 / 0** for
+`request_logs_days / calls_days / executions_days / webhook_deliveries_days / audit_days`
+(`GATEWAY_RETENTION_*_DAYS`); the audit log stays because it is the compliance
+history. Never prune and back up in the same breath: take a verified dump **before**
+the first pass that prunes (§10 item 6), because that pass is the only scheduled
+operation in this system that deletes rows of history.
+
+### Restoring
+
+1. Stop Apache and disable the three scheduled tasks (the `schtasks /Change
+   /Disable` lines above).
+2. Restore `config\.env` **first**, then read it through the gateway's own eyes:
+   `php cli\check.php`. It FAILs on a placeholder or retired master key, prints
+   the effective policies, and checks the table list — including `worker_state`
+   (§8), which is the table an old backup is most likely to be missing.
+3. Load the dump as an administrator. The `gateway` DB user is deliberately
+   SELECT/INSERT/UPDATE/DELETE/LOCK TABLES only, so it cannot create its own
+   schema (§10 item 1):
+   ```
+   "C:\xampp\mysql\bin\mysql.exe" -u root -p -e "DROP DATABASE IF EXISTS data_gateway; CREATE DATABASE data_gateway CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+   "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway < "G:\gw-backup\gw-db.sql"
+   ```
+   The dump carries no `CREATE DATABASE` line — the schema must already exist —
+   but it does open with `FOREIGN_KEY_CHECKS=0`, so the alphabetical table order
+   in the file cannot trip a foreign key. It also `DROP TABLE`s each table as it
+   goes, which is why step 1 stops the writers: this overwrites, it does not
+   merge.
+   Database-level grants are keyed to the database **name** and MariaDB leaves
+   them in `mysql.db` when the database is dropped, so restoring into the same
+   name needs no re-grant — confirm with `SHOW GRANTS FOR 'gateway'@'localhost';`.
+   Restoring under a *new* name does: run `sql\create_user.sql`, and do not use
+   its placeholder password (§2).
+4. Copy `storage\` back **after** the rows exist:
+   `robocopy "G:\gw-backup\storage" "C:\path\to\data-gateway\storage" /E /XF *.lock`.
+5. Verify before the writers wake up: `php cli\check.php` → `ALL CHECKS PASSED`,
+   then start Apache and `curl -i http://<host>/health` → **200** with all four
+   checks true (§4).
+6. Re-enable the three tasks, wait for one pool pass, and confirm the heartbeat
+   moved (`worker_last_pass_age_seconds` in `/health`, or the heartbeat line in
+   `php cli\check.php`).
+7. Prove the whole path with a low-impact approved request: submit it, poll to
+   `ready`, open the download link. A restore that only looks right in phpMyAdmin
+   has not been tested — the file, the row, the token and the key all have to
+   agree for a download to work, and that is exactly what a mismatched backup
+   breaks.
+
+### Known limitations of this runbook
+
+- **No point-in-time recovery.** There is no binlog replay step: a restore rolls
+  everything after the dump back, including audit rows and calls a client was
+  already told about. Pick the backup interval by what you can accept losing.
+- **All-or-nothing.** The gateway ships no export/import tool, no per-table
+  backup and no partial restore — it is `mysqldump` plus a directory copy.
+- **The dump is not encrypted.** Protection is the ACL on the backup volume
+  (§11) plus the master-key split — which is precisely why the key must not
+  travel with the archive it unlocks.
+- **Consistency comes from stopping the writers**, not from a transaction that
+  spans the database and the filesystem. On a busy gateway that stopped window is
+  the difference between a restore and a wall of `410`s.
+
+### Where the other operational topics live
+
+| Topic | Section |
+|---|---|
+| Retention values, task cadence, and the hard task time limits (worker 60 / cleanup 30 / webhooks 15 min) | §3 |
+| Failure webhook contract — `status: "failed"`, the `error.code` set, retry backoff, and the "result could not be recorded" gap | §5 |
+| Filesystem ACL script `deployment\harden_acl.ps1` | §11 |
+| Read-only SQL policy (what the gateway will and will not execute) | §12 |
+| Admin panel guarantees and its known limitations | §13 |
+| Target-connection transport security | §14 |
+| The order in which these decisions get made at go-live | §10 |
 
 
