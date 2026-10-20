@@ -1,7 +1,7 @@
 <?php
 // ============================================================================
 // Data Gateway - web entry point (front controller).
-// Routes: /api/v1/* (JSON API), /admin/* (session panel).
+// Routes: /api/v1/* (JSON API), /admin/* (session panel), /health (probe).
 // ============================================================================
 
 declare(strict_types=1);
@@ -12,6 +12,11 @@ $path = Core\Http::path();
 
 if ($path === '/') {
     Core\Http::redirect('/admin');
+}
+
+if ($path === '/health') {
+    Api\Health::handle();
+    exit;
 }
 
 if (str_starts_with($path, '/api/')) {

@@ -12,7 +12,8 @@
 // worker.pool_max_children at a time, waits for all of them, and drains the
 // webhook queue once. Each child holds its own per-connection lock, so children
 // on different connections genuinely overlap; a slow connection only queues
-// behind itself.
+// behind itself. At the end of the pass it records the worker_state heartbeat
+// that GET /health reads.
 //
 // Exit codes: 0 = pass completed (children may individually report busy/skip),
 //             1 = the pool crashed or a child exited non-zero.
@@ -60,6 +61,21 @@ try {
 $workerScript = __DIR__ . '/worker.php';
 $maxChildren = max(1, (int)Core\Config::get('worker.pool_max_children', 8));
 $failures = 0;
+// The heartbeat GET /health reads: this pass's start, recorded on every exit
+// path of the pass below. It is written by explicit calls rather than a finally
+// block because PHP does NOT run finally when a try calls exit() - and this
+// script ends its passes with exit. Losing the heartbeat must never change what
+// the pass reports: the executions are already done, and a monitoring
+// convenience is not a reason to fail the schedule.
+$passStarted = Core\Time::now();
+$recordHeartbeat = static function () use ($passStarted, &$failures, $tag): void {
+    try {
+        \Services\WorkerState::record($passStarted, $failures);
+    } catch (\Throwable $e) {
+        fwrite(STDERR, $tag . ' cannot record the health heartbeat: ' . $e->getMessage() . PHP_EOL);
+    }
+};
+$ids = [];
 
 try {
     // Global sweeps once per pass (the children skip them).
@@ -156,12 +172,14 @@ try {
     }
 
     echo $tag, ' connections=', count($ids), ' max_children=', $maxChildren, PHP_EOL;
+    $recordHeartbeat();
     if ($failures > 0) {
         fwrite(STDERR, $tag . " {$failures} worker failure(s)" . PHP_EOL);
         exit(1);
     }
     exit(0);
 } catch (\Throwable $e) {
+    $failures = max(1, $failures);
     fwrite(STDERR, $tag . ' FAILED: ' . $e->getMessage() . PHP_EOL);
     foreach ($running ?? [] as $c) {
         foreach ($c['pipes'] as $p) {
@@ -175,6 +193,7 @@ try {
         db()->unlock('gw_cli_worker_pool');
     } catch (\Throwable) {
     }
+    $recordHeartbeat();
     $released();
     exit(1);
 }

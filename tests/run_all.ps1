@@ -17,9 +17,9 @@
          writer, submit throttle, trusted proxies, driver TLS options,
          Str::json, SAPI bootstrap, Db::transaction, target column naming,
          the instant cache-window clamp
-      3. the end-to-end smokes over a real php -S server and a real worker
-         pass (api, admin, worker, webhook) plus retention pruning and the
-         webhook URL policy
+      3. the health endpoint (health_test) plus the end-to-end smokes over a
+         real php -S server and a real worker pass (api, admin, worker, webhook),
+         retention pruning and the webhook URL policy
       4. stream_memory_test (reduced row count)
     tests\audit_spot.php and tests\driver_test.php are manual inspectors (the
     first reads whatever DB is configured, the second needs real target

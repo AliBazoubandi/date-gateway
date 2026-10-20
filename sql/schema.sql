@@ -269,6 +269,23 @@ CREATE TABLE IF NOT EXISTS `client_rate_limits` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
+-- Worker heartbeat: the row GET /health reads. cli\worker_pool.php writes it at
+-- the end of every pass, including a pass that had failures, so the timestamp
+-- answers "does the schedule still fire?" and last_pass_failures answers
+-- "is what it finds healthy?". Nothing appends: the id is always 1 and the row
+-- is only ever overwritten, so a heartbeat cannot grow into an unpruned log.
+-- No row at all simply means "no pass has been recorded yet", which /health
+-- reports as stale.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `worker_state` (
+  `id`                    TINYINT UNSIGNED NOT NULL,
+  `last_pass_started_at`  DATETIME     NOT NULL,
+  `last_pass_finished_at` DATETIME     NOT NULL,
+  `last_pass_failures`    INT          NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ---------------------------------------------------------------------------
 -- Foreign keys (added last so the import order never matters)
 -- ---------------------------------------------------------------------------
 ALTER TABLE `requests`
@@ -345,4 +362,17 @@ ALTER TABLE `client_rate_limits`
 -- carries an Idempotency-Key reads and writes this column, so a missing one
 -- fails those submits. Submits without the header never touch it, and old rows
 -- simply have no key to match.)
+--
+--   CREATE TABLE IF NOT EXISTS `worker_state` (
+--     `id`                    TINYINT UNSIGNED NOT NULL,
+--     `last_pass_started_at`  DATETIME     NOT NULL,
+--     `last_pass_finished_at` DATETIME     NOT NULL,
+--     `last_pass_failures`    INT          NOT NULL DEFAULT 0,
+--     PRIMARY KEY (`id`)
+--   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+-- (the worker heartbeat. Create it BEFORE deploying: the pool writes the row at
+-- the end of every pass and GET /health reads it, so without the table every
+-- pass prints a warning and /health reports the worker as stale. The write is
+-- caught, so executions, the API and the panel keep working either way - the
+-- only thing missing is the health answer.)
 -- ---------------------------------------------------------------------------

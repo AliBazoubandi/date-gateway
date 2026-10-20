@@ -144,6 +144,11 @@ return [
         // exceed the LONGEST request timeout the admin UI allows (delayed is
         // capped at 1800s = 30 min, so 90 min leaves 3x headroom).
         'stale_running_minutes' => 90,
+        // GET /health calls the worker stale when the pool has not recorded a
+        // finished pass for longer than this. The schedule fires every minute,
+        // so 300 tolerates four missed fires (a locked machine, a wedged task)
+        // before it warns an operator. Raise it only if the schedule is slower.
+        'max_silence_seconds' => (int)\Core\Env::get('GATEWAY_WORKER_MAX_SILENCE_SECONDS', 300),
     ],
 
     'downloads' => [

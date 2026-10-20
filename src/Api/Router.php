@@ -9,6 +9,10 @@ use Core\Str;
  *   POST /api/v1/request/{code}     Submit
  *   GET  /api/v1/calls/{call_id}    Status
  *   GET  /api/v1/results/{token}    Download
+ *
+ * GET /health is not one of them: a monitor holds no client key and this
+ * dispatcher only ever sees /api/v1/*, so public/index.php answers /health
+ * before routing (see Api\Health).
  */
 final class Router
 {

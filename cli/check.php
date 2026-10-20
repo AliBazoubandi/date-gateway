@@ -86,7 +86,8 @@ try {
     echo '     session time_zone = ', (string)$tz, ', now = ', (string)db()->value('SELECT NOW()'), PHP_EOL;
 
     $tables = ['admin_users', 'login_attempts', 'connections', 'requests', 'clients', 'client_request_permissions',
-        'executions', 'calls', 'request_logs', 'admin_audit_log', 'webhook_deliveries', 'client_rate_limits'];
+        'executions', 'calls', 'request_logs', 'admin_audit_log', 'webhook_deliveries', 'client_rate_limits',
+        'worker_state'];
     $found = 0;
     foreach ($tables as $t) {
         $n = db()->value('SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?', [$t]);
@@ -193,6 +194,24 @@ try {
     if ($overlap > 0) {
         $warn("{$overlap} request(s) have timeout_seconds >= worker.stale_running_minutes",
             'lower the timeout or raise stale_running_minutes');
+    }
+
+    // The heartbeat GET /health reads. check.php runs on the machine that owns
+    // the schedule, so a silent worker_state here means the task is not firing
+    // (or the upgrade did not create the table) - the same thing monitoring
+    // would page about, visible before anyone probes /health.
+    $age = \Services\WorkerState::ageSeconds(
+        \Services\WorkerState::lastPass()['last_pass_finished_at'] ?? null
+    );
+    $maxSilence = \Services\WorkerState::maxSilenceSeconds();
+    if ($age === null) {
+        $warn('worker heartbeat is recorded (worker_state)',
+            'no pass in worker_state yet - register the worker task and run the CREATE TABLE at the end of sql\\schema.sql');
+    } elseif ($age > $maxSilence) {
+        $warn('worker heartbeat is recent',
+            "last pool pass finished {$age}s ago, worker.max_silence_seconds is {$maxSilence}s - GET /health answers 503");
+    } else {
+        $ok('worker heartbeat is recent', true, "last pool pass finished {$age}s ago, limit {$maxSilence}s");
     }
 } catch (\Throwable $e) {
     $ok('metadata DB', false, $e->getMessage());

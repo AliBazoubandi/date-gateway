@@ -226,6 +226,11 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   child does not reach stays `scheduled` for the next minute. Note that
   executions **within** one connection still run one after another — a slow
   query only queues behind its own connection.
+  At the end of every pass the pool also records the single-row `worker_state`
+  heartbeat — start, finish, failure count — that `GET /health` reads (§4). The
+  write is caught, so a missing `worker_state` table costs only the health
+  answer, never the executions; and a manual `php cli\worker.php` does **not**
+  record it, because one ad-hoc run is not evidence that the schedule is alive.
 - **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
   removes failed leftovers, recovers instant executions that died mid-query
   in the web server, and deletes orphaned result/cache files whose
@@ -270,7 +275,9 @@ tasks, so it also applies new limits to an existing installation.
 
 All endpoints live under `/api/v1` and authenticate with
 `Authorization: Bearer <api key>`. The client must also have an explicit
-permission grant for the request code.
+permission grant for the request code. The one exception in this section is
+`GET /health`: it is not under `/api/v1`, carries no key, and is documented at
+the end because a monitor needs it before a client does.
 
 ### Delayed mode
 
@@ -422,6 +429,53 @@ recorded", not a queue.
 
 Upgrading: run the `calls.idempotency_key_hash` ALTER from the §8 upgrade block
 before deploying. Submits without the header never read or write the column.
+
+### Health check (`GET /health`)
+
+`GET /health` answers whether this gateway can do its job **right now**: `200`
+while all four checks pass, `503` as soon as one does not, with the individual
+checks in the body so a monitor can tell which one failed. No authentication —
+a load balancer and an uptime probe hold no client key — so the answer carries
+only booleans, byte counts and timestamps: no database name, no paths, no
+connection rows, no driver error text.
+
+```
+{
+  "status": "degraded",
+  "time": "2026-10-20T09:12:41+03:30",
+  "checks": {
+    "database": true,
+    "database_error": null,
+    "storage_writable": true,
+    "storage_free_bytes": 41231686656,
+    "storage_space": true,
+    "worker_last_pass_at": "2026-10-20T09:11:58+03:30",
+    "worker_last_pass_age_seconds": 43,
+    "worker_last_pass_failures": 0,
+    "worker_recent": false
+  }
+}
+```
+
+| check | what has to be true | why it is written that way |
+|---|---|---|
+| `database` | the metadata DB answers a ping | everything else is unreadable without it |
+| `storage_writable` | a probe file can be created **and removed** inside `storage\results` | a stat-based `is_writable()` still says "writable" for some read-only mounts and ACLs; a gateway that cannot open a result file cannot deliver a result. The check creates `storage\results` first, exactly as the worker and cleanup do, so a fresh installation is not reported as broken |
+| `storage_space` | free space on the storage volume is at or above `limits.min_free_disk_bytes` | the **same floor** the worker applies before writing (`Services\StorageGuard`), so the answer and the behaviour cannot drift; `0` disables the floor, and a volume whose free space cannot be measured (`storage_free_bytes: null`) counts as unknown, not full |
+| `worker_recent` | `cli\worker_pool.php` finished a pass within `worker.max_silence_seconds` (default 300) | the schedule fires every minute, so 300 tolerates four missed fires before it pages; the row read is `worker_state`, written once per pass (see §3) |
+
+`worker_last_pass_failures` counts the pass's own problems (a child worker that
+exited non-zero, or a pool that crashed) and is **informational**: a pass that
+ran and reported failures is still a live scheduler, so it does not turn the
+answer red. `worker_last_pass_at: null` with `worker_recent: false` means no
+heartbeat has ever been recorded — the task is not running, or `worker_state`
+has not been created by the §8 upgrade.
+
+Point the monitor at `GET /health` and page on any non-`200`; `status` is the
+same verdict in the body if the probe only reads JSON. A `503` on
+`worker_recent` while the other three pass is the common one: the web tier is
+fine and the scheduled task is not. `php cli\check.php` prints the same
+heartbeat age, so the pre-deploy gate catches it before monitoring does.
 
 ## 5. Webhooks
 
@@ -701,6 +755,27 @@ ALTER TABLE `calls`
   ADD INDEX `idx_calls_idempotency` (`client_id`, `request_id`, `idempotency_key_hash`);
 ```
 
+If the DB was created before `GET /health`, create its heartbeat table **before**
+deploying (`cli\worker_pool.php` writes it at the end of every pass and §4 reads
+it):
+
+```sql
+CREATE TABLE IF NOT EXISTS `worker_state` (
+  `id`                    TINYINT UNSIGNED NOT NULL,
+  `last_pass_started_at`  DATETIME     NOT NULL,
+  `last_pass_finished_at` DATETIME     NOT NULL,
+  `last_pass_failures`    INT          NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+```
+
+It needs no backfill: no row simply means "no pass recorded yet", which
+`/health` reports as `worker_recent: false`. The pool's write is caught, so even
+if the ALTER lags behind the deploy the only cost is that health answer and a
+warning per pass — executions, the API and the panel are unchanged. The other
+three checks read nothing new, so an upgrade with no `worker_state` still gives
+a correct answer about the database, storage and free space.
+
 **Admin sessions and audit (2026-10):** no other schema change. Two behavior
 changes are live out of the box (see §13): signed-in admin pages now expire
 after `admin.session_idle_minutes` (default 30) without a request, and
@@ -805,6 +880,11 @@ real MySQL driver, `QueryRunner` and `ResultWriter`),
 `instant_ttl_test` (the instant cache window of §4 never exceeding the result
 file lifetime, including the shipped default read from a `GATEWAY_*`-free child
 process),
+`health_test` (the four `GET /health` checks of §4 and the 200/503 verdict, over
+a real `php -S` server: the 405, the heartbeat written by a real pool pass, the
+single-row `worker_state` guarantee, and that the unauthenticated body carries
+no database name, user, host, path or key — one child server per degraded
+branch),
 then the four end-to-end smokes (`api_smoke`, `admin_smoke`, `worker_smoke`,
 `webhook_smoke`), `retention_test` (row retention pruning + the free-space
 floor, including a subprocess run with `GATEWAY_MIN_FREE_DISK_BYTES` raised
@@ -885,7 +965,12 @@ opens a live connection to a target and needs its actual credentials.
    invisible (no console flash when tasks fire every minute) and keeps
    running whether a user is logged on or not — exactly what a server wants.
    Each task carries a hard time limit (worker 60 / cleanup 30 / webhooks 15
-   minutes); re-run the script to apply updated limits to existing tasks.
+   minutes); re-run the script to apply updated limits to existing tasks. Then
+   point monitoring at `GET /health` (§4) — it answers `503` while the metadata
+   DB is unreachable, storage cannot be written, the volume is under
+   `limits.min_free_disk_bytes`, or the pool has not finished a pass within
+   `worker.max_silence_seconds`, which is how you notice a scheduled task that
+   stopped firing.
 6. **Decide the history retention.** Every `cleanup.retention.*` window ships
    at `0` (keep forever), so nothing is pruned until you set it. Pick the
    numbers with whoever owns the metadata DB (§3 recommends
