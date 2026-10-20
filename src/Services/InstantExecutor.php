@@ -162,8 +162,14 @@ final class InstantExecutor
                         try {
                             $inlineBytes += $writer->writeRow($row);
                         } catch (\RuntimeException $e) {
-                            $fileOk = false; // keep serving inline; drop the file
+                            // Keep serving inline; drop the file. The discard()
+                            // is not optional: the open {id}.json.tmp would
+                            // otherwise outlive the request, and no sweep can
+                            // reclaim it (the execution row exists and its
+                            // result_path is NULL).
+                            $fileOk = false;
                             $fileError = Str::truncate($e->getMessage(), 1800);
+                            $writer->discard();
                         }
                     } else {
                         $inlineBytes += strlen((string)json_encode($row));
@@ -256,6 +262,14 @@ final class InstantExecutor
     ): void {
         $db = Db::instance();
         $readyAt = Time::now();
+
+        // Safety net for the paths that set $fileOk = false before any row was
+        // written (the free-space floor): discard() is a no-op unless a file is
+        // actually open. The per-row failure path already discarded its temp
+        // file, so a published result is never touched here.
+        if (!$fileOk && $writer->touched()) {
+            $writer->discard();
+        }
 
         if ($fileOk) {
             try {

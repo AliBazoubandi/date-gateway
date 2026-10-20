@@ -104,6 +104,7 @@ $suites = [
     ['transaction_test', 'submit + finalize atomicity', []],
     ['column_names_test', 'duplicate column naming', []],
     ['instant_ttl_test', 'instant cache window clamp', []],
+    ['instant_file_leak_test', 'failed instant file leaves no .tmp', []],
     ['health_test', 'GET /health checks + 200/503 verdict', []],
     ['api_smoke', 'end-to-end API over php -S', []],
     ['admin_smoke', 'end-to-end admin panel over php -S', []],
