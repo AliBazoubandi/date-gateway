@@ -37,6 +37,7 @@ $codeClamp = "smk{$run}.instant_clamp";
 
 $codeIdemInst = "smk{$run}.idem_instant";
 $codeIdemDelay = "smk{$run}.idem_delayed";
+$codeIdemFlight = "smk{$run}.idem_flight";
 
 $db = db();
 $clientIds = [];
@@ -114,8 +115,10 @@ $reqClamp = $addRequest($codeClamp, 'instant', 30, 100, 86400, 'SELECT 1 AS ping
 // only ever come from the key.
 $reqIdemInst = $addRequest($codeIdemInst, 'instant', 30, 100, 0, 'SELECT 1 AS ping');
 $reqIdemDelay = $addRequest($codeIdemDelay, 'delayed', 30, 1000, 0, 'SELECT 1 AS ping');
+// Slow enough that two submits with the same key really overlap.
+$reqIdemFlight = $addRequest($codeIdemFlight, 'instant', 30, 100, 0, 'SELECT SLEEP(2) AS slow, 1 AS ping');
 array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss, $reqClamp,
-    $reqIdemInst, $reqIdemDelay);
+    $reqIdemInst, $reqIdemDelay, $reqIdemFlight);
 
 $mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
@@ -143,6 +146,8 @@ $db->execute(
     'INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)',
     [$A['id'], $reqIdemInst, $now, $A['id'], $reqIdemDelay, $now, $B['id'], $reqIdemInst, $now]
 );
+$db->execute('INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?)',
+    [$A['id'], $reqIdemFlight, $now]);
 
 // ----------------- dev server + curl harness -----------------
 // Random port: a stale or sibling server must never answer instead of us.
@@ -529,6 +534,129 @@ $check('the same key for another client is its own submission', $code === 200
     && ($idemB['call_id'] ?? '') !== $iCall
     && (int)$db->value('SELECT COUNT(*) FROM calls WHERE client_id = ? AND idempotency_key_hash = ?',
         [$B['id'], hash('sha256', $iKey)]) === 1, substr((string)$body, 0, 200));
+
+// ------------------- a key whose instant run is still in flight -------------------
+// BUG 1: the retry used to fall through and start a SECOND execution + call for
+// one logical submission whenever the first run outlived the 10 s lock wait.
+// The state that reproduces it is exactly this: a prior call whose execution is
+// still `running`. The retry must answer 409 and write nothing.
+$flightKey = 'idem-' . $run . '-flight';
+$flightHash = hash('sha256', $flightKey);
+$flightCall = \Core\Str::hex(16);
+$db->execute(
+    "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, row_count, truncated)
+     VALUES (?, 'instant', 'running', ?, ?, 0, 0)",
+    [$reqIdemInst, $now, $now]
+);
+$flightExec = $db->insertId();
+$db->execute(
+    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+    [$flightCall, $A['id'], $reqIdemInst, $flightExec, hash('sha256', \Core\Str::hex(24)),
+        Encryption::encrypt(\Core\Str::hex(24)), $flightHash, $now, '127.0.0.1']
+);
+$flightExecs = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]);
+$flightCalls = (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemInst]);
+[$code, $body, , $flightHeaders] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], true,
+    ['Idempotency-Key: ' . $flightKey]);
+$check('in-flight instant submit -> 409 submission_in_progress', $code === 409
+    && $getErr($body) === 'submission_in_progress'
+    && str_contains($body, 'still running'), $body);
+$check('the 409 carries Retry-After: 5', (bool)preg_match('/^retry-after:\s*5\s*$/mi', $flightHeaders),
+    trim(str_replace("\r\n", ' | ', $flightHeaders)));
+$check('the in-flight retry starts no execution and no call',
+    (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $flightExecs
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemInst]) === $flightCalls);
+$check('the in-flight retry is not logged as a replay',
+    (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'idempotent_replay' AND call_id = ?",
+        [$flightCall]) === 0);
+
+// Once that same run is ready, the retry replays it: same call, same link, and
+// still no second execution.
+$flightFile = bin2hex(random_bytes(8)) . '.json';
+$flightJson = json_encode(['data' => [['ping' => '9']], 'meta' => ['mode' => 'instant']],
+    JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+file_put_contents(\Core\Filesystem::resultsDir() . '/' . $flightFile, $flightJson);
+$extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $flightFile;
+$db->execute(
+    "UPDATE executions SET status = 'ready', finished_at = NOW(), ready_at = NOW(),
+        expires_at = DATE_ADD(NOW(), INTERVAL 15 MINUTE), result_path = ?, row_count = 1
+     WHERE id = ?",
+    ['results/' . $flightFile, $flightExec]
+);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeIdemInst, $A['key'], false,
+    ['Idempotency-Key: ' . $flightKey]);
+$flightReplay = json_decode($body, true);
+$flightLink = \Api\Links::forCall($flightCall);
+$check('the ready retry replays the same call and link', $code === 200
+    && ($flightReplay['call_id'] ?? '') === $flightCall
+    && ($flightReplay['link'] ?? null) === $flightLink
+    && ($flightReplay['data'][0]['ping'] ?? '') === '9', substr((string)$body, 0, 220));
+$check('the ready replay still ran nothing',
+    (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $flightExecs
+    && (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemInst]) === $flightCalls);
+
+// Two submits with one key fired together at a 2 s query. Whichever order the
+// dev server gives them, the invariant is one execution and one call: the
+// loser either sees the winner in flight (409) or replays it (200).
+$raceKey = 'idem-' . $run . '-race';
+$raceHeaders = ['Authorization: Bearer ' . $A['key'], 'Idempotency-Key: ' . $raceKey];
+$multi = curl_multi_init();
+$raceHandles = [];
+for ($i = 0; $i < 2; $i++) {
+    $ch = curl_init('http://127.0.0.1:' . $port . '/api/v1/request/' . $codeIdemFlight);
+    curl_setopt_array($ch, [
+        CURLOPT_POST => true,
+        CURLOPT_POSTFIELDS => '',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_HTTPHEADER => $raceHeaders,
+    ]);
+    curl_multi_add_handle($multi, $ch);
+    $raceHandles[] = $ch;
+}
+do {
+    $mrc = curl_multi_exec($multi, $raceActive);
+    if ($raceActive > 0) {
+        curl_multi_select($multi, 1.0);
+    }
+} while ($raceActive > 0 && $mrc === CURLM_OK);
+$raceResults = [];
+foreach ($raceHandles as $ch) {
+    $raceResults[] = [
+        'code' => (int)curl_getinfo($ch, CURLINFO_RESPONSE_CODE),
+        'body' => (string)curl_multi_getcontent($ch),
+    ];
+    curl_multi_remove_handle($multi, $ch);
+    curl_close($ch);
+}
+curl_multi_close($multi);
+$raceExecs = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemFlight]);
+$raceCalls = (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemFlight]);
+$raceCallIds = [];
+$raceCodes = [];
+$raceLoserOk = true;
+foreach ($raceResults as $res) {
+    $raceCodes[] = $res['code'];
+    $decoded = json_decode($res['body'], true);
+    if ($res['code'] === 200) {
+        $raceCallIds[(string)($decoded['call_id'] ?? '')] = true;
+        if (($decoded['status'] ?? '') !== 'ready' || ($decoded['data'][0]['ping'] ?? null) !== '1') {
+            $raceLoserOk = false;
+        }
+    } elseif ($res['code'] === 409) {
+        if (($decoded['error']['code'] ?? '') !== 'submission_in_progress') {
+            $raceLoserOk = false;
+        }
+    } else {
+        $raceLoserOk = false;
+    }
+}
+sort($raceCodes);
+$check('concurrent same-key submits: exactly one execution and one call',
+    $raceExecs === 1 && $raceCalls === 1, "executions={$raceExecs} calls={$raceCalls} codes=" . implode(',', $raceCodes));
+$check('concurrent same-key submits: the loser gets 409 or the winner\'s answer',
+    $raceLoserOk && count($raceCallIds) === 1, json_encode($raceResults));
 
 // Same header value, different request: the key is scoped per request.
 [$code, $body] = api('POST', '/api/v1/request/' . $codeIdemDelay, $A['key'], false, ['Idempotency-Key: ' . $iKey]);

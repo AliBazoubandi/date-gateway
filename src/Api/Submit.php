@@ -29,6 +29,9 @@ final class Submit
         ExecutionError::TOO_LARGE => 413,
     ];
 
+    /** Retry-After (seconds) on a 409: the in-flight run's next poll is cheap. */
+    private const IN_PROGRESS_RETRY_AFTER = '5';
+
     public static function handle(string $code): void
     {
         if (!Http::isPost()) {
@@ -71,8 +74,15 @@ final class Submit
             // emit, so a second submit with the same key cannot read "no prior
             // call" and start a duplicate run. It dies with the connection.
             $db->lock('gw_idem_' . $clientId . '_' . substr($idemHash, 0, 16), 10);
-            // Only returns when there is nothing replayable to answer with.
-            self::replayPriorSubmission($request, $client, $idemHash, $ip, $asFile);
+            // A prior call that cannot be replayed YET is an in-flight instant
+            // run: answering 409 is the only correct move. Falling through used
+            // to start a second execution and a second call for one logical
+            // submission whenever the first run outlived the 10 s lock wait.
+            if (self::replayPriorSubmission($request, $client, $idemHash, $ip, $asFile)) {
+                Errors::emit(409, 'submission_in_progress',
+                    'A submission with this Idempotency-Key is still running. Retry shortly.',
+                    ['Retry-After' => self::IN_PROGRESS_RETRY_AFTER]);
+            }
         }
 
         self::enforceClientSubmitRate($clientId, $requestId, $ip);
@@ -110,12 +120,15 @@ final class Submit
 
     /**
      * A key this client already used for this request answers the retry from
-     * the call it created: same call_id, same execution, no second run. Falls
-     * through when nothing can be replayed (no prior call, its execution row is
-     * gone, or an instant run still in flight - the instant POST carries the
-     * rows, so a half-finished run has nothing to hand back).
+     * the call it created: same call_id, same execution, no second run.
+     *
+     * @return bool true when a prior call exists but has nothing to hand back
+     *         yet — an instant run that is still `scheduled`/`running`. The
+     *         caller answers 409 `submission_in_progress` and starts nothing;
+     *         returning false means "no prior call, proceed with this submit".
+     *         Every replayable state emits its answer here and never returns.
      */
-    private static function replayPriorSubmission(array $request, array $client, string $idemHash, string $ip, bool $asFile): void
+    private static function replayPriorSubmission(array $request, array $client, string $idemHash, string $ip, bool $asFile): bool
     {
         $clientId = (int)$client['id'];
         $requestId = (int)$request['id'];
@@ -127,7 +140,7 @@ final class Submit
             [$clientId, $requestId, $idemHash]
         );
         if ($prior === null) {
-            return;
+            return false;
         }
         $callId = (string)$prior['call_id'];
         $execId = (int)$prior['id'];
@@ -137,6 +150,13 @@ final class Submit
         if ($status === 'ready' && $prior['expires_at'] !== null
             && (string)$prior['expires_at'] <= Time::now()) {
             $status = 'expired';
+        }
+        $inFlight = (string)$prior['mode'] === 'instant'
+            && ($status === 'scheduled' || $status === 'running');
+        if ($inFlight) {
+            // Not a replay: a retry must not run the query a second time. No
+            // 'idempotent_replay' row either — nothing was replayed.
+            return true;
         }
         Logger::event('idempotent_replay', $clientId, $requestId, $callId, $execId, $ip,
             null, $prior['row_count'] !== null ? (int)$prior['row_count'] : null,
@@ -154,7 +174,7 @@ final class Submit
                 Errors::emit(self::FAILURE_HTTP[$errorCode] ?? 502, $errorCode,
                     ExecutionError::message($errorCode));
             }
-            return; // scheduled|running: no finished result to replay
+            return false; // unreachable: every instant status above emits
         }
 
         json_out([
