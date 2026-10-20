@@ -380,7 +380,18 @@ final class InstantExecutor
             null, (int)$execution['row_count'], 'replayed cached instant result');
 
         $link = Links::forCall($callId);
-        self::emitReady($callId, null, (int)$execution['row_count'], (int)$execution['truncated'] === 1, $rows, $link);
+        // A replayed run reports when THAT run executed, exactly like a fresh
+        // one; null here made a cache hit and an idempotent replay look like
+        // they had no execution time. ready_at is set by finalizeReady; the
+        // finished_at fallback covers rows written before it was.
+        $executedAt = $execution['ready_at'] ?? null;
+        if ($executedAt === null || $executedAt === '') {
+            $executedAt = $execution['finished_at'] ?? null;
+        }
+        // The drivers hand TINYINT back as a string, so compare numerically.
+        $truncated = (int)($execution['truncated'] ?? 0) === 1;
+        self::emitReady($callId, $executedAt === null ? null : (string)$executedAt,
+            (int)$execution['row_count'], $truncated, $rows, $link);
     }
 
     /** @return never */

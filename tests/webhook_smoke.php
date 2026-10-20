@@ -378,6 +378,30 @@ $check('blocked URL: one log row, no curl failure', count($logs) === 1
     && !str_contains((string)($logs[0]['message'] ?? ''), 'curl'),
     json_encode($logs));
 
+// ---- a receiver name that does not resolve is NOT a policy block ------------
+// BUG 10.4: a transient DNS failure used to exhaust the delivery on its first
+// attempt, so the client was never told even after DNS recovered. It now burns
+// an attempt and schedules the normal backoff, exactly like a transport error.
+$clientDns = $mkClient('https://whsmk-' . $run . '-does-not-resolve.invalid/hook');
+[$callDns] = $mkCallDelivery($clientDns);
+[$dCode, $dOut] = $exchange('cli/webhooks.php', null);
+$check('unresolvable receiver: CLI exits 0', $dCode === 0 && !str_contains($dOut, 'ERR::'),
+    substr($dOut, 0, 200));
+$d = $deliveryRow($callDns);
+$check('unresolvable receiver: delivery stays pending for a retry',
+    ($d['state'] ?? '') === 'pending', 'state=' . (string)($d['state'] ?? '-'));
+$check('unresolvable receiver: one attempt is recorded, not zero and not exhausted',
+    (int)($d['attempt'] ?? 0) === 1, 'attempt=' . (string)($d['attempt'] ?? '-'));
+$check('unresolvable receiver: the retry has a time and the reason',
+    ($d['next_retry_at'] ?? null) !== null
+    && str_contains((string)($d['last_error'] ?? ''), 'did not resolve'),
+    'next=' . (string)($d['next_retry_at'] ?? '-') . ' err=' . (string)($d['last_error'] ?? '-'));
+$logs = $db->rows("SELECT event, message FROM request_logs WHERE call_id = ?", [$callDns]);
+$check('unresolvable receiver: logged as a retryable failure',
+    count($logs) === 1 && ($logs[0]['event'] ?? '') === 'webhook_failed'
+    && str_contains((string)($logs[0]['message'] ?? ''), 'retry in'),
+    json_encode($logs));
+
 // --------------------------- final self-clean -------------------------------
 fclose($server);
 if (is_file(Filesystem::absoluteFromRelative($resultRel))) {

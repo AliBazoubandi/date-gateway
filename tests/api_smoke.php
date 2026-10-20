@@ -360,6 +360,9 @@ $check('?download=1 returns the file directly', $code === 200
 $inst2 = json_decode($body, true);
 $check('instant cache hit replays same data', $code === 200 && ($inst2['data'] ?? null) === $inst['data']
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'instant_cache_hit'") >= 1);
+$check('instant cache hit keeps the run\'s executed_at (not null)',
+    is_string($inst2['executed_at'] ?? null) && $inst2['executed_at'] === $inst['executed_at'],
+    json_encode([$inst['executed_at'] ?? null, $inst2['executed_at'] ?? null]));
 
 // P1-2: inline instant size cap -> 413 (run_all sets GATEWAY_INSTANT_MAX_BYTES=2048).
 [$code, $body] = api('POST', '/api/v1/request/' . $codeBig, $A['key']);
@@ -409,6 +412,9 @@ if ($clampExec !== null) {
     $check('clamped window still shares a live run', $code === 200 && $clampCall3 !== null
         && (int)$clampCall3['was_shared'] === 1
         && (int)$clampCall3['execution_id'] === (int)$clampNew, $body);
+    $check('a replayed cache hit reports when the run happened, not null',
+        (bool)preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+03:30$/',
+            (string)($clampThird['executed_at'] ?? '')), var_export($clampThird['executed_at'] ?? null, true));
 }
 
 [$code, $body] = api('POST', '/api/v1/request/' . $codeBad, $A['key']);
@@ -580,7 +586,8 @@ file_put_contents(\Core\Filesystem::resultsDir() . '/' . $flightFile, $flightJso
 $extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $flightFile;
 $db->execute(
     "UPDATE executions SET status = 'ready', finished_at = NOW(), ready_at = NOW(),
-        expires_at = DATE_ADD(NOW(), INTERVAL 15 MINUTE), result_path = ?, row_count = 1
+        expires_at = DATE_ADD(NOW(), INTERVAL 15 MINUTE), result_path = ?, row_count = 1,
+        truncated = 1
      WHERE id = ?",
     ['results/' . $flightFile, $flightExec]
 );
@@ -592,6 +599,10 @@ $check('the ready retry replays the same call and link', $code === 200
     && ($flightReplay['call_id'] ?? '') === $flightCall
     && ($flightReplay['link'] ?? null) === $flightLink
     && ($flightReplay['data'][0]['ping'] ?? '') === '9', substr((string)$body, 0, 220));
+// The drivers return TINYINT as a string; a replayed `truncated` must still be
+// a real boolean true, not the string "1" nor false because '1' !== 1.
+$check('a replayed run keeps its truncated flag as a boolean', ($flightReplay['truncated'] ?? null) === true,
+    var_export($flightReplay['truncated'] ?? null, true));
 $check('the ready replay still ran nothing',
     (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemInst]) === $flightExecs
     && (int)$db->value('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqIdemInst]) === $flightCalls);

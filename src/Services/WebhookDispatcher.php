@@ -35,9 +35,13 @@ use Core\Time;
  *  - The receiver URL is re-checked before every send by Services\WebhookUrl
  *    (scheme, optional host allowlist, and no loopback / link-local / reserved
  *    address; private ranges only while webhook.allow_private_hosts is on). A
- *    URL that fails never reaches curl: the delivery goes to 'exhausted' with
- *    the reason in last_error. An accepted address is pinned for the send with
- *    CURLOPT_RESOLVE, redirects are off, and only http(s) can be spoken.
+ *    URL whose POLICY fails never reaches curl: the delivery goes to
+ *    'exhausted' with the reason in last_error. A name that does not resolve
+ *    right now is treated as transient instead - the attempt is recorded and
+ *    the next retry is scheduled with the normal backoff, so a DNS hiccup does
+ *    not silently lose the client's notification. An accepted address is pinned
+ *    for the send with CURLOPT_RESOLVE, redirects are off, and only http(s) can
+ *    be spoken.
  *
  * Deliveries of clients that cannot receive anything (inactive, or empty
  * webhook_url/webhook_secret) are NOT selected at all - they stay pending and
@@ -103,11 +107,18 @@ final class WebhookDispatcher
 
         // Checked again on every send, not only when the client was saved: a
         // stored URL can predate the policy (or be edited straight in the DB),
-        // and curl must never be handed an address the gate blocks. A blocked
-        // row is exhausted rather than left pending forever — the reason lands
-        // in last_error and the logs for the admin to fix on the client.
+        // and curl must never be handed an address the gate blocks. A URL the
+        // POLICY refuses is exhausted rather than left pending forever — the
+        // reason lands in last_error and the logs for the admin to fix it. A
+        // name that merely does not resolve right now is a transient DNS
+        // condition, so that attempt is retried with the normal backoff instead
+        // of throwing the delivery away on the first DNS hiccup.
         $gate = WebhookUrl::check($url);
         if ($gate['error'] !== '') {
+            if ($gate['retryable']) {
+                return self::recordFailure($call, $callId, $deliveryId, $attempt, 0,
+                    'receiver did not resolve: ' . $gate['error'], null, null, 'delivery attempt');
+            }
             $db->execute(
                 "UPDATE webhook_deliveries
                  SET state = 'exhausted', status_code = NULL, next_retry_at = NULL, last_error = ?
@@ -189,12 +200,40 @@ final class WebhookDispatcher
             return 'sent';
         }
 
-        $maxAttempts = max(1, (int)Config::get('webhook.max_attempts', 5));
-        $backoff = (array)Config::get('webhook.backoff_minutes', [1, 2, 5, 10, 30]);
-        $failedCount = $attempt + 1;
         $detail = $transportError !== ''
             ? $transportError
             : 'HTTP ' . $httpCode;
+        return self::recordFailure($call, $callId, $deliveryId, $attempt, $httpCode, $detail,
+            $durationMs, (int)($exec['row_count'] ?? 0));
+    }
+
+    /**
+     * One failed attempt: schedule the next try with the configured backoff, or
+     * exhaust the row once webhook.max_attempts is used up. Shared by the
+     * transport/HTTP failure path and the retryable URL-gate path (DNS), so the
+     * two cannot drift apart.
+     *
+     * @param array<string,mixed> $call the calls row (client_id, request_id,
+     *        execution_id) the delivery belongs to
+     * @param string $label what failed, for the log line ('send', 'delivery attempt')
+     * @return string 'failed' (retry scheduled) or 'exhausted'
+     */
+    private static function recordFailure(
+        array $call,
+        string $callId,
+        int $deliveryId,
+        int $attempt,
+        int $httpCode,
+        string $detail,
+        ?int $durationMs,
+        ?int $rowCount,
+        string $label = 'send'
+    ): string {
+        $db = Db::instance();
+        $execId = $call['execution_id'] === null ? null : (int)$call['execution_id'];
+        $maxAttempts = max(1, (int)Config::get('webhook.max_attempts', 5));
+        $backoff = (array)Config::get('webhook.backoff_minutes', [1, 2, 5, 10, 30]);
+        $failedCount = $attempt + 1;
 
         if ($failedCount > $maxAttempts) {
             $db->execute(
@@ -203,9 +242,9 @@ final class WebhookDispatcher
                  WHERE id = ? AND state = 'pending'",
                 [$httpCode > 0 ? $httpCode : null, Str::truncate('gave up: ' . $detail, 500), $deliveryId]
             );
-            Logger::event('webhook_failed', (int)$call['client_id'], (int)$exec['request_id'], $callId,
-                (int)$exec['id'], null, $durationMs, (int)($exec['row_count'] ?? 0),
-                'delivery gave up after ' . $failedCount . ' sends: ' . Str::truncate($detail, 300));
+            Logger::event('webhook_failed', (int)$call['client_id'], (int)$call['request_id'], $callId,
+                $execId, null, $durationMs, $rowCount,
+                'delivery gave up after ' . $failedCount . ' ' . $label . 's: ' . Str::truncate($detail, 300));
             return 'exhausted';
         }
 
@@ -217,9 +256,9 @@ final class WebhookDispatcher
              WHERE id = ? AND state = 'pending'",
             [$failedCount, $httpCode > 0 ? $httpCode : null, $nextRetry, Str::truncate($detail, 500), $deliveryId]
         );
-        Logger::event('webhook_failed', (int)$call['client_id'], (int)$exec['request_id'], $callId,
-            (int)$exec['id'], null, $durationMs, (int)($exec['row_count'] ?? 0),
-            'send #' . $failedCount . ' failed (' . $detail . '); retry in ' . max(1, $step) . ' min');
+        Logger::event('webhook_failed', (int)$call['client_id'], (int)$call['request_id'], $callId,
+            $execId, null, $durationMs, $rowCount,
+            $label . ' #' . $failedCount . ' failed (' . $detail . '); retry in ' . max(1, $step) . ' min');
         return 'failed';
     }
 
