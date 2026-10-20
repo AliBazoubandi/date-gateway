@@ -83,6 +83,9 @@ $requestId = $db->insertId();
 $resultRel = "results/whsmk_{$run}_result.json";
 $fixtureFileRels[] = $resultRel;
 $payloadRows = '{"data":[{"ping":"1"}],"meta":{"row_count":1}}';
+// The run's storage dir starts empty (it lives in the system temp dir, see
+// tests/run_all.php), so create results/ before writing a fixture into it.
+Filesystem::prepare();
 file_put_contents(Filesystem::absoluteFromRelative($resultRel), $payloadRows);
 $db->execute(
     "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, finished_at, ready_at,

@@ -24,8 +24,12 @@ $throws = static function (string $relative): bool {
 
 $base = str_replace('\\', '/', realpath(\Core\Filesystem::storageDir()));
 
+// Compare the DIRECTORY's realpath on both sides: the storage path can come
+// from an 8.3 short name (%TEMP% as C:\Users\ALI~1\...), which realpath()
+// expands, so a raw string prefix check would fail on a perfectly good path.
 $ok = \Core\Filesystem::resultPath('results/123.json');
-$check('valid results path resolves', str_starts_with(str_replace('\\', '/', $ok), $base . '/results/'), $ok);
+$check('valid results path resolves',
+    str_replace('\\', '/', (string)realpath(dirname($ok))) === $base . '/results', $ok);
 
 // cache/ is the legacy prefix: prepare() no longer creates it, but a stored
 // path in it must still resolve so an older installation stays downloadable.
@@ -34,7 +38,8 @@ if (!is_dir($legacyCache) && !mkdir($legacyCache, 0770, true)) {
     $check('legacy cache fixture dir created', false);
 }
 $ok = \Core\Filesystem::resultPath('cache/abc.JSON');
-$check('legacy cache path + uppercase ext accepted', str_starts_with(str_replace('\\', '/', $ok), $base . '/cache/'), $ok);
+$check('legacy cache path + uppercase ext accepted',
+    str_replace('\\', '/', (string)realpath(dirname($ok))) === $base . '/cache', $ok);
 
 $check('dot-dot traversal throws', $throws('../config/.env'));
 $check('nested dot-dot throws', $throws('results/../secrets.json'));
