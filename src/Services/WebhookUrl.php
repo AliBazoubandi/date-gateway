@@ -43,15 +43,22 @@ final class WebhookUrl
 
     /**
      * @param string $url a clients.webhook_url value
-     * @return array{error:string,ip:string,resolve:list<string>} error is ''
-     *         when the URL may be posted to, otherwise a message for the admin
-     *         form and webhook_deliveries.last_error; ip is the accepted
-     *         address; resolve holds CURLOPT_RESOLVE entries that pin the name
-     *         to it (empty for a literal address, which cannot be rebound).
+     * @return array{error:string,retryable:bool,ip:string,resolve:list<string>}
+     *         error is '' when the URL may be posted to, otherwise a message
+     *         for the admin form and webhook_deliveries.last_error.
+     *         retryable is true only for a condition that may clear on its own
+     *         (the name does not resolve right now): a delivery then keeps its
+     *         retry/backoff instead of being exhausted on the first attempt.
+     *         A policy refusal (scheme, allowlist, loopback/link-local/private
+     *         address) is permanent and stays false.
+     *         ip is the accepted address; resolve holds CURLOPT_RESOLVE entries
+     *         that pin the name to it (empty for a literal address, which
+     *         cannot be rebound).
      */
     public static function check(string $url): array
     {
-        $reject = static fn (string $why): array => ['error' => $why, 'ip' => '', 'resolve' => []];
+        $reject = static fn (string $why, bool $retryable = false): array =>
+            ['error' => $why, 'retryable' => $retryable, 'ip' => '', 'resolve' => []];
 
         if (strlen($url) > self::MAX_URL_LENGTH) {
             return $reject('Webhook URL is too long.');
@@ -96,10 +103,12 @@ final class WebhookUrl
         } else {
             // IPv4 only by design: gethostbynamel gives no AAAA records, so a
             // name that is only reachable over IPv6 is refused rather than
-            // guessed at.
+            // guessed at. No answer is a TRANSIENT condition (DNS hiccup, the
+            // receiver's name record being updated): retryable, so the
+            // delivery keeps its backoff instead of being written off.
             $addresses = gethostbynamel($host) ?: [];
             if ($addresses === []) {
-                return $reject("Webhook URL host '{$host}' does not resolve.");
+                return $reject("Webhook URL host '{$host}' does not resolve.", true);
             }
         }
 
@@ -113,6 +122,7 @@ final class WebhookUrl
         $port = (int)($parts['port'] ?? $defaultPort);
         return [
             'error' => '',
+            'retryable' => false,
             'ip' => (string)$addresses[0],
             'resolve' => $isLiteral
                 ? []
@@ -120,21 +130,35 @@ final class WebhookUrl
         ];
     }
 
-    /** '' when the address may receive a delivery, otherwise the reason. */
+    /**
+     * '' when the address may receive a delivery, otherwise the reason.
+     *
+     * The address is normalized first: `::ffff:127.0.0.1` and
+     * `::ffff:169.254.169.254` are IPv4 addresses in 16-byte clothing, and
+     * both the OS and curl route them to the embedded IPv4 address. Checking
+     * the raw bytes against v4 ranges never matched (IpRange::inCidr is
+     * family-strict), so loopback and cloud metadata endpoints written in
+     * mapped form were accepted. An address that cannot be parsed at all is
+     * refused rather than allowed to fall through.
+     */
     private static function addressRejection(string $ip): string
     {
-        if (IpRange::inRanges($ip, self::LOOPBACK)) {
+        $address = IpRange::normalize($ip);
+        if ($address === null) {
+            return "Webhook URL host '{$ip}' is not a valid IP address.";
+        }
+        if (IpRange::inRanges($address, self::LOOPBACK)) {
             return self::flag('webhook.allow_loopback')
                 ? ''
-                : "Webhook URL points at a loopback address ({$ip}). Set webhook.allow_loopback for a receiver on this host.";
+                : "Webhook URL points at a loopback address ({$address}). Set webhook.allow_loopback for a receiver on this host.";
         }
-        if (IpRange::inRanges($ip, self::BLOCKED)) {
-            return "Webhook URL points at a blocked address ({$ip}) - link-local, metadata and reserved ranges are never reachable from the gateway.";
+        if (IpRange::inRanges($address, self::BLOCKED)) {
+            return "Webhook URL points at a blocked address ({$address}) - link-local, metadata and reserved ranges are never reachable from the gateway.";
         }
-        if (IpRange::inRanges($ip, self::PRIVATE)) {
+        if (IpRange::inRanges($address, self::PRIVATE)) {
             return self::flag('webhook.allow_private_hosts')
                 ? ''
-                : "Webhook URL points at a private-network address ({$ip}) while webhook.allow_private_hosts is off.";
+                : "Webhook URL points at a private-network address ({$address}) while webhook.allow_private_hosts is off.";
         }
         return '';
     }

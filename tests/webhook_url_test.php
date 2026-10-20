@@ -16,6 +16,7 @@ declare(strict_types=1);
 //        php tests\webhook_url_test.php --check https://10.0.0.5/hook ...
 
 use Core\Config;
+use Core\IpRange;
 use Core\Str;
 use Services\WebhookUrl;
 
@@ -29,6 +30,7 @@ if (($argv[1] ?? '') === '--check') {
         echo json_encode([
             'url' => (string)$url,
             'error' => $r['error'],
+            'retryable' => (bool)$r['retryable'],
             'ip' => $r['ip'],
             'resolve' => $r['resolve'],
         ]), PHP_EOL;
@@ -144,6 +146,11 @@ $run = static function (string $label, array $env, array $cases) use ($apply, $c
             $detail = $pass ? '' : 'resolve ' . json_encode($got['resolve'])
                 . ', wanted ' . json_encode($case['resolve']);
         }
+        if ($pass && array_key_exists('retryable', $case)) {
+            $pass = (bool)($got['retryable'] ?? false) === $case['retryable'];
+            $detail = $pass ? '' : 'retryable ' . json_encode($got['retryable'] ?? null)
+                . ', wanted ' . json_encode($case['retryable']);
+        }
         $check($case['url'] . ($wantError === '' ? ' [accepted]' : ' [rejected]'), $pass, $detail);
     }
 };
@@ -158,10 +165,20 @@ $run('default policy', [], [
     ['url' => 'https://192.168.1.20/hook'],
     ['url' => 'https://172.16.5.4/hook'],
     ['url' => 'https://[fd00::1]/hook', 'ip' => 'fd00::1'],
-    ['url' => 'http://93.184.216.34/hook', 'error' => 'https'],
-    ['url' => 'https://127.0.0.1/hook', 'error' => 'loopback'],
+    ['url' => 'http://93.184.216.34/hook', 'error' => 'https', 'retryable' => false],
+    ['url' => 'https://127.0.0.1/hook', 'error' => 'loopback', 'retryable' => false],
     ['url' => 'https://127.0.0.53/hook', 'error' => 'loopback'],
     ['url' => 'https://[::1]/hook', 'error' => 'loopback'],
+    // IPv4-mapped IPv6: the OS and curl route ::ffff:a.b.c.d to the embedded
+    // IPv4 address, so the policy must classify the embedded one (BUG 3).
+    ['url' => 'https://[::ffff:127.0.0.1]/hook', 'error' => 'loopback'],
+    ['url' => 'https://[::ffff:7f00:1]/hook', 'error' => 'loopback'],
+    ['url' => 'https://[::ffff:169.254.169.254]/latest/meta-data/', 'error' => 'blocked'],
+    ['url' => 'https://[::ffff:10.0.0.5]/hook', 'ip' => '::ffff:10.0.0.5'],
+    ['url' => 'https://[::ffff:192.168.1.20]/hook', 'ip' => '::ffff:192.168.1.20'],
+    ['url' => 'https://[::ffff:8.8.8.8]/hook', 'ip' => '::ffff:8.8.8.8'],
+    ['url' => 'https://[::ffff:100.64.0.1]/hook', 'error' => 'blocked'],
+    ['url' => 'https://[::ffff:0.0.0.0]/hook', 'error' => 'blocked'],
     ['url' => 'https://169.254.169.254/latest/meta-data/', 'error' => 'blocked'],
     ['url' => 'https://169.254.1.1/hook', 'error' => 'blocked'],
     ['url' => 'https://100.64.0.1/hook', 'error' => 'blocked'],
@@ -176,7 +193,9 @@ $run('default policy', [], [
     ['url' => 'https:///hook', 'error' => 'full URL'],
     ['url' => 'https:/hook', 'error' => 'no host'],
     ['url' => 'https://user:pw@93.184.216.34/hook', 'error' => 'credentials'],
-    ['url' => 'https://gateway-host-does-not-exist.invalid/hook', 'error' => 'does not resolve'],
+    // A name that does not resolve is a TRANSIENT condition (DNS), so the
+    // delivery gate reports it retryable; the policy refusals stay permanent.
+    ['url' => 'https://gateway-host-does-not-exist.invalid/hook', 'error' => 'does not resolve', 'retryable' => true],
     ['url' => 'https://' . str_repeat('a', 70) . '.test/hook?x=' . str_repeat('y', 480), 'error' => 'too long'],
 ]);
 
@@ -187,6 +206,8 @@ $run('private hosts refused', ['GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS' => '0'], [
     ['url' => 'https://172.16.5.4/hook', 'error' => 'private-network'],
     ['url' => 'https://192.168.1.20/hook', 'error' => 'private-network'],
     ['url' => 'https://[fd00::1]/hook', 'error' => 'private-network'],
+    ['url' => 'https://[::ffff:10.0.0.5]/hook', 'error' => 'private-network'],
+    ['url' => 'https://[::ffff:127.0.0.1]/hook', 'error' => 'loopback'],
     ['url' => 'https://127.0.0.1/hook', 'error' => 'loopback'],
     ['url' => 'https://169.254.169.254/hook', 'error' => 'blocked'],
 ]);
@@ -240,6 +261,18 @@ if ($localhostV4 === []) {
         ['url' => 'https://LOCALHOST/hook', 'ip' => $ip],
     ]);
 }
+
+// ------------------- the mapping rule itself -------------------
+// WebhookUrl classifies through IpRange::normalize; pin the normalization so a
+// future edit cannot quietly turn mapped addresses back into "unknown".
+$check('normalize: mapped loopback -> v4', IpRange::normalize('::ffff:127.0.0.1') === '127.0.0.1');
+$check('normalize: mapped metadata -> v4', IpRange::normalize('::ffff:169.254.169.254') === '169.254.169.254');
+$check('normalize: the hex spelling of the same bytes', IpRange::normalize('::ffff:7f00:1') === '127.0.0.1');
+$check('normalize: a plain v4 address is unchanged', IpRange::normalize('10.0.0.5') === '10.0.0.5');
+$check('normalize: ::1 is loopback as itself', IpRange::normalize('::1') === '::1');
+$check('normalize: a v6 ULA is unchanged', IpRange::normalize('fd00::1') === 'fd00::1');
+$check('normalize: garbage is null', IpRange::normalize('not-an-ip') === null);
+$check('normalize: empty is null', IpRange::normalize('  ') === null);
 
 // The gate's own config defaults, read in a child that has no webhook
 // overrides in its environment (this process inherited the runner's relaxed
