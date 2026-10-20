@@ -278,13 +278,33 @@ final class Db
      */
     public function lock(string $name, int $waitSeconds = 30): bool
     {
-        $v = $this->value('SELECT GET_LOCK(?, ?)', [$name, $waitSeconds]);
+        $v = $this->value('SELECT GET_LOCK(?, ?)', [$this->scopedLockName($name), $waitSeconds]);
         return (int)$v === 1;
     }
 
     public function unlock(string $name): void
     {
-        $this->execute('SELECT RELEASE_LOCK(?)', [$name]);
+        $this->execute('SELECT RELEASE_LOCK(?)', [$this->scopedLockName($name)]);
+    }
+
+    /**
+     * GET_LOCK names are server-wide, not per-schema, so a suite running against
+     * a throwaway database on the same MariaDB as a live deployment would fence
+     * (or be fenced by) the production worker on the identical name. In the
+     * throwaway test environment only, the name is scoped to that schema, which
+     * is what makes a test run independent of whatever else the server is doing.
+     */
+    private function scopedLockName(string $name): string
+    {
+        if (getenv('GATEWAY_TEST_MODE') !== '1') {
+            return $name;
+        }
+        $database = (string)Config::get('metadata_db.database', '');
+        if (!str_contains($database, '_test')) {
+            return $name;
+        }
+        $suffix = (string)substr(strrchr($database, '_'), 1);
+        return substr($name, 0, 64 - strlen($suffix) - 1) . '_' . $suffix;
     }
 
     public function ping(): bool
