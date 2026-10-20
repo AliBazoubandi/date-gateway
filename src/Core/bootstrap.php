@@ -122,7 +122,8 @@ function client_ip(): string
 }
 
 // Guard for destructive test scripts (smoke tests): refuse to run unless the
-// dedicated throwaway environment is active. tests\run_all.ps1 sets both.
+// dedicated throwaway environment is active. tests\run_all.php sets both;
+// tests\run_all.ps1 is the Windows wrapper that calls it.
 function test_guard(): void
 {
     $dbName = (string)Core\Config::get('metadata_db.database', '');

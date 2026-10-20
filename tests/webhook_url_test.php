@@ -191,7 +191,7 @@ $run('private hosts refused', ['GATEWAY_WEBHOOK_ALLOW_PRIVATE_HOSTS' => '0'], [
     ['url' => 'https://169.254.169.254/hook', 'error' => 'blocked'],
 ]);
 
-// ------------------- the test-environment shape (run_all.ps1) -------------------
+// ------------------- the test-environment shape (run_all.php) -------------------
 // What webhook_smoke's receiver needs: http on 127.0.0.1. Reserved ranges must
 // stay blocked even with both relaxations on.
 $run('http + loopback allowed', [

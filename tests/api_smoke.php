@@ -18,7 +18,7 @@ test_guard();
 require __DIR__ . '/../src/Core/Filesystem.php';
 
 // ----------------- per-run fixtures (unique names, self-cleaning) -----------------
-// run_all.ps1 points the gateway at a throwaway DB + storage dir (see
+// run_all.php points the gateway at a throwaway DB + storage dir (see
 // test_guard). Every fixture name carries the random run id, and the
 // registered shutdown cleanup removes exactly this run's rows and files —
 // a failed run leaves nothing behind and real data is never matched.

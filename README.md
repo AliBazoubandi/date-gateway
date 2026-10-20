@@ -780,9 +780,10 @@ than holding a worker slot for the whole timeout.
 
 ## 9. Tests
 
-**Safe path — `tests\run_all.ps1`** (PowerShell, no elevation needed): builds
-a throwaway environment itself — random `data_gateway_test_<random>` schema
-(imported from `sql\schema.sql`), throwaway `storage\test-<random>` dir — and
+**Safe path — `tests\run_all.php`** (portable: Windows, Linux, macOS; no
+elevation needed): builds a throwaway environment itself — random
+`data_gateway_test_<random>` schema (imported from `sql\schema.sql`), throwaway
+`storage\test-<random>` dir — and
 runs everything against it: `php -l` on every file, `smoke_db`,
 `encryption_test --db`, `links_test`, `filesystem_test`, `sqlguard_test`,
 `readonly_driver_test`, `pool_test`, `resultwriter_test`, `throttle_test`,
@@ -812,18 +813,39 @@ one child process per policy) plus `stream_memory_test`, each refusing to run
 unless
 `GATEWAY_TEST_MODE=1` and
 the metadata DB name contains `_test` (they `exit(2)` otherwise). The DB and
-storage dir are always dropped in a `finally` block, and every fixture is
-run-scoped, so a green run touches nothing outside its sandbox:
+storage dir are always dropped by a shutdown handler, even when a suite fails
+or the runner is interrupted, and every fixture is run-scoped, so a green run
+touches nothing outside its sandbox:
 
 ```
 powershell -ExecutionPolicy Bypass -File tests\run_all.ps1
 ```
 
+`run_all.ps1` is only the Windows entry point: it finds `php` (and optionally
+`mysql`) and hands them to `tests\run_all.php`, so the local run and CI execute
+the same code. Run the PHP runner directly for the other options
+(`--list`, `--only=name,name`, `--rows=N`, `--keep`, `--root-host/--root-port`
+for an admin connection that is not the local socket default).
+
+**CI — `.github/workflows/ci.yml`.** On every push, pull request and manual
+dispatch, Ubuntu runners on PHP **8.1 and 8.2** (extensions `mysqli`,
+`mbstring`, `curl`, `memory_limit=256M`) start a `mariadb:10.11` service
+container and run `php tests/run_all.php --root-host=127.0.0.1` against it. No
+target SQL Server or PostgreSQL is contacted: the suites that cover those
+drivers assert the option builders and the connect-failure path, and the SQL
+Server driver's missing extension on Linux is itself a `DbConnectException`,
+which is what `driver_tls_test` expects. Static analysis is deliberately **not**
+in the workflow: `composer.json` declares no packages, so there is no way to get
+`phpstan` onto a runner without introducing a dependency tree the gateway does
+not have — and the `php -l` suite already catches the class of error a tool
+would catch without the runtime wiring. The workflow is unverified until the
+repository has a remote and a first push runs it.
+
 Running the smoke scripts **directly** against a real `data_gateway` is no
 longer supported — the guards above refuse it on purpose.
 
 Two scripts in `tests\` are manual inspectors and are **not** called by
-`run_all.ps1`: `audit_spot.php` prints the newest `admin_audit_log` rows from
+`run_all.php`: `audit_spot.php` prints the newest `admin_audit_log` rows from
 whatever DB is configured (the smokes clean up after themselves, so it is only
 useful against a database with real admin activity), and `driver_test.php`
 opens a live connection to a target and needs its actual credentials.

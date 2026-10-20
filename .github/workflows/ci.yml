@@ -1,0 +1,72 @@
+name: tests
+
+# The same runner the README documents, on Linux: a throwaway MariaDB schema
+# per job, no target databases, no live storage. tests/run_all.php creates and
+# drops both itself; this workflow only provides the binaries and the admin
+# account it needs.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  php:
+    name: PHP ${{ matrix.php }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.1', '8.2']
+
+    services:
+      mariadb:
+        image: mariadb:10.11
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="health.sh --connect-timeout 5 --retry 10"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          # openssl and json are compiled in; sqlsrv/pgsql are Windows/optional
+          # target drivers and no suite needs them (driver_tls_test asserts the
+          # option builder and accepts a missing extension).
+          php-version: ${{ matrix.php }}
+          extensions: mysqli, mbstring, curl
+          ini-values: memory_limit=256M, display_errors=stderr
+          coverage: none
+
+      - name: Wait for MariaDB and create the accounts the suites use
+        run: |
+          # Port-forwarded service container: there is no local socket, so every
+          # connection - the runner's admin one included - goes over TCP.
+          ready=0
+          for i in $(seq 1 30); do
+            if mysqladmin -h 127.0.0.1 -P 3306 -u root ping; then ready=1; break; fi
+            sleep 2
+          done
+          [ "$ready" = "1" ] || { echo "MariaDB never became ready"; exit 1; }
+          mysql -h 127.0.0.1 -u root <<'SQL'
+            # The gateway account (config default user, empty password in CI);
+            # run_all.php grants it only on its own throwaway schema.
+            CREATE USER IF NOT EXISTS 'gateway'@'localhost';
+            CREATE USER IF NOT EXISTS 'gateway'@'127.0.0.1';
+            # stream_memory_test builds a bulk temp schema and needs DDL rights.
+            CREATE USER IF NOT EXISTS 'root'@'127.0.0.1' IDENTIFIED BY '';
+            GRANT ALL PRIVILEGES ON *.* TO 'root'@'127.0.0.1' WITH GRANT OPTION;
+            FLUSH PRIVILEGES;
+          SQL
+
+      - name: Run the test suite
+        run: php tests/run_all.php --mysql=mysql --php=php --root-host=127.0.0.1 --root-port=3306
