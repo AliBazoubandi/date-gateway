@@ -20,7 +20,7 @@ final class ConnectionController
             'SELECT c.*, (SELECT COUNT(*) FROM requests r WHERE r.connection_id = c.id) AS requests_count
              FROM connections c ORDER BY c.name'
         );
-        View::render('connections/list', ['rows' => $rows], 'Connections');
+        View::render('connections/list', ['rows' => $rows], 'Connections', 'conn-list');
     }
 
     /** @param int $id 0 = new */

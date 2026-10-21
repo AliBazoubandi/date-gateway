@@ -1,0 +1,235 @@
+/* ============================================================================
+   Data Gateway — Control Room design tokens.
+   Dark is the default; html[data-theme="light"] overrides. The theme chosen
+   before paint lives in localStorage('gw-theme') (set by an inline script in
+   <head>, which also honours prefers-color-scheme on first visit).
+   ========================================================================== */
+
+/* --- Self-hosted fonts (no CDN). Variable weights, single file each. ------ */
+@font-face {
+  font-family: 'Geist';
+  src: url('../fonts/Geist-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('../fonts/GeistMono-Variable.woff2') format('woff2');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* --- DARK (default) ------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg: #0B0E14;
+  --surface: #121722;
+  --raised: #1A2130;
+  --hairline: #263044;
+  --overlay: rgba(9, 12, 19, 0.66);        /* modal/drawer scrim */
+  --glass: rgba(18, 23, 34, 0.78);         /* drawer + menus + palette */
+  --glass-line: rgba(124, 108, 255, 0.16);
+
+  /* Ink */
+  --text: #E6EAF2;
+  --muted: #8A94A8;
+  --faint: #5F6980;                         /* weakest legible ink */
+  --heading: #F1F4FA;
+
+  /* Accents (deep background variants + readable-on-bg pairs) */
+  --primary: #7C6CFF;
+  --primary-ink: #A79CFF;                   /* text-on-dark variant */
+  --primary-soft: rgba(124, 108, 255, 0.14);
+  --ok: #2FE6B0;
+  --ok-ink: #2FE6B0;
+  --ok-soft: rgba(47, 230, 176, 0.12);
+  --warn: #FFB547;
+  --warn-ink: #FFB547;
+  --warn-soft: rgba(255, 181, 71, 0.12);
+  --danger: #FF5C6C;
+  --danger-ink: #FF5C6C;
+  --danger-soft: rgba(255, 92, 108, 0.12);
+  --info: #4CC2FF;
+  --info-ink: #4CC2FF;
+  --info-soft: rgba(76, 194, 255, 0.12);
+
+  /* Focus + selection */
+  --ring: rgba(124, 108, 255, 0.65);
+  --ring-off: rgba(124, 108, 255, 0.25);
+  --sel: rgba(124, 108, 255, 0.28);
+  --hover: rgba(124, 108, 255, 0.09);      /* shared hover wash */
+  --on-primary: #171326;                   /* text on electric indigo */
+  --row-line: rgba(230, 234, 242, 0.055);  /* table row hairline */
+
+  /* Heatmap scale (7x24 activity) */
+  --heat-0: rgba(124, 108, 255, 0.07);
+  --heat-1: rgba(124, 108, 255, 0.26);
+  --heat-2: rgba(124, 108, 255, 0.48);
+  --heat-3: rgba(124, 108, 255, 0.72);
+  --heat-4: #7C6CFF;
+
+  /* Terminal (dark even in light theme) */
+  --term-bg: #0A0D13;
+  --term-line: rgba(124, 108, 255, 0.08);
+
+  /* Geometry */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --rail-w: 64px;
+  --rail-w-open: 236px;
+  --strip-h: 54px;
+
+  /* Motion */
+  --t-fast: 150ms;
+  --t-med: 200ms;
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --spring: cubic-bezier(0.34, 1.4, 0.5, 1);
+
+  /* Elevation + glow (glow ONLY on live/active things) */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow-2: 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-3: 0 24px 70px rgba(0, 0, 0, 0.55);
+  --glow-primary: 0 0 0 1px rgba(124, 108, 255, 0.4), 0 0 20px rgba(124, 108, 255, 0.35);
+  --glow-ok: 0 0 0 1px rgba(47, 230, 176, 0.35), 0 0 16px rgba(47, 230, 176, 0.28);
+  --glow-danger: 0 0 0 1px rgba(255, 92, 108, 0.4), 0 0 16px rgba(255, 92, 108, 0.3);
+
+  /* Type */
+  --font-ui: 'Geist', 'Vazirmatn', system-ui, -apple-system, 'Segoe UI', Tahoma, sans-serif;
+  --font-mono: 'Geist Mono', 'Cascadia Mono', 'SF Mono', Consolas, 'Courier New', monospace;
+
+  /* Grid texture ink */
+  --grid-ink: rgba(125, 140, 180, 0.045);
+  --grid-ink-strong: rgba(125, 140, 180, 0.08);
+}
+
+/* --- LIGHT --------------------------------------------------------------- */
+html[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #F5F6FA;
+  --surface: #FFFFFF;
+  --raised: #FFFFFF;
+  --hairline: #DDE2EC;
+  --overlay: rgba(15, 18, 28, 0.38);
+  --glass: rgba(255, 255, 255, 0.86);
+  --glass-line: rgba(91, 75, 225, 0.18);
+
+  --text: #1A2030;
+  --muted: #5A6478;
+  --faint: #8A93A6;
+  --heading: #10151F;
+
+  /* Deepened accents for AA on white */
+  --primary: #5B4BE1;
+  --primary-ink: #4F3FE0;
+  --primary-soft: rgba(91, 75, 225, 0.10);
+  --ok: #0B9F78;
+  --ok-ink: #0B9F78;
+  --ok-soft: rgba(11, 159, 120, 0.10);
+  --warn: #A26500;
+  --warn-ink: #8F5A00;
+  --warn-soft: rgba(171, 108, 0, 0.12);
+  --danger: #D2334F;
+  --danger-ink: #C42A45;
+  --danger-soft: rgba(210, 51, 79, 0.09);
+  --info: #1D88C4;
+  --info-ink: #1D88C4;
+  --info-soft: rgba(29, 136, 196, 0.10);
+
+  --ring: rgba(91, 75, 225, 0.55);
+  --ring-off: rgba(91, 75, 225, 0.22);
+  --sel: rgba(91, 75, 225, 0.20);
+  --hover: rgba(91, 75, 225, 0.07);
+  --on-primary: #FFFFFF;
+  --row-line: rgba(26, 32, 48, 0.07);
+
+  --heat-0: rgba(91, 75, 225, 0.08);
+  --heat-1: rgba(91, 75, 225, 0.24);
+  --heat-2: rgba(91, 75, 225, 0.46);
+  --heat-3: rgba(91, 75, 225, 0.68);
+  --heat-4: #5B4BE1;
+
+  --term-bg: #10141C;
+  --term-line: rgba(255, 255, 255, 0.05);
+
+  --shadow-1: 0 1px 2px rgba(16, 21, 31, 0.08);
+  --shadow-2: 0 8px 28px rgba(16, 21, 31, 0.12);
+  --shadow-3: 0 24px 70px rgba(16, 21, 31, 0.18);
+  --glow-primary: 0 0 0 1px rgba(91, 75, 225, 0.35), 0 0 18px rgba(91, 75, 225, 0.25);
+  --glow-ok: 0 0 0 1px rgba(11, 159, 120, 0.4), 0 0 14px rgba(11, 159, 120, 0.22);
+  --glow-danger: 0 0 0 1px rgba(210, 51, 79, 0.4), 0 0 14px rgba(210, 51, 79, 0.22);
+
+  --grid-ink: rgba(90, 100, 140, 0.055);
+  --grid-ink-strong: rgba(90, 100, 140, 0.09);
+}
+
+/* ============================================================================
+   Base
+   ========================================================================== */
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Faint background grid — a static texture, never animated */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    radial-gradient(1200px 500px at 18% -10%, rgba(124, 108, 255, 0.06), transparent 62%),
+    linear-gradient(var(--grid-ink) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-ink) 1px, transparent 1px);
+  background-size: 100% 100%, 34px 34px, 34px 34px;
+}
+
+::selection { background: var(--sel); color: var(--heading); }
+
+/* Scrollbars (WebKit + Firefox) */
+* { scrollbar-width: thin; scrollbar-color: var(--hairline) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--hairline);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: var(--muted); }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Numbers all render tabular — KPI tiles, tables, timers, badges */
+.tnum, td, .kpi b, .badge, .lane-meta, .mono {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono { font-family: var(--font-mono); }

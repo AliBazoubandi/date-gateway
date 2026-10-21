@@ -196,7 +196,7 @@ $check('login page again', $code === 200);
 [$code, $body] = http('POST', '/admin/login', [
     '_csrf' => csrf($body), 'username' => $adminName, 'password' => 'test!pass123',
 ]);
-$check('login succeeds -> dashboard', str_contains($body, 'Dashboard'));
+$check('login succeeds -> overview panel', str_contains($body, 'Overview'));
 
 // Connection CRUD ---------------------------------------------------------
 [$code, $body] = http('GET', '/admin/connections/new');
@@ -378,7 +378,7 @@ curl_close($ch);
 // Logout requires POST + CSRF; a plain GET must not log anyone out -----------
 // Discriminator: the logout form (action="/admin/logout") renders only when
 // authenticated ($admin !== null in header.php); "Admin login" only on the
-// login page. The nav "Dashboard" link appears on both, so it is not usable.
+// login page. The "Overview" nav link appears on both, so it is not usable.
 [, $body] = http('GET', '/admin/logout');
 $check('GET logout does not log out (link CSRF safe)', str_contains($body, 'action="/admin/logout"'));
 
@@ -406,7 +406,7 @@ $check('manual logout audited',
 [$code, $body] = http('POST', '/admin/login', [
     '_csrf' => csrf($body), 'username' => $adminName, 'password' => 'test!pass123',
 ]);
-$check('logged in again for the session checks', str_contains($body, 'Dashboard'));
+$check('logged in again for the session checks', str_contains($body, 'Overview'));
 $check('successful logins audited',
     (int)db()->value("SELECT COUNT(*) FROM admin_audit_log WHERE entity_type = 'admin' AND action = 'login'
         AND admin_user_id = ?", [$adminId]) >= 2);
@@ -445,7 +445,7 @@ $check('idle logout audited',
 [$code, $body] = http('POST', '/admin/login', [
     '_csrf' => csrf($body), 'username' => $adminName, 'password' => 'test!pass123',
 ]);
-$check('logged in after the idle logout', str_contains($body, 'Dashboard'));
+$check('logged in after the idle logout', str_contains($body, 'Overview'));
 $beforeVersion = (int)db()->value('SELECT session_version FROM admin_users WHERE id = ?', [$adminId]);
 shell_exec('php "' . $root . '/cli/create_admin.php" --username=' . $adminName . ' --password=test!pass123');
 $afterVersion = (int)db()->value('SELECT session_version FROM admin_users WHERE id = ?', [$adminId]);

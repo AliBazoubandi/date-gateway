@@ -1365,19 +1365,32 @@ grant.
 
 ## 13. Admin panel: sessions, auditing, known limitations
 
-**Look and feel (2026-10 redesign).** A console-style shell: always-dark
-sidebar navigation with icons (a narrow icon rail with hover tooltips below
-1080 px), and light/dark page themes switched by the sun/moon button in the
-rail — the browser remembers the choice (`localStorage['gw-theme']`, falling
-back to the OS `prefers-color-scheme` on first visit). Client-side
- niceties, all progressive enhancements that degrade to plain links and
-tables without JavaScript: a quick-search palette (Ctrl+K / ⌘K),
-click-to-sort list tables on requests/connections/clients, copy buttons
-beside revealed API keys and webhook secrets, and count-up dashboard
-tiles. Everything is presentation only: one stylesheet
-(`public/assets/styles.css`), inline scripts allowed by the CSP, no
-frameworks, no external fonts or CDN assets (the CSP forbids them), and no
-changes to controllers, forms or the markup the smoke test asserts.
+**Look and feel (2026-10 redesign, round 3 "Control Room").** A console-style
+shell: an icon rail that opens on hover (and can be pinned, remembered in
+`localStorage['gw-rail']`), a sticky top strip with breadcrumbs, a search
+trigger, a worker-heartbeat chip (green <2 min, amber <5 min, coral beyond,
+read straight from `worker_state` — no new table) and light/dark theme. The
+theme is dark-first: `localStorage['gw-theme']` wins, else the OS
+`prefers-color-scheme`, else dark. On-page niceties, all progressive
+enhancements that degrade to plain links and tables without JavaScript:
+a command palette (Ctrl+K, `/`, `g`-mnemonic routes like `g l` → logs),
+click-to-sort list tables, copy buttons beside revealed API keys and webhook
+secrets, count-up tiles, countdown rings on pipeline cards, a live log tail
+polled from `/admin/api/tail` and a call-inspector drawer fed from
+`/admin/api/call`. The overview page polls `/admin/api/state` every 4 s and
+pauses while the tab is hidden (no websockets).
+
+Everything is presentational and self-hosted: tokens in
+`public/assets/css/tokens.css`, components in
+`public/assets/css/components.css`, one behaviour file
+(`public/assets/js/admin.js`), Geist + Geist Mono WOFF2s under
+`assets/fonts/`, CodeMirror 5 under `assets/codemirror/` (SQL editor only)
+and an SVG icon sprite under `assets/icons.svg`. No frameworks, no CDN (the
+CSP forbids them), no build step. The panel mirrors for RTL text with
+`GATEWAY_ADMIN_DIRECTION=rtl` (logical CSS properties throughout) and
+`GATEWAY_ADMIN_LANGUAGE` sets `<html lang>`. Admin Users lives at
+`/admin/admins` (create + enable/disable, audited); the old dashboard route
+now renders the overview.
 
 The panel is a single-user-per-account, cookie-authenticated app with no
 framework in front of it. What it does guarantee:

@@ -63,7 +63,7 @@ final class LogController
             'page' => $page,
             'pages' => $pages,
             'qs' => self::queryString($f),
-        ], 'Request logs');
+        ], 'Request logs', 'logs');
     }
 
     /** @return array<string,mixed> validated filter inputs */

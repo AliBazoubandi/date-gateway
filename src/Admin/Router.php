@@ -83,6 +83,27 @@ final class Router
                 Controllers\AuditController::index();
                 return;
 
+            case 'api':
+                // GET-only JSON under /admin/api/*; session-gated inside.
+                if (Http::isPost()) {
+                    self::notFound();
+                    return;
+                }
+                Controllers\ApiController::dispatch($sub);
+                return;
+
+            case 'admins':
+                if (Http::isPost()) {
+                    if ($action === 'toggle') {
+                        Controllers\AdminsController::toggle($id);
+                    } else {
+                        Controllers\AdminsController::create();
+                    }
+                    return;
+                }
+                Controllers\AdminsController::list();
+                return;
+
             default:
                 self::notFound();
         }

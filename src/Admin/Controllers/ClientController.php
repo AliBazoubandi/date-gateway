@@ -50,7 +50,7 @@ final class ClientController
             }
         }
         View::render('clients/edit', ['row' => $row, 'requests' => $requests, 'granted' => $granted, 'errors' => $errors],
-            $row['id'] ?? 0 ? 'Edit client' : 'New client');
+            $row['id'] ?? 0 ? 'Edit client' : 'New client', 'client-edit');
     }
 
     public static function save(int $id): void

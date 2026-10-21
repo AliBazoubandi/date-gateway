@@ -17,15 +17,84 @@ final class RequestController
 {
     public static function list(): void
     {
-        $rows = Db::instance()->rows(
+        $db = Db::instance();
+
+        // --- filters (GET): q texts, mode/connection/active whitelisted ------
+        $f = [
+            'q'       => trim((string)(Http::param('q', 'g') ?? '')),
+            'mode'    => (string)(Http::param('mode', 'g') ?? ''),
+            'conn'    => (string)(Http::param('connection', 'g') ?? ''),
+            'active'  => (string)(Http::param('active', 'g') ?? ''),
+        ];
+        $f['mode']   = in_array($f['mode'], ['delayed', 'instant'], true) ? $f['mode'] : '';
+        $f['active'] = in_array($f['active'], ['0', '1'], true) ? $f['active'] : '';
+
+        $where = '';
+        $params = [];
+        if ($f['q'] !== '') {
+            $like = '%' . str_replace(['\\', '%', '_'], ['\\\\', '\\%', '\\_'], $f['q']) . '%';
+            $where .= ' WHERE (r.code LIKE ? OR r.name LIKE ?)';
+            $params[] = $like;
+            $params[] = $like;
+        }
+        if ($f['mode'] !== '') {
+            $where .= ($where === '' ? ' WHERE' : ' AND') . ' r.response_mode = ?';
+            $params[] = $f['mode'];
+        }
+        if (ctype_digit($f['conn']) && (int)$f['conn'] > 0) {
+            $where .= ($where === '' ? ' WHERE' : ' AND') . ' r.connection_id = ?';
+            $params[] = (int)$f['conn'];
+        }
+        if ($f['active'] !== '') {
+            $where .= ($where === '' ? ' WHERE' : ' AND') . ' r.is_active = ?';
+            $params[] = (int)$f['active'];
+        }
+
+        $rows = $db->rows(
             'SELECT r.id, r.code, r.name, r.response_mode, r.is_active, r.timeout_seconds, r.max_rows,
                     r.delay_minutes, r.ttl_minutes, r.instant_cache_seconds,
-                    c.name AS connection_name, c.db_type
+                    r.updated_at, r.updated_by,
+                    c.name AS connection_name, c.db_type,
+                    (SELECT COUNT(*) FROM executions e WHERE e.request_id = r.id) AS runs_total
              FROM requests r
-             JOIN connections c ON c.id = r.connection_id
-             ORDER BY r.code'
+             JOIN connections c ON c.id = r.connection_id'
+            . $where
+            . ' ORDER BY r.code',
+            $params
         );
-        View::render('requests/list', ['rows' => $rows], 'Requests');
+
+        // Request name for each connection select option + the filter UI.
+        $connections = $db->rows('SELECT id, name, db_type FROM connections ORDER BY name');
+
+        // Latest 8 durations per request (as comma text, index 0 = newest)
+        // from the append-only log trail — the sparkline data source.
+        $sparks = [];
+        foreach ($db->rows(
+            'SELECT t.request_id, GROUP_CONCAT(t.dur) AS ds
+             FROM (
+                 SELECT request_id, duration_ms AS dur,
+                        ROW_NUMBER() OVER (PARTITION BY request_id ORDER BY id DESC) AS rn
+                 FROM request_logs
+                 WHERE duration_ms IS NOT NULL
+                   AND timestamp >= DATE_SUB(NOW(), INTERVAL 7 DAY)
+             ) t
+             WHERE t.rn <= 8
+             GROUP BY t.request_id'
+        ) as $s) {
+            $sparks[(int)$s['request_id']] = array_map(
+                static fn($v): int => (int)$v,
+                explode(',', (string)$s['ds'])
+            );
+        }
+
+        // "last changed by X at Y" names come through $rows.updated_by; the
+        // page resolves them to usernames in a single pass if wanted.
+        View::render('requests/list', [
+            'rows' => $rows,
+            'sparks' => $sparks,
+            'f' => $f,
+            'connections' => $connections,
+        ], 'Requests', 'requests-list');
     }
 
     /** @param int $id 0 = new */
@@ -38,8 +107,18 @@ final class RequestController
             Http::redirect('/admin/requests');
         }
         $connections = $db->rows('SELECT id, name, db_type, is_active FROM connections ORDER BY name');
-        View::render('requests/edit', ['row' => $row ?? self::defaults(), 'connections' => $connections],
-            $row === null ? 'New request' : 'Edit request');
+
+        // presentation-only: "last changed by X at Y" (schema updated_by)
+        $changed = null;
+        if ($row !== null && (int)$row['updated_by'] > 0) {
+            $by = $db->value('SELECT username FROM admin_users WHERE id = ?', [(int)$row['updated_by']]);
+            if ($by !== null) {
+                $changed = ['by' => (string)$by, 'at' => (string)($row['updated_at'] ?? '')];
+            }
+        }
+        View::render('requests/edit', ['row' => $row ?? self::defaults(), 'connections' => $connections,
+            'changed' => $changed],
+            $row === null ? 'New request' : 'Edit request', 'request-edit');
     }
 
     public static function save(int $id): void
@@ -54,7 +133,7 @@ final class RequestController
                 'row' => self::rowFromInput($in, $id),
                 'connections' => $db->rows('SELECT id, name, db_type, is_active FROM connections ORDER BY name'),
                 'errors' => $errors,
-            ], $id > 0 ? 'Edit request' : 'New request');
+            ], $id > 0 ? 'Edit request' : 'New request', 'request-edit');
             return;
         }
         $adminId = (int)($_SESSION['admin_user_id'] ?? 0);
@@ -117,7 +196,12 @@ final class RequestController
     public static function testRun(int $id): void
     {
         $db = Db::instance();
-        $request = $db->one('SELECT * FROM requests WHERE id = ?', [$id]);
+        $request = $db->one(
+            'SELECT r.*, c.name AS connection_name
+             FROM requests r JOIN connections c ON c.id = r.connection_id
+             WHERE r.id = ?',
+            [$id]
+        );
         $connection = $request !== null
             ? $db->one('SELECT * FROM connections WHERE id = ? AND is_active = 1', [$request['connection_id']])
             : null;
@@ -162,7 +246,7 @@ final class RequestController
             'result' => $result,
             'preview' => $preview,
             'limits' => 'first ' . $limitRows . ' rows, ' . $limitSeconds . 's timeout',
-        ], 'Test run');
+        ], 'Test run', 'request-test');
     }
 
     /** ------------------------------------------------------------------ */

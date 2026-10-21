@@ -18,6 +18,12 @@ return [
         // Public base URL used to build download links, e.g. 'http://gw.internal'.
         // Empty = build from the incoming Host header. (config/.env: GATEWAY_BASE_URL)
         'base_url' => (string)\Core\Env::get('GATEWAY_BASE_URL', ''),
+        // Admin panel text direction: 'ltr' or 'rtl' (set in config/.env with
+        // GATEWAY_ADMIN_DIRECTION). The layout uses CSS logical properties, so
+        // the whole shell mirrors under 'rtl' with no extra stylesheets.
+        'direction' => (string)\Core\Env::get('GATEWAY_ADMIN_DIRECTION', 'ltr'),
+        // UI language for the <html lang> attribute ('en', 'fa', ...).
+        'language' => (string)\Core\Env::get('GATEWAY_ADMIN_LANGUAGE', 'en'),
     ],
 
     // Metadata database (the MariaDB/MySQL that ships with XAMPP).
