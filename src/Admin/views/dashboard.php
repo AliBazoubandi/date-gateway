@@ -5,6 +5,7 @@ $act = $counts['activity'] ?? [];
 <h1>Dashboard</h1>
 <section class="stats" aria-label="Gateway at a glance">
   <a class="stat" href="/admin/requests">
+    <span class="stat-ico"><?= \Admin\View::icon('file', 15) ?></span>
     <span class="stat-n"><?= (int)$counts['requests_active'] ?></span>
     <span class="stat-l">active requests</span>
     <?php if ((int)$counts['requests_active'] !== (int)$counts['requests']): ?>
@@ -12,37 +13,48 @@ $act = $counts['activity'] ?? [];
     <?php endif; ?>
   </a>
   <a class="stat" href="/admin/connections">
+    <span class="stat-ico"><?= \Admin\View::icon('database', 15) ?></span>
     <span class="stat-n"><?= (int)$counts['connections'] ?></span>
     <span class="stat-l">connections</span>
   </a>
   <a class="stat" href="/admin/clients">
+    <span class="stat-ico"><?= \Admin\View::icon('users', 15) ?></span>
     <span class="stat-n"><?= (int)$counts['clients'] ?></span>
     <span class="stat-l">clients</span>
   </a>
   <div class="stat">
+    <span class="stat-ico"><?= \Admin\View::icon('clock', 15) ?></span>
     <span class="stat-n"><?= (int)($act['scheduled'] ?? 0) ?></span>
     <span class="stat-l">scheduled now</span>
   </div>
   <div class="stat<?= (int)($act['running'] ?? 0) > 0 ? ' live' : '' ?>">
+    <span class="stat-ico"><?= \Admin\View::icon('activity', 15) ?></span>
     <span class="stat-n"><?= (int)($act['running'] ?? 0) ?></span>
     <span class="stat-l">running now</span>
   </div>
   <div class="stat">
+    <span class="stat-ico"><?= \Admin\View::icon('download', 15) ?></span>
     <span class="stat-n"><?= (int)($act['ready'] ?? 0) ?></span>
     <span class="stat-l">ready now</span>
   </div>
   <div class="stat<?= (int)($act['failed_24h'] ?? 0) > 0 ? ' alarm' : '' ?>">
+    <span class="stat-ico"><?= \Admin\View::icon('alert', 15) ?></span>
     <span class="stat-n"><?= (int)($act['failed_24h'] ?? 0) ?></span>
     <span class="stat-l">failed · last 24h</span>
   </div>
   <div class="stat">
+    <span class="stat-ico"><?= \Admin\View::icon('send', 15) ?></span>
     <span class="stat-n"><?= (int)($act['calls_24h'] ?? 0) ?></span>
     <span class="stat-l">calls · last 24h</span>
   </div>
 </section>
 <section class="card">
   <h2>Latest log entries</h2>
-  <?php if ($recent === []): ?><p>No log entries yet.</p><?php else: ?>
+  <?php if ($recent === []): ?>
+  <div class="empty"><?= \Admin\View::icon('activity', 18) ?>
+    <span>No log entries yet — submit a request and it will show up here.</span>
+  </div>
+  <?php else: ?>
   <table class="rows">
     <thead>
     <tr><th>When</th><th>Event</th><th>Request</th><th>Client</th><th>Call</th><th>Message</th></tr>

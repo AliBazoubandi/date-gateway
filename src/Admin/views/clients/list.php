@@ -2,10 +2,12 @@
 use Core\Str;
 ?>
 <h1>Clients</h1>
-<div class="actions"><a class="btn" href="/admin/clients/new">＋ New client</a></div>
+<div class="actions"><a class="btn" href="/admin/clients/new"><?= Admin\View::icon('plus', 14) ?> New client</a></div>
 <section class="card">
-<table class="rows">
+<table class="rows sortable">
+  <thead>
   <tr><th>Name</th><th>Type</th><th>Permissions</th><th>Webhook</th><th>Created</th><th>State</th><th></th></tr>
+  </thead>
 <?php foreach ($rows as $r): ?>
   <tr>
     <td><strong><?= e((string)$r['name']) ?></strong></td>

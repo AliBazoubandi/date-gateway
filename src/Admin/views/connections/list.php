@@ -1,10 +1,12 @@
 <?php /** @var array $rows */
 ?>
 <h1>Connections</h1>
-<div class="actions"><a class="btn" href="/admin/connections/new">＋ New connection</a></div>
+<div class="actions"><a class="btn" href="/admin/connections/new"><?= Admin\View::icon('plus', 14) ?> New connection</a></div>
 <section class="card">
-<table class="rows">
+<table class="rows sortable">
+  <thead>
   <tr><th>Name</th><th>Type</th><th>Host / DB</th><th>Concur.</th><th>Requests</th><th>State</th><th></th></tr>
+  </thead>
 <?php foreach ($rows as $r): ?>
   <tr>
     <td><strong><?= e((string)$r['name']) ?></strong></td>

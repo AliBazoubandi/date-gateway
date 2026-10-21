@@ -1365,12 +1365,18 @@ grant.
 
 ## 13. Admin panel: sessions, auditing, known limitations
 
-**Look and feel (2026-10 redesign).** The console ships as a light theme with an
-optional dark one — the sun/moon button in the topbar switches it, the browser
-remembers the choice (`localStorage['gw-theme']`, falling back to the OS
-`prefers-color-scheme` on first visit). It is presentation only: one stylesheet
-(`public/assets/styles.css`), two tiny inline scripts and an inline svg mark —
-no frameworks, no external fonts or CDN assets (the CSP forbids them), and no
+**Look and feel (2026-10 redesign).** A console-style shell: always-dark
+sidebar navigation with icons (a narrow icon rail with hover tooltips below
+1080 px), and light/dark page themes switched by the sun/moon button in the
+rail — the browser remembers the choice (`localStorage['gw-theme']`, falling
+back to the OS `prefers-color-scheme` on first visit). Client-side
+ niceties, all progressive enhancements that degrade to plain links and
+tables without JavaScript: a quick-search palette (Ctrl+K / ⌘K),
+click-to-sort list tables on requests/connections/clients, copy buttons
+beside revealed API keys and webhook secrets, and count-up dashboard
+tiles. Everything is presentation only: one stylesheet
+(`public/assets/styles.css`), inline scripts allowed by the CSP, no
+frameworks, no external fonts or CDN assets (the CSP forbids them), and no
 changes to controllers, forms or the markup the smoke test asserts.
 
 The panel is a single-user-per-account, cookie-authenticated app with no

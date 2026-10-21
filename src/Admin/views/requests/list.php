@@ -1,10 +1,12 @@
 <?php /** @var array $rows */
 ?>
 <h1>Requests</h1>
-<div class="actions"><a class="btn" href="/admin/requests/new">＋ New request</a></div>
+<div class="actions"><a class="btn" href="/admin/requests/new"><?= Admin\View::icon('plus', 14) ?> New request</a></div>
 <section class="card">
-<table class="rows">
+<table class="rows sortable">
+  <thead>
   <tr><th>Code</th><th>Name</th><th>Mode</th><th>Connection</th><th>Delay</th><th>TTL</th><th>Timeout</th><th>Max rows</th><th>State</th><th></th></tr>
+  </thead>
 <?php foreach ($rows as $r): ?>
   <?php if ($r['response_mode'] === 'instant'): ?>
     <?php $delay = '-'; $ttl = '-'; ?>
@@ -15,7 +17,7 @@
     <td><strong><?= e((string)$r['code']) ?></strong></td>
     <td><?= e((string)$r['name']) ?></td>
     <td><?= $r['response_mode'] === 'instant' ? Admin\View::badge('instant', 'Instant') : Admin\View::badge('ok', 'Delayed') ?></td>
-    <td><?= e((string)$r['connection_name']) ?> (<?= e((string)$r['db_type']) ?>)</td>
+    <td><?= e((string)$r['connection_name']) ?> <?= Admin\View::badge('div-' . (string)$r['db_type'], (string)$r['db_type']) ?></td>
     <td><?= e($delay) ?></td>
     <td><?= e($ttl) ?></td>
     <td><?= (int)$r['timeout_seconds'] ?>s</td>
