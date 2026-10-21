@@ -9,12 +9,15 @@ use Core\Str;
 use Core\Time;
 use Services\ExecutionError;
 use Services\Logger;
+use Services\ResultArchive;
 
 /**
  * Cleanup pass (cli/cleanup.php, scheduled every few minutes):
  *
- *  1. Ready executions whose expires_at passed -> delete the result/cache
- *     file, mark the execution 'expired', log 'expired'.
+ *  1. Ready executions whose expires_at passed -> ARCHIVE the result file
+ *     (moved to storage/archive/{code}_{stamp}_client{id}_e{exec}.json and
+ *     kept as evidence; nothing serves from the archive), mark the execution
+ *     'expired', log 'expired'.
  *  2. Any row that references a file no download can serve (failed, expired,
  *     or the inconsistent scheduled/running-with-a-path leftover) -> delete the
  *     leftover and its .tmp sibling, clear result_path in chunks.
@@ -42,14 +45,14 @@ final class Cleanup
     private const ID_CHUNK = 500;
 
     /**
-     * @return array{expired:int, files_removed:int, stale_instant:int,
-     *     logs_removed:int, deliveries_removed:int, calls_removed:int,
-     *     executions_removed:int, audit_removed:int}
+     * @return array{expired:int, archived:int, files_removed:int,
+     *     stale_instant:int, logs_removed:int, deliveries_removed:int,
+     *     calls_removed:int, executions_removed:int, audit_removed:int}
      */
     public static function run(): array
     {
         Filesystem::prepare();
-        $expired = self::expireReady();
+        $expiredReady = self::expireReady();
         $files = self::clearLeftoverFiles() + self::sweepOrphanFiles();
         $stale = self::failStaleInstant();
         $pruned = [
@@ -62,7 +65,8 @@ final class Cleanup
             'admin_audit_log' => self::pruneAudit(),
         ];
         return [
-            'expired' => $expired,
+            'expired' => $expiredReady['expired'],
+            'archived' => $expiredReady['archived'],
             'files_removed' => $files,
             'stale_instant' => $stale,
             'logs_removed' => $pruned['request_logs'],
@@ -76,28 +80,56 @@ final class Cleanup
     // ------------------------------------------------------------------
 
     /**
-     * 1) Expired ready executions: remove file, mark expired, clear the path.
+     * 1) Expired ready executions: archive the file, mark expired, clear the
+     *    path. The file is no longer downloadable either way — the refusal is
+     *    the status/expires_at check, not the deleted file — so the move keeps
+     *    a copy for proof without changing what any endpoint answers. A ready
+     *    row with NO expires_at is swept too: current code always stamps the
+     *    column on success, so a NULL means a legacy/tampered row, and the API
+     *    refuses it either way — better archived than left in results/ forever.
      *    The status update is one statement per ID_CHUNK rows instead of one
      *    per expired result, which is the difference between a pass that keeps
      *    up and one that does not after TTLs are first switched on.
+     * @return array{expired:int, archived:int} rows expired, files moved
      */
-    private static function expireReady(): int
+    private static function expireReady(): array
     {
         $db = Db::instance();
         $rows = $db->rows(
-            "SELECT id, request_id, result_path, row_count FROM executions
-             WHERE status = 'ready' AND expires_at IS NOT NULL AND expires_at <= NOW()"
+            "SELECT e.id, e.request_id, e.result_path, e.row_count, e.expires_at,
+                    r.code AS request_code,
+                    (SELECT c.client_id FROM calls c
+                     WHERE c.execution_id = e.id
+                     ORDER BY c.created_at ASC, c.id ASC
+                     LIMIT 1) AS client_id
+             FROM executions e
+             JOIN requests r ON r.id = e.request_id
+             WHERE e.status = 'ready' AND (e.expires_at IS NULL OR e.expires_at <= NOW())"
         );
         $ids = [];
+        $archived = 0;
         foreach ($rows as $row) {
-            // Delete the file FIRST: while status is still 'ready' a racing
-            // download sees the missing file and self-heals to 410 (existing
-            // logic), instead of streaming a file that vanishes mid-read.
-            $removed = self::safeUnlink((string)$row['result_path']);
+            // Archive FIRST: while status is still 'ready' a racing download
+            // sees its source missing and self-heals to 410 (existing logic),
+            // instead of streaming a file that vanishes mid-read. Two racers
+            // cannot double-move: the second storeResult() finds the source
+            // gone and reports nothing was archived.
+            $moved = ResultArchive::storeResult(
+                (string)$row['result_path'],
+                (int)$row['id'],
+                (string)$row['request_code'],
+                $row['client_id'] !== null ? (int)$row['client_id'] : null,
+                (string)$row['expires_at']
+            );
+            if ($moved !== null) {
+                $archived++;
+            }
             $ids[] = (int)$row['id'];
             Logger::event('expired', null, (int)$row['request_id'], null, (int)$row['id'], null,
                 null, $row['row_count'] !== null ? (int)$row['row_count'] : null,
-                $removed ? 'ttl reached: result file deleted' : 'ttl reached: no file to delete');
+                $moved !== null
+                    ? "ttl reached: result archived to {$moved}"
+                    : 'ttl reached: no result file to archive');
         }
         $n = 0;
         foreach (array_chunk($ids, self::ID_CHUNK) as $chunk) {
@@ -107,7 +139,7 @@ final class Cleanup
                 $chunk
             );
         }
-        return $n;
+        return ['expired' => $n, 'archived' => $archived];
     }
 
     /**
@@ -249,8 +281,8 @@ final class Cleanup
         return self::pruneBatched(
             static fn (): array => $db->rows(
                 "SELECT id FROM webhook_deliveries
-                 WHERE state <> 'pending' AND created_at < ? ORDER BY id LIMIT " . self::PRUNE_BATCH,
-                [$cutoff]
+                 WHERE state <> 'pending' AND created_at < ? ORDER BY id LIMIT ?",
+                [$cutoff, self::PRUNE_BATCH]
             ),
             static fn (array $rows): int => self::deleteByIds(
                 $db,
@@ -278,8 +310,8 @@ final class Cleanup
                  WHERE c.created_at < ?
                    AND NOT EXISTS (SELECT 1 FROM webhook_deliveries d
                                    WHERE d.call_id = c.id AND d.state = 'pending')
-                 ORDER BY c.id LIMIT " . self::PRUNE_BATCH,
-                [$cutoff]
+                 ORDER BY c.id LIMIT ?",
+                [$cutoff, self::PRUNE_BATCH]
             ),
             static function (array $rows) use ($db): int {
                 $ids = self::keyList($rows);
@@ -318,8 +350,8 @@ final class Cleanup
                  WHERE e.status NOT IN ('scheduled', 'running')
                    AND COALESCE(e.finished_at, e.ready_at, e.scheduled_at) < ?
                    AND NOT EXISTS (SELECT 1 FROM calls c WHERE c.execution_id = e.id)
-                 ORDER BY e.id LIMIT " . self::PRUNE_BATCH,
-                [$cutoff]
+                 ORDER BY e.id LIMIT ?",
+                [$cutoff, self::PRUNE_BATCH]
             ),
             static function (array $rows) use ($db): int {
                 foreach ($rows as $row) {
@@ -352,8 +384,8 @@ final class Cleanup
         $db = Db::instance();
         return self::pruneBatched(
             static fn (): array => $db->rows(
-                'SELECT id FROM request_logs WHERE `timestamp` < ? ORDER BY id LIMIT ' . self::PRUNE_BATCH,
-                [$cutoff]
+                'SELECT id FROM request_logs WHERE `timestamp` < ? ORDER BY id LIMIT ?',
+                [$cutoff, self::PRUNE_BATCH]
             ),
             static fn (array $rows): int => self::deleteByIds($db, 'request_logs', $rows)
         );
@@ -370,8 +402,8 @@ final class Cleanup
         $db = Db::instance();
         return self::pruneBatched(
             static fn (): array => $db->rows(
-                'SELECT id FROM admin_audit_log WHERE `timestamp` < ? ORDER BY id LIMIT ' . self::PRUNE_BATCH,
-                [$cutoff]
+                'SELECT id FROM admin_audit_log WHERE `timestamp` < ? ORDER BY id LIMIT ?',
+                [$cutoff, self::PRUNE_BATCH]
             ),
             static fn (array $rows): int => self::deleteByIds($db, 'admin_audit_log', $rows)
         );
@@ -415,9 +447,20 @@ final class Cleanup
         return $removed;
     }
 
+    /**
+     * The only tables deleteByIds may touch. $table comes from internal call
+     * sites today, but the interpolated name is the one SQL surface that no
+     * placeholder can protect — so the allowed values are pinned here and
+     * anything else throws instead of ever reaching the query string.
+     */
+    private const DELETABLE_TABLES = ['webhook_deliveries', 'calls', 'request_logs', 'admin_audit_log'];
+
     /** @param list<array<string,mixed>> $rows */
     private static function deleteByIds(Db $db, string $table, array $rows): int
     {
+        if (!in_array($table, self::DELETABLE_TABLES, true)) {
+            throw new \InvalidArgumentException("Table '{$table}' is not on the delete whitelist.");
+        }
         $ids = self::keyList($rows);
         return $db->execute(
             "DELETE FROM `{$table}` WHERE id IN (" . self::marks(count($ids)) . ')',

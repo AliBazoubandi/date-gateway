@@ -137,6 +137,13 @@ final class PgSqlDriver implements DriverInterface
         return null;
     }
 
+    public function nextResult(mixed $stmt): bool
+    {
+        // Single-statement protocol usage (cursor or one result); a batch
+        // never reaches this driver — scripts mode is SQL Server only.
+        return false;
+    }
+
     /**
      * Raw column names of a result, in order (duplicates included).
      * @param resource $res

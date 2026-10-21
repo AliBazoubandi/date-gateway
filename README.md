@@ -25,9 +25,10 @@ Core model:
 
 Two response modes:
 
-- **Delayed** — a background worker runs the query on schedule and the
-  client polls `/api/v1/calls/{id}` or receives a webhook when the result
-  file is ready.
+- **Delayed** — the background worker starts the query as soon as the
+  submit lands (up to `max_concurrency` per connection, earliest promise
+  first) and the client polls `/api/v1/calls/{id}` or receives a webhook
+  once the download window opens at `ready_at`.
 - **Instant** — the query runs synchronously during the submit call; the
   rows come back inline in the JSON response AND the run is stored as a
   downloadable result file exactly like a delayed execution, so the
@@ -45,7 +46,7 @@ Two response modes:
   |------------------|-------------------------------------------------|
   | `mysqli`         | metadata DB (always)                            |
   | `curl`           | webhook delivery, smoke tests                   |
-  | `openssl`        | AES-256-GCM encryption (passwords, call tokens) |
+  | `openssl`        | AES-256-GCM encryption (passwords, call tokens, webhook secrets) |
   | `mbstring`       | UTF-8 handling                                  |
   | `sqlsrv`*            | SQL Server target connections only      |
   | `pgsql`          | PostgreSQL target connections only              |
@@ -75,22 +76,31 @@ php cli\check.php
 ## 2. Install
 
 Assumes the project lives at `C:\path\to\data-gateway` (adjust below) and
-XAMPP at `C:\xampp`.
+XAMPP at `C:\xampp`. Every example command is typed at a **PowerShell**
+prompt (Windows PowerShell 5.1 or PowerShell 7+ — nothing below needs a
+Command Prompt, which cannot run them as written: PowerShell has no `<`
+input redirect). `*.ps1` scripts are launched through
+`powershell -ExecutionPolicy Bypass -File …` so a locked-down execution
+policy never blocks them.
 
 1. **Create the metadata database**
 
-   ```
-   C:\xampp\mysql\bin\mysql.exe -u root -p < sql\create_database.sql
-   C:\xampp\mysql\bin\mysql.exe -u root -p data_gateway < sql\schema.sql
+   ```powershell
+   & "C:\xampp\mysql\bin\mysql.exe" -u root -p -e "source sql/create_database.sql"
+   & "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway -e "source sql/schema.sql"
    ```
 
    (the first file creates the `data_gateway` database, the second loads the
    tables; or paste both into phpMyAdmin's SQL tab, in this order).
+   `-e "source …"` makes the client read the `.sql` itself, byte-exact:
+   PowerShell cannot redirect `<`, and piping the file through `Get-Content`
+   would run every byte through PowerShell's text encodings instead. Quoted
+   exe paths always need the leading `&` (the call operator).
 
 2. **Create the metadata-DB account**
 
-   ```
-   C:\xampp\mysql\bin\mysql.exe -u root -p < sql\create_user.sql
+   ```powershell
+   & "C:\xampp\mysql\bin\mysql.exe" -u root -p -e "source sql/create_user.sql"
    ```
 
    `sql/create_user.sql` creates `gateway` and grants it
@@ -111,7 +121,9 @@ XAMPP at `C:\xampp`.
 
    - `GATEWAY_MASTER_KEY` — generate once, 64 hex chars:
      `php -r "echo bin2hex(random_bytes(32));"`
-     This key encrypts connection passwords and per-call download tokens.
+     This key encrypts connection passwords, per-call download tokens and
+     webhook secrets, and keys the HMAC pepper for API-key hashes
+     (`services\ApiKeyHash` — see §2).
      Changing it later makes every stored secret unreadable, and the gateway
      refuses to start while it is empty or still the all-zeros placeholder
      (`Services\Encryption::assertUsableKey()`).
@@ -179,7 +191,9 @@ XAMPP at `C:\xampp`.
      fragment clients call), SQL text, connection, mode (delayed/instant),
      TTL, timeout, max rows. Test-run it before activating.
    - *Clients*: create an API client per consumer. The API key is shown
-     **exactly once**; only its SHA-256 hash is stored. Grant per-request
+     **exactly once**; only hashes are stored — an HMAC-SHA256 keyed by
+     `GATEWAY_MASTER_KEY`, plus the legacy bare SHA-256 for keys that have
+     not authenticated since that upgrade. Grant per-request
      permissions on the client page.
    - *Logs / Audit*: request log with filters (client, request, event,
      mode, date range) and the admin audit trail with field-level
@@ -205,12 +219,35 @@ them via `deployment\run_hidden.vbs` (wscript, GUI subsystem = silent window
 style 0) so no window flashes either — however it only works while that user
 is logged on.
 
-Or register them by hand (adjust paths):
+Or register them by hand (adjust the two paths; from an **elevated**
+PowerShell, like the script — SYSTEM registration needs it; if a task of
+that name already exists, unregister it first with
+`Unregister-ScheduledTask -TaskName … -Confirm:$false`). This mirrors the
+script's own registration:
 
-```
-schtasks /Create /F /RU SYSTEM /TN "DataGateway-worker"   /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\worker_pool.php\""
-schtasks /Create /F /RU SYSTEM /TN "DataGateway-cleanup"  /SC MINUTE /MO 5 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\cleanup.php\""
-schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "\"C:\xampp\php\php.exe\" \"C:\path\to\data-gateway\cli\webhooks.php\""
+```powershell
+$php     = "C:\xampp\php\php.exe"         # <- adjust
+$project = "C:\path\to\data-gateway"      # <- adjust
+
+$tasks = @(
+    @{ Name = "worker";   Script = "cli\worker_pool.php"; Minutes = 1; Limit = 60 },
+    @{ Name = "cleanup";  Script = "cli\cleanup.php";     Minutes = 5; Limit = 30 },
+    @{ Name = "webhooks"; Script = "cli\webhooks.php";    Minutes = 1; Limit = 15 }
+)
+
+foreach ($t in $tasks) {
+    $action = New-ScheduledTaskAction -Execute $php -Argument "`"$project\$($t.Script)`"" `
+        -WorkingDirectory $project
+    $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) `
+        -RepetitionInterval (New-TimeSpan -Minutes $t.Minutes) `
+        -RepetitionDuration (New-TimeSpan -Days 3650)
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+        -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Minutes $t.Limit) `
+        -MultipleInstances IgnoreNew
+    $principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -RunLevel Highest
+    Register-ScheduledTask -TaskName "DataGateway-$($t.Name)" `
+        -Action $action -Trigger $trigger -Settings $settings -Principal $principal
+}
 ```
 
 - **worker** (every 1 min) — `cli\worker_pool.php`: runs the global sweeps once,
@@ -223,9 +260,11 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   connection (no budget, no fan-out) — useful for one-off runs, not for the
   schedule. `worker.pass_budget_seconds` (default 50) bounds each pool child's
   wall time so a long queue cannot make a pass outlive its own schedule; what a
-  child does not reach stays `scheduled` for the next minute. Note that
-  executions **within** one connection still run one after another — a slow
-  query only queues behind its own connection.
+  child does not reach stays `scheduled` for the next minute. Within one
+  connection, up to `connections.max_concurrency` executions (default **5**)
+  run **concurrently**, claimed earliest-`scheduled_at`-first; a slow query
+  only queues behind its own connection's slot count, not behind every other
+  query on that connection.
   At the **start** of every pass the pool records the single-row `worker_state`
   heartbeat's start stamp, and at the end it closes the same row with the
   finish and the failure count — the pair `GET /health` reads (§4). Recording
@@ -235,13 +274,13 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   table costs only the health answer, never the executions; and a manual
   `php cli\worker.php` does **not** record it, because one ad-hoc run is not
   evidence that the schedule is alive.
-- **cleanup** (every 5 min) — expires TTL'd results, deletes their files,
-  removes failed leftovers, recovers instant executions that died mid-query
-  in the web server, and deletes orphaned result/cache files whose
-  `executions` row no longer exists. Every file/row lookup it does is
-  batched (one statement per 500 execution ids), so a pass over a full
-  `storage\results` costs round trips per batch, not per result file. It
-  also applies the optional row retention below.
+- **cleanup** (every 5 min) — expires TTL'd results by **archiving their
+  files** (see "Archived results" below), removes failed leftovers, recovers
+  instant executions that died mid-query in the web server, and deletes
+  orphaned result/cache files whose `executions` row no longer exists. Every
+  file/row lookup it does is batched (one statement per 500 execution ids),
+  so a pass over a full `storage\results` costs round trips per batch, not
+  per result file. It also applies the optional row retention below.
 - **row retention** (`cleanup.retention.*`, all `0` = keep forever by
   default, so upgrading changes nothing until you opt in):
   `request_logs_days`, `calls_days`, `executions_days`,
@@ -251,8 +290,71 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   referential-safe: a delivery is deleted before the call that owns it, a call
   with a **pending** delivery is never deleted, an execution is kept while any
   call still points at it, `scheduled`/`running` executions are never pruned,
-  and a result file is removed before the row that names it. `cleanup.log_retention_days`
+  and a result file is removed before the row that names it. Pruning never
+  touches `storage\archive`: the evidence copies are kept whatever the rows
+  say. `cleanup.log_retention_days`
   still works as an alias for `request_logs_days`.
+
+### Archived results
+
+An expired result is not a deleted one — and archiving is not tied to
+expiry any more. The moment a delayed run finishes, a **copy** of
+`storage\results\{execution_id}.json` is written to the archive under its
+deterministic name, so the evidence exists from the instant the result
+exists, whatever the client does next. When the result's TTL runs out (the
+request's `ttl_minutes` for delayed mode, `limits.instant.result_ttl_minutes`
+for instant), the cleanup pass **moves** the live file
+`storage\results\{execution_id}.json` to (a destination that already holds
+the same bytes from the ready-time copy — the move then just removes the
+live twin):
+
+```
+storage\archive\{request_code}_{expires_at}_client{client_id}_e{execution_id}.json
+```
+
+e.g. `sales.daily_20261020_143501_client7_e1823.json`, where the timestamp is
+the moment the result stopped being downloadable (Tehran local),
+`client7` is the API client the call belongs to (for a shared execution: the
+client whose call triggered the run), and `_e1823` is the execution id. The
+execution id is part of the name on purpose: two separate results of the same
+request for the same client can expire within the same second, and the archive
+must never lose one of them.
+
+What changes and what does not:
+
+- **Downloads are refused exactly as before — and named like the archive.**
+  The 410 `expired` answer, the `IDEMPOTENCY`/idempotent-replay behaviour,
+  and the status endpoint's `expired` state come from the status +
+  `expires_at` columns, not from the file: once `expires_at` has passed,
+  nothing downloads, whatever is on disk. The download refusal is
+  headers-only (410 status, `X-Gateway-Error`/`X-Gateway-Message`, no body
+  — see the "Expired-link downloads" note in §4), so a `curl -o` re-run
+  after expiry fails its transfer instead of overwriting the client's
+  earlier download with an error payload. A download's
+  `Content-Disposition` name is this section's same deterministic name, so
+  what a client saved matches the archived copy.
+  No endpoint ever reads from `storage\archive`.
+- **The execution row still flips to `expired` and its `result_path` is
+  cleared** in the same cleanup pass, so bookkeeping looks identical to
+  before; the file simply survives outside `results/` as evidence (kept for
+  future logs and proofs — there is no retention window on the archive; an
+  operator empties it manually when disk needs the room).
+- The ready-time copy means the archive entry exists **before** any TTL or
+  download event can touch the file, and the TTL-time move cannot lose data
+  even if the sweeper and a refused download race it. If a download attempt
+  arrives on an already-expired result first, the refusal itself archives
+  the file before answering 410 (a no-op copy when the ready-time copy
+  already holds the same bytes).
+- A file for an execution row that no longer exists (orphans, retention-pruned
+  rows) is still **deleted**, because there is nothing left to identify it.
+  Retention prunes rows; the archived evidence is out of its reach.
+- Files stored under the legacy `cache/` prefix by older versions are
+  archived by the same pass like everything else.
+
+There is no schema change and no `config\`.env` entry: the directory
+(`storage.archive_subdir`, default `archive`) is created by `prepare()` on the
+next worker/cleanup/health pass after the upgrade.
+
 - The worker also checks `limits.min_free_disk_bytes` (default 2 GiB, `0`
   disables it) before opening a new result file. Below the floor a delayed
   execution fails immediately with `error_code = storage_low` and no file is
@@ -266,7 +368,7 @@ schtasks /Create /F /RU SYSTEM /TN "DataGateway-webhooks" /SC MINUTE /MO 1 /TR "
   gap. Delivery is fenced with `GET_LOCK`, so running pool and webhooks
   concurrently is safe.
 
-Delete a task with `schtasks /Delete /TN "DataGateway-webhooks" /F`.
+Delete a task with `Unregister-ScheduledTask -TaskName "DataGateway-webhooks" -Confirm:$false`.
 
 Every task is registered with a **hard time limit** — worker 60 min,
 cleanup 30 min, webhooks 15 min. If a run wedges (hung DB connection,
@@ -285,32 +387,96 @@ the end because a monitor needs it before a client does.
 
 ### Delayed mode
 
-```
-:: submit — one call per submit; identical concurrent submits share one execution
-:: add -H "Idempotency-Key: <per-attempt value>" and a retry answers from the
-:: call that key already made instead of starting another submission
-curl -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/request/sales.daily
+Commands use `curl.exe`, never bare `curl`: in Windows PowerShell, `curl`
+is an alias for `Invoke-WebRequest` and would not accept these options.
+`#` lines are comments; `->` lines are annotated responses, not commands.
+
+**Scheduler.** The delay is a *download* promise, not a start time: the
+worker claims the execution as soon as it is submitted and starts querying
+right away. Up to `connections.max_concurrency` executions (default **5**)
+run per target connection at once, claimed earliest-`scheduled_at`-first so
+the tightest promise wins the slot. If the query finishes early, the result
+waits: polling reports `scheduled` (with `ready_at` set to the promise time)
+until `ready_at`, and a download attempt before then answers
+`409 result_not_ready` with a `Retry-After` hint. This guarantees the
+result exists at the promised time even if the query itself is slower than
+the delay — the window can never close before it opens.
+
+```powershell
+# submit — one call per submit; identical concurrent submits share one execution
+# add -H "Idempotency-Key: <per-attempt value>" and a retry answers from the
+# call that key already made instead of starting another submission
+curl.exe -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/request/sales.daily
 -> 200 {"call_id":"...","status":"scheduled","scheduled_at":"...","ready_at":null,"expires_at":null,"link":null}
 
-:: poll — returns the download link once the execution is ready
-curl -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/calls/CALL_ID
+# poll — returns the download link once the execution is ready
+curl.exe -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/calls/CALL_ID
 -> 200 {"call_id":"...","request_code":"sales.daily","status":"ready",
         "row_count":123,"ready_at":"...","expires_at":"...","link":"http://gw.internal/api/v1/results/TOKEN",
         "error":null}
 
-:: poll a failed call — `error` is the ONLY failure detail clients get; the
-:: raw driver text stays in the admin-visible executions.error_message
+# poll during the hold window — the run may already be finished, but the
+# download window only opens at ready_at; the response looks the same as a
+# still-queued call except ready_at/expires_at are populated
+-> 200 {"call_id":"...","request_code":"sales.daily","status":"scheduled",
+        "row_count":123,"ready_at":"...","expires_at":"...","link":null,
+        "error":null}
+
+# poll a failed call — `error` is the ONLY failure detail clients get; the
+# raw driver text stays in the admin-visible executions.error_message
 -> 200 {"call_id":"...","request_code":"sales.daily","status":"failed",
         "row_count":null,"ready_at":null,"expires_at":null,"link":null,
         "error":{"code":"timeout","message":"The query did not finish within its timeout and was stopped before it produced a result."}}
 
-:: download — stream the result file (until expires_at). Downloads carry
-:: Content-Disposition: attachment; filename="result-{code}-{execution_id}.json"
-:: The call's own token from its link is the only download credential: a token
-:: is never issued for an execution as such, so several calls sharing one
-:: execution each download with their own link.
-curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
+# download — stream the result file (until expires_at). Downloads carry
+# Content-Disposition: attachment; filename="{request_code}_{expires_at stamp}_client{client}_e{execution_id}.json"
+# — the run's deterministic name, identical to the name its archived evidence
+# copy keeps in storage\archive (§3). The stamp is the moment the file stops
+# being downloadable (Tehran local; "20261021_090923" in the archived example).
+# The call's own token from its link is the only download credential: a token
+# is never issued for an execution as such, so several calls sharing one
+# execution each download with their own link.
+#
+# RECOMMENDED (2026-10) — save a file under its exact run name: -O saves a
+# file, -J takes the file name from Content-Disposition (nothing to type,
+# nothing to get wrong — the saved name IS the archive name of the run), and
+# -f fails loud on any error status instead of ever saving an error body:
+curl.exe -f -OJ -H "Authorization: Bearer CLIENT_KEY" LINK
+#   saved as e.g. group-discount-percent_20261021_090923_client1_e3.json
+#   expired link    -> curl: (22) The requested URL returned error: 410 —
+#                      NOTHING is written; the previous download survives
+#                      (verified: a pre-seeded file stayed byte-identical)
+#   already saved   -> curl: (23) — while the link is live, -J never
+#                      overwrites an existing local file; rename the old
+#                      copy first if you want a fresh one
+# the refusal's reason goes to the screen when the headers are dumped too:
+curl.exe -f -OJ -D - -H "Authorization: Bearer CLIENT_KEY" LINK
+#   -> HTTP/1.1 410 Gone ... X-Gateway-Error: expired
+#      X-Gateway-Message: This result has expired.
+# scripts that need the saved name afterwards: add -w "%{filename_effective}"
+# a name of your own is equally safe — a refusal writes no bytes, so this
+# never clobbers result.json either (see "Expired-link downloads" below):
+curl.exe -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
 ```
+
+**Expired-link downloads are a failure, not a download (2026-10).** Once
+`expires_at` has passed, a download attempt is refused with the `410 Gone`
+status and `X-Gateway-Error` / `X-Gateway-Message` headers — and **no
+response body is ever sent**. The transfer ends deliberately short of the
+body it declares in `Content-Length`, so clients see the *download* fail:
+plain `curl -o result.json` exits non-zero (`curl: (18) end of response with
+N bytes missing`) and — the point — leaves a previously downloaded
+`result.json` exactly as it was. The recommended `-f -OJ` form (above) fails
+even earlier, before curl opens any output file at all (`curl: (22) The
+requested URL returned error: 410`; a `-D -` alongside it shows the
+`X-Gateway-Message` on screen). Re-downloading a still-live link is protected
+too: `-J` refuses to overwrite an already saved local copy (`curl: (23)`).
+Before this change the refusal sent its
+error JSON as the body: curl saved that over the file the client had
+downloaded in the live window and exited 0, so one accidental re-run after
+expiry was enough to lose the good copy. Programmatic readers still see the
+410 status; any code that tries to parse a body gets a broken transfer
+instead of JSON, by design (there is deliberately nothing left to parse).
 
 Status values: `scheduled` → `running` → `ready` (then `expired`), or
 `failed`. Every poll response carries `error`: `null` unless the run failed,
@@ -330,28 +496,35 @@ result file is missing or unreadable — an empty 200 is never returned),
 `limits.instant.max_result_bytes`), `timeout`
 (504), `rate_limited` (429, with `Retry-After`), `submission_in_progress`
 (409, the `Idempotency-Key`'s first submission is still running — with
-`Retry-After`; added in 2026-10, see the idempotency section below), and
-`410 Gone` for an expired link.
+`Retry-After`; added in 2026-10, see the idempotency section below),
+`result_not_ready` (409, a delayed download attempted before its `ready_at`
+window opens — with `Retry-After`; the run is done, the link just is not
+valid yet), and `410 Gone` for an expired link (a download refusal is
+headers-only — the status and `X-Gateway-Error`/`X-Gateway-Message` arrive,
+no body is ever sent, and clients that saved a body to a file save nothing;
+see "Expired-link downloads" above).
 
 ### Instant mode
 
-```
-:: submit — the result comes back inline (backward compatible) AND a
-::         downloadable file is stored; the response now includes `link`
-curl -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/request/sales.lookup
+```powershell
+# submit — the result comes back inline (backward compatible) AND a
+#         downloadable file is stored; the response now includes `link`
+curl.exe -X POST -H "Authorization: Bearer CLIENT_KEY" http://gw.internal/api/v1/request/sales.lookup
 -> 200 {"call_id":"...","mode":"instant","status":"ready","executed_at":"...",
         "row_count":2,"truncated":false,
         "link":"http://gw.internal/api/v1/results/TOKEN",
         "data":[{"col":"val"},...]}
 
-:: one-call file delivery — add ?download=1 to the SAME POST and the body is
-:: the result file itself (Content-Disposition: attachment, same {"data":..,
-:: "meta":{..}} shape as delayed result files); no inline envelope is sent
-curl -X POST -H "Authorization: Bearer CLIENT_KEY" -o result.json \
+# one-call file delivery — add ?download=1 to the SAME POST and the body is
+# the result file itself (Content-Disposition: attachment, same {"data":..,
+# "meta":{..}} shape as delayed result files); no inline envelope is sent
+curl.exe -X POST -H "Authorization: Bearer CLIENT_KEY" -o result.json `
      "http://gw.internal/api/v1/request/sales.lookup?download=1"
 
-:: or download later with the link from the response / status endpoint
-curl -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
+# or download later with the link from the response / status endpoint
+# — same recommended form as the delayed download above: -OJ lands the file
+# under its run's archive name, -f fails loud, refusals write nothing
+curl.exe -f -OJ -H "Authorization: Bearer CLIENT_KEY" LINK
 ```
 
 Every successful instant run also writes its result file
@@ -370,7 +543,7 @@ To cache longer, raise `limits.instant.result_ttl_minutes`
 (`GATEWAY_INSTANT_RESULT_TTL_MINUTES`). If the target connection is at its
 concurrency cap the call gets `429 rate_limited` + `Retry-After` instead of
 queuing. That cap is **one counter for both modes**: `connections.max_concurrency`
-(or `limits.connection_concurrency`, default 2) counts every `running` execution
+(or `limits.connection_concurrency`, default 5) counts every `running` execution
 on the connection, delayed or instant, because the target database sees queries,
 not gateway modes. A connection at its cap therefore defers delayed work until
 the instant run finishes, and an instant submit is refused while the worker is
@@ -498,7 +671,10 @@ heartbeat age, so the pre-deploy gate catches it before monitoring does.
 
 If a client has a webhook URL + secret configured, every delayed call gets
 a signed POST when its execution settles — `ready` **or `failed`** (and on
-retry after delivery failures). Headers:
+retry after delivery failures). The secret is sealed like every other secret
+at rest: it is stored as an AES-256-GCM blob (`clients.webhook_secret_enc`)
+under `GATEWAY_MASTER_KEY`, is shown exactly once when generated or rotated,
+and is decrypted only at send time. Headers:
 
 - `Content-Type: application/json`
 - `X-Gateway-Signature: sha256=<hex>` — HMAC-SHA256 of
@@ -701,7 +877,11 @@ exhausted the delivery, so the client was never told even after DNS recovered.
 1. A submit while an execution for the request is `scheduled`/`running`
    attaches to it — no duplicate run; the new call gets its own token.
 2. A submit while a `ready`, unexpired execution exists attaches to it and
-   the response carries a fresh download link immediately.
+   the response carries a fresh download link immediately — unless the
+   scheduler finished the run before its `ready_at` window opened, in which
+   case the attach still happens (no duplicate run) but the response reports
+   `status:"scheduled"` with `link:null` until the window opens (§ Delayed
+   mode, `result_not_ready`).
 3. Otherwise a new execution is scheduled.
 
 Rules 1 and 2 attach a call to an execution that already exists; rule 3 writes
@@ -728,8 +908,8 @@ upgrade block that used to live at the end of that file — is never run.
 Every additive change an older schema can be missing is collected in **one
 re-runnable migration**:
 
-```
-C:\xampp\mysql\bin\mysql.exe -u root -p data_gateway < sql\migrations\2026-10-20-production-hardening.sql
+```powershell
+& "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway -e "source sql/migrations/2026-10-20-production-hardening.sql"
 ```
 
 It checks `information_schema` before each change, so applying it twice is a
@@ -748,6 +928,23 @@ while it is missing:
 The migration needs no backfill: old `executions` rows keep `error_code = NULL`
 and are reported as the generic `execution_failed`; old `calls` rows simply have
 no key to match; `worker_state` starts empty and means "no pass recorded yet".
+
+A second re-runnable migration hardens the secrets at rest:
+
+```powershell
+& "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway -e "source sql/migrations/2026-10-20-secret-hardening.sql"
+php cli\encrypt_webhook_secrets.php
+```
+
+It renames `clients.webhook_secret` to `clients.webhook_secret_enc` (values
+preserved, encryption happens in the second step) and adds the peppered
+API-key lookup hash `clients.api_key_hash_hmac` (HMAC-SHA256 keyed by
+`GATEWAY_MASTER_KEY`). Neither change invalidates anything: deliveries signed
+with a legacy plaintext secret keep working and the dispatcher re-encrypts the
+stored value on its next send (`cli\encrypt_webhook_secrets.php` just closes
+that window in one step), and existing API keys keep authenticating through
+their bare SHA-256 hash until their first successful call upgrades the row.
+Apply it before deploying the code that reads the new column names.
 
 A database created **before the webhook feature** needs one extra, one-off ALTER
 that the migration deliberately does not repeat (it is not part of the
@@ -913,9 +1110,9 @@ younger than `--stale-minutes` (default 60, so a run that is still active is
 never touched), shows what it would drop and asks before doing it — pass
 `--force` in a script, where there is no one to answer:
 
-```
-php tests\run_all.php --drop-stale            :: list + confirm
-php tests\run_all.php --drop-stale --force    :: non-interactive
+```powershell
+php tests\run_all.php --drop-stale            # list + confirm
+php tests\run_all.php --drop-stale --force    # non-interactive
 ```
 
 **CI — `.github/workflows/ci.yml`.** On every push, pull request and manual
@@ -951,7 +1148,7 @@ opens a live connection to a target and needs its actual credentials.
 2. **Apache DocumentRoot MUST be `public/`.** Nothing above `public/` may be
    web-reachable. Keep the root `.htaccess` safety net active by allowing
    overrides in the vhost (`AllowOverride All`). Verify from outside:
-   `curl -i http://<host>/config/.env` must return **403 or 404** — if it
+   `curl.exe -i http://<host>/config/.env` must return **403 or 404** — if it
    ever returns the file contents, the DocumentRoot or `.htaccess` is wrong;
    fix before going live.
 3. **Set `GATEWAY_BASE_URL`** in `config/.env` to the real public URL
@@ -1115,10 +1312,56 @@ Three layers enforce that:
    if both code layers fail; it is also the only one that protects against a
    compromised gateway host.
 
+There is one deliberate, admin-curated exception to "the gateway only reads":
+a SQL Server connection with **Allow script batches** may run multi-statement
+scripts under a relaxed policy that still refuses `UPDATE`/`DELETE` and
+`EXEC`-style statements — see "Scripts mode" below.
+
 A rejected statement is not a query failure: the API answers
 `502 query_rejected`, the admin sees a validation error at save time, and the
 delayed execution is marked failed. In all three cases nothing was sent to the
 target database.
+
+### Scripts mode (`connections.allow_writes`, SQL Server only)
+
+Some reports cannot be written as one read-only statement: the classic shape is
+`DECLARE` the variables, stage `#temp` tables with `SELECT … INTO`, index them,
+`INSERT` into a staging temp table, return one final `SELECT`, then drop the
+temp tables. A connection whose **Allow script batches** checkbox is ticked
+(`connections.allow_writes = 1`, SQL Server connections only — the other two
+drivers run hard single-statement sessions and refuse the flag) runs such
+batches under a deliberately different policy:
+
+- **Multi-statement is fine.** Statements split on `;` outside quotes and
+  comments; every statement is scanned, and a violation names the statement
+  number.
+- **Still blocked, in every statement:** `UPDATE`, `DELETE`, `MERGE`,
+  `TRUNCATE` (row mutation of existing data); code invocation the keyword scan
+  can never see into — `EXEC`, `EXECUTE`, `CALL`, `PREPARE`/`DEALLOCATE`,
+  `HANDLER`, `DO`; and the server escape hatches `SHUTDOWN`,
+  `INSTALL`/`UNINSTALL`, `SELECT … INTO OUTFILE/DUMPFILE`. Everything else —
+  `INSERT`, `CREATE`, `DROP`, `ALTER`, `GRANT`, `SET` — is allowed on purpose.
+- **Results:** the client receives the rows of every result set the batch
+  produces, streamed in order (`sqlsrv_next_result`); a batch that returns no
+  rows is a successful run with `row_count` 0. The admin test-run shows the
+  first result sets the same way. Fieldless "rows affected" placeholders —
+  every `SELECT INTO`/`INSERT`/`CREATE INDEX`/`DROP` emits one when `NOCOUNT`
+  is off — are skipped automatically; only sets with columns reach the row
+  loop (fetching from a placeholder would fail with `IMSSP -28`).
+- **Migration:** existing databases need
+  `sql\migrations\2026-10-20-scripts-mode.sql` (re-runnable) applied before
+  deploying the code that reads the column.
+
+Two things do not change with the flag on. First, the same three layers still
+exist — but layer 2 stays read-only-shaped on SQL Server (there is no
+session-level read-only mode for `sqlsrv_*`), so scripts mode leans entirely on
+the scanner (layer 1) and on the account grants (layer 3). Second, the policy
+is intentionally narrower than "anything but UPDATE/DELETE": with a powerful
+login (up to `sa`), `EXEC`-family statements would be remote code execution on
+the database server, and the scanner cannot inspect what is inside a stored
+procedure. If a script genuinely needs a procedure call, wrap the call server
+side in a view/table-valued function the scanner can read, or reconsider the
+grant.
 
 ## 13. Admin panel: sessions, auditing, known limitations
 
@@ -1253,7 +1496,7 @@ same list in order.
 
 | What | Where | Irreplaceable? |
 |------|-------|----------------|
-| Metadata database | MariaDB schema `data_gateway` — the 13 tables `sql/schema.sql` creates (§8 lists the ones an older schema can be missing): admin accounts, target connections (passwords as ciphertext), approved SQL, clients (API-key hashes + webhook secrets), calls, executions, webhook deliveries, `request_logs`, `admin_audit_log`, `client_rate_limits`, `worker_state` | **Yes.** The query *results* live in the target databases; the history — who asked, what ran, what was delivered, what was changed — exists nowhere else |
+| Metadata database | MariaDB schema `data_gateway` — the 13 tables `sql/schema.sql` creates (§8 lists the ones an older schema can be missing): admin accounts, target connections (passwords as ciphertext), approved SQL, clients (API-key hashes + webhook secrets as ciphertext), calls, executions, webhook deliveries, `request_logs`, `admin_audit_log`, `client_rate_limits`, `worker_state` | **Yes.** The query *results* live in the target databases; the history — who asked, what ran, what was delivered, what was changed — exists nowhere else |
 | Result files | `storage\results\<execution id>.json` | Only inside the TTL — see "How long a copy of `storage/` is worth" |
 | Secrets | `config\.env` — `GATEWAY_MASTER_KEY`, `GATEWAY_DB_PASSWORD`, `GATEWAY_BASE_URL` | **Yes**, and worse: without the master key the stored connection passwords cannot be read again (§2) |
 | Scheduled tasks | Windows Task Scheduler | No — `deployment\register_tasks.ps1` rebuilds them (§3) |
@@ -1265,22 +1508,22 @@ Stop the writers first. A dump taken while the gateway is working is a dump of a
 moving system, and then the file copy belongs to a different instant than the
 rows that name those files:
 
-```
-schtasks /Change /TN "DataGateway-worker"   /Disable
-schtasks /Change /TN "DataGateway-cleanup"  /Disable
-schtasks /Change /TN "DataGateway-webhooks" /Disable
-:: then stop Apache however this host runs it: XAMPP Control panel > Apache >
-:: Stop, or "net stop Apache2.4" when it is installed as a service.
+```powershell
+Disable-ScheduledTask -TaskName "DataGateway-worker"
+Disable-ScheduledTask -TaskName "DataGateway-cleanup"
+Disable-ScheduledTask -TaskName "DataGateway-webhooks"
+# then stop Apache however this host runs it: XAMPP Control panel > Apache >
+# Stop, or "net stop Apache2.4" when it is installed as a service.
 
-"C:\xampp\mysql\bin\mysqldump.exe" -u root -p --single-transaction ^
-  --default-character-set=utf8mb4 data_gateway > "G:\gw-backup\gw-db.sql"
+& "C:\xampp\mysql\bin\mysqldump.exe" -u root -p --single-transaction `
+  --default-character-set=utf8mb4 --result-file="G:\gw-backup\gw-db.sql" data_gateway
 
 robocopy "C:\path\to\data-gateway\storage" "G:\gw-backup\storage" /MIR /R:2 /W:2 /XF *.lock
 
-:: restart Apache, then re-enable the three tasks:
-schtasks /Change /TN "DataGateway-worker"   /Enable
-schtasks /Change /TN "DataGateway-cleanup"  /Enable
-schtasks /Change /TN "DataGateway-webhooks" /Enable
+# restart Apache, then re-enable the three tasks:
+Enable-ScheduledTask -TaskName "DataGateway-worker"
+Enable-ScheduledTask -TaskName "DataGateway-cleanup"
+Enable-ScheduledTask -TaskName "DataGateway-webhooks"
 ```
 
 - **Why Apache stops too:** the web path is a writer as well, not only a reader —
@@ -1292,6 +1535,10 @@ schtasks /Change /TN "DataGateway-webhooks" /Enable
   schema has no stored routines or events, so no `--routines`/`--events`; the
   only trigger this project creates belongs to `tests\transaction_test.php` and
   is dropped when that suite ends.
+- `--result-file` (never the shell's `>`) makes mysqldump write the dump
+  itself, byte-exact UTF-8: PowerShell's `>` redirect re-encodes the stream
+  (Windows PowerShell writes UTF-16LE), which would corrupt a dump that
+  carries any non-ASCII data.
 - `/XF *.lock` leaves out the fence files (`worker.lock`, `worker-<id>.lock`,
   `cleanup.lock`, `webhooks.lock`) — they mean nothing without their process,
   and restoring one onto a host whose tasks are running invites a stale lock.
@@ -1302,22 +1549,25 @@ schtasks /Change /TN "DataGateway-webhooks" /Enable
 - `robocopy` reports **success with exit code 1** (and 2-7 for other normal
   outcomes); a scheduled backup job that treats non-zero as failure will page
   every night. Check for `< 8`.
-- The dump **is** a secret-bearing artefact: `clients.webhook_secret` is stored
-  in plaintext (deliveries have to sign with it) while connection passwords and
-  call tokens are AES-256-GCM ciphertext under `GATEWAY_MASTER_KEY`. Keep the
-  `.sql` where you keep any database backup, and keep `config\.env` separately —
-  a password manager or an offline envelope, never inside the same archive.
+- The dump contains secrets, but no usable ones: webhook secrets (§5), connection
+  passwords (§14) and call tokens (§4) are all AES-256-GCM ciphertext under
+  `GATEWAY_MASTER_KEY`, and API keys are stored only as hashes (§2). What the
+  dump is worth is exactly the master key that accompanies it — so keep
+  `config\.env` separately from the `.sql`: a password manager or an offline
+  envelope, never inside the same archive.
 
 ### How long a copy of `storage/` is worth
 
 Every result's downloadable life is bounded: `requests.ttl_minutes` (default
 **15**) for a delayed run, `limits.instant.result_ttl_minutes` (default **60**)
-for an instant one. After that, cleanup expires the row, deletes the file, and a
-link still held by a client answers `410`. So a copy of `storage/` older than the
-longest TTL in use cannot restore anything a client can still open: a daily copy
+for an instant one. After that, cleanup expires the row and **archives** the
+file into `storage\archive\` (§3, "Archived results") — a link still held by a
+client answers `410`. So a copy of `storage/` older than the longest TTL in use
+cannot restore anything a client can still open (the `archive\` subtree is
+copies of results that were already expired when the backup ran), a daily copy
 next to the daily dump is enough, and losing `storage/` completely is an
-inconvenience (resubmit), not a data loss. The metadata database is the part that
-cannot be re-run.
+inconvenience (resubmit), not a data loss. The metadata database is the part
+that cannot be re-run.
 
 ### Why the DB and `storage/` must come from the same instant
 
@@ -1325,29 +1575,37 @@ cannot be re-run.
 |---|---|
 | Rows restored, files missing | Downloads answer **410** `This result is no longer available.` (`src\Api\Download.php`). The next cleanup pass marks those rows `expired` and nulls `result_path`, so the gap closes itself — the client just has to resubmit. |
 | Files restored, rows missing | `Cleanup::sweepOrphanFiles()` deletes any `results/<numeric id>.json` (or `.tmp`) whose `executions` row does not exist, **with no age grace** — the next pass is five minutes away. Each deletion is logged as `orphaned results/<id>.json removed (no executions row)` in `request_logs`. Load the rows first, keep cleanup disabled until they are in. |
-| DB older than the files | Restored rows keep their own `expires_at`; anything past it answers **410** `This result has expired.`, and the download path deletes the file while answering, so no expired result survives on disk. Restoring an old database does not resurrect old results — it retires them. |
+| DB older than the files | Restored rows keep their own `expires_at`; anything past it answers **410** `This result has expired.`, and the download path moves that file to `storage\archive\` while answering, so no downloadable result survives at its published path. Restoring an old database does not resurrect old results — it retires them (the archived copies stay as evidence). |
 | `storage/` restored to another path | Fine. `executions.result_path` is stored **relative to `storage/`**, so point `GATEWAY_STORAGE_DIR` (§2's `storage.dir`) at the new location and the same rows resolve. Absolute values are refused: `Filesystem::resultPath()` throws rather than following a path that escapes the tree. |
 
 ### If the restored `.env` carries a different master key
 
-`GATEWAY_MASTER_KEY` seals `connections.password_encrypted` and `calls.token_enc`
-(§2). When it is not the key that encrypted the rows in the dump:
+`GATEWAY_MASTER_KEY` seals `connections.password_encrypted`, `calls.token_enc`
+and `clients.webhook_secret_enc` (§2, §4, §5), and keys the pepper baked into
+`clients.api_key_hash_hmac` (§2). When it is not the key that encrypted the
+rows in the dump:
 
 | Still works | Breaks |
 |---|---|
 | **Download links a client already holds** — authentication uses `calls.token_hash`, a SHA-256 of the raw token that needs no key | **Everything**, if the key is the placeholder or the retired `5122ef88…` value: bootstrap refuses to start, `php cli\check.php` and the CLI print `Data Gateway cannot start: …`, and the web path answers a 500 `Configuration error.` |
 | Reading the audit trail, `request_logs`, request definitions, client records | **Every target connection**: `ConnectionFactory::fromConnectionRow()` raises `DbConnectException` ("… the `security.master_key` does not match the one used to store this password"), so all executions on them fail. Clients see the sanitized `execution_failed` (§5), never the decryption text. |
-| | **New links**: `Links::forCall()` swallows the decryption failure and returns `null`, so the status API and webhook payloads carry `link: null` (§5). The result exists and is unreachable until the key is right. |
+| **API keys keep authenticating**: the bare SHA-256 fallback (`api_key_hash`, §2) re-upgrades every row under the current pepper on first use | **New links**: `Links::forCall()` swallows the decryption failure and returns `null`, so the status API and webhook payloads carry `link: null` (§5). The result exists and is unreachable until the key is right. |
+| | **Webhook deliveries of encrypted-secret clients**: the dispatcher cannot decrypt the secret, so `deliverOne()` logs `webhook secret undecryptable` and skips — the delivery stays `pending` (no attempt is burned) until the key is right or the secret is rotated. |
 
 Recovery: put the original key back, or re-enter each connection's password in
-the admin panel so it is resealed under the current key. There is no re-key tool.
-If the key is genuinely lost, treat every stored connection password as lost too
-and rotate those accounts on the target databases.
+the admin panel so it is resealed under the current key, and rotate each
+client's webhook secret the same way (both are shown exactly once). There is no
+re-key tool. If the key is genuinely lost, treat every stored connection
+password as lost too and rotate those accounts on the target databases.
 
 ### What a restore does not bring back
 
-- **A client's API key.** `clients.api_key_hash` is one-way SHA-256 (§2): no dump
-  can hand back a key a client lost. Re-issue it.
+- **A client's API key.** `clients.api_key_hash_hmac` is an HMAC-SHA256 keyed
+  by `GATEWAY_MASTER_KEY` (§2), plus the legacy bare SHA-256 alongside it for
+  rows that have not authenticated since that upgrade: no dump can hand back a
+  key a client lost. Re-issue it.
+- **A webhook secret.** Stored encrypted (§5); the plaintext exists only on the
+  one-time reveal page. Rotate it from the client's edit page.
 - **Sessions.** PHP session files live in the server's session save path, not in
   this project (§13) — everyone signs in again. A *stale* dump additionally rolls
   `admin_users.session_version` back, which signs out any admin holding a newer
@@ -1376,20 +1634,25 @@ operation in this system that deletes rows of history.
 
 ### Restoring
 
-1. Stop Apache and disable the three scheduled tasks (the `schtasks /Change
-   /Disable` lines above).
+1. Stop Apache and disable the three scheduled tasks (the
+   `Disable-ScheduledTask` lines above).
 2. Restore `config\.env` **first**, then read it through the gateway's own eyes:
    `php cli\check.php`. It FAILs on a placeholder or retired master key, prints
-   the effective policies, and checks the table list — including `worker_state`
-   (§8), which is the table an old backup is most likely to be missing.
+   the effective policies, and checks the table list and the hardened secret
+   columns — including `worker_state` (§8), the table an old backup is most
+   likely to be missing, and the columns from the second 2026-10-20 migration,
+   which a dump that predates it will also lack: if those FAIL, re-run
+   `sql\migrations\2026-10-20-secret-hardening.sql` on the restored schema.
 3. Load the dump as an administrator. The `gateway` DB user is deliberately
    SELECT/INSERT/UPDATE/DELETE/LOCK TABLES only, so it cannot create its own
    schema (§10 item 1):
+   ```powershell
+   & "C:\xampp\mysql\bin\mysql.exe" -u root -p -e "DROP DATABASE IF EXISTS data_gateway; CREATE DATABASE data_gateway CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+   & "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway -e "source G:/gw-backup/gw-db.sql"
    ```
-   "C:\xampp\mysql\bin\mysql.exe" -u root -p -e "DROP DATABASE IF EXISTS data_gateway; CREATE DATABASE data_gateway CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-   "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway < "G:\gw-backup\gw-db.sql"
-   ```
-   The dump carries no `CREATE DATABASE` line — the schema must already exist —
+   The `source` path can be absolute (forward slashes, as here) or relative to
+   the current directory. The dump carries no `CREATE DATABASE` line — the
+   schema must already exist —
    but it does open with `FOREIGN_KEY_CHECKS=0`, so the alphabetical table order
    in the file cannot trip a foreign key. It also `DROP TABLE`s each table as it
    goes, which is why step 1 stops the writers: this overwrites, it does not
@@ -1402,8 +1665,8 @@ operation in this system that deletes rows of history.
 4. Copy `storage\` back **after** the rows exist:
    `robocopy "G:\gw-backup\storage" "C:\path\to\data-gateway\storage" /E /XF *.lock`.
 5. Verify before the writers wake up: `php cli\check.php` → `ALL CHECKS PASSED`,
-   then start Apache and `curl -i http://<host>/health` → **200** with all four
-   checks true (§4).
+   then start Apache and `curl.exe -i http://<host>/health` → **200** with all
+   four checks true (§4).
 6. Re-enable the three tasks, wait for one pool pass, and confirm the heartbeat
    moved (`worker_last_pass_age_seconds` in `/health`, or the heartbeat line in
    `php cli\check.php`).

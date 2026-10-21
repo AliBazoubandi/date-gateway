@@ -190,9 +190,10 @@ $exchange = static function (string $relScript, ?string $status) use ($receiveOn
 // Fixture builders: a client (+url), a call with an encrypted token, a pending delivery.
 $mkClient = static function (?string $url) use ($db, $now, $secret, $port, $run, &$clientIds): int {
     $db->execute(
-        'INSERT INTO clients (name, type, api_key_hash, webhook_url, webhook_secret, is_active, created_at)
+        'INSERT INTO clients (name, type, api_key_hash, webhook_url, webhook_secret_enc, is_active, created_at)
          VALUES (?, ?, ?, ?, ?, 1, ?)',
-        ["whsmk {$run} client " . Str::hex(4), 'agent', hash('sha256', Str::hex(16)), $url, $secret, $now]
+        ["whsmk {$run} client " . Str::hex(4), 'agent', hash('sha256', Str::hex(16)), $url,
+            Encryption::encrypt($secret), $now]
     );
     $id = $db->insertId();
     $clientIds[] = $id;

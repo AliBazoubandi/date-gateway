@@ -47,8 +47,18 @@ final class Status
             $exec = $db->one('SELECT * FROM executions WHERE id = ?', [$call['execution_id']]);
             if ($exec !== null) {
                 $status = (string)$exec['status'];
-                if ($status === 'ready' && !empty($exec['expires_at']) && $exec['expires_at'] <= Time::now()) {
+                // Ready without an expires_at stamp fails closed: no stamp, no
+                // provable open window — the client must see 'expired', never
+                // a link.
+                if ($status === 'ready' && (empty($exec['expires_at']) || $exec['expires_at'] <= Time::now())) {
                     $status = 'expired';
+                }
+                // The scheduler may finish a delayed run before its delay
+                // promise opens: the row is ready but downloads must wait for
+                // ready_at, so the client still sees 'scheduled' until then.
+                if ($status === 'ready' && !empty($exec['ready_at'])
+                    && (string)$exec['ready_at'] > Time::now()) {
+                    $status = 'scheduled';
                 }
                 $out['status'] = $status;
                 $out['row_count'] = $exec['row_count'] !== null ? (int)$exec['row_count'] : null;

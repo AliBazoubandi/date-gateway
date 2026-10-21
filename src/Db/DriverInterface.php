@@ -34,6 +34,17 @@ interface DriverInterface
      */
     public function fetchRow(mixed $stmt): ?array;
 
+    /**
+     * Advance to the next result set of a multi-statement batch (scripts
+     * mode). Returns true when a new result set is active for fetchRow(),
+     * false when the batch has no more results. Fieldless "rows affected"
+     * placeholders between results are skipped in both directions
+     * (fetchRow does the same for a placeholder at the head of the batch).
+     * Throws DbQueryException when the batch itself failed (a later
+     * statement errored).
+     */
+    public function nextResult(mixed $stmt): bool;
+
     /** Release the statement early (discard the rest of the rows). */
     public function free(mixed $stmt): void;
 

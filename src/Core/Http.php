@@ -30,9 +30,22 @@ final class Http
         return isset($parts[$n]) ? rawurldecode($parts[$n]) : '';
     }
 
+    /**
+     * Read one request parameter. $source must be 'g' ($_GET) or 'p' ($_POST);
+     * anything else throws instead of falling back to $_REQUEST — a silent
+     * REQUEST fallback would let a query string feed a POST-only field (and
+     * reach the CSRF token), which is exactly what the per-source split exists
+     * to prevent.
+     */
     public static function param(string $key, string $source = 'g'): ?string
     {
-        $arr = $source === 'g' ? $_GET : ($source === 'p' ? $_POST : $_REQUEST);
+        $arr = match ($source) {
+            'g' => $_GET,
+            'p' => $_POST,
+            default => throw new \InvalidArgumentException(
+                "Http::param source must be 'g' (GET) or 'p' (POST), got '{$source}'"
+            ),
+        };
         return isset($arr[$key]) ? (string)$arr[$key] : null;
     }
 

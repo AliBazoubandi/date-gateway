@@ -39,8 +39,8 @@ final class AuditController
              LEFT JOIN admin_users u ON u.id = a.admin_user_id
              $where
              ORDER BY a.id DESC
-             LIMIT " . self::PER_PAGE . " OFFSET $offset",
-            $params
+             LIMIT ? OFFSET ?",
+            array_merge($params, [self::PER_PAGE, $offset])
         );
 
         // Precompute the readable diff per row so the view stays dumb.

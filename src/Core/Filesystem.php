@@ -6,6 +6,8 @@ namespace Core;
  * Storage paths + directory preparation.
  * storage/ holds the result JSON files (storage/results/). It lives OUTSIDE the
  * web root when Apache serves public/.
+ * storage/archive/ keeps the result files of expired executions: moved there
+ * at expiry, never served by any endpoint, and kept as evidence.
  */
 final class Filesystem
 {
@@ -25,10 +27,16 @@ final class Filesystem
         return self::storageDir() . '/' . Config::get('storage.results_subdir', 'results');
     }
 
+    /** Where an expired result file is KEPT (moved at expiry, never served). */
+    public static function archiveDir(): string
+    {
+        return self::storageDir() . '/' . Config::get('storage.archive_subdir', 'archive');
+    }
+
     /** Creates the storage directories if missing. */
     public static function prepare(): void
     {
-        foreach ([self::storageDir(), self::resultsDir()] as $dir) {
+        foreach ([self::storageDir(), self::resultsDir(), self::archiveDir()] as $dir) {
             if (!is_dir($dir) && !@mkdir($dir, 0770, true) && !is_dir($dir)) {
                 throw new \RuntimeException("Cannot create storage directory: {$dir}");
             }

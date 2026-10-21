@@ -72,6 +72,25 @@ final class SqlGuard
         . 'INSTALL|UNINSTALL|SHUTDOWN'
         . ')\b/i';
 
+    /**
+     * Keywords a scripts-mode connection (connections.allow_writes = 1, see
+     * README §12) still refuses. The admin-curated policy is looser on
+     * purpose — INSERT, CREATE, DROP, ALTER, GRANT, SET and friends are all
+     * allowed — but it keeps four hard stops:
+     *   - row mutation of existing data: UPDATE, DELETE, MERGE, TRUNCATE
+     *     (TRUNCATE is delete-everything either way);
+     *   - code invocation whose body the keyword scan can never see into:
+     *     EXEC, EXECUTE, CALL, MySQL's DO, PREPARE/DEALLOCATE, HANDLER;
+     *   - server escape hatches: SHUTDOWN, INSTALL/UNINSTALL (plugins),
+     *     SELECT ... INTO OUTFILE/DUMPFILE (writes files on the DB server,
+     *     outside the gateway's result contract).
+     */
+    private const SCRIPT_BLOCKED = '/\b(?:'
+        . 'UPDATE|DELETE|MERGE|TRUNCATE|'
+        . 'EXEC|EXECUTE|CALL|DO|PREPARE|DEALLOCATE|HANDLER|'
+        . 'OUTFILE|DUMPFILE|SHUTDOWN|INSTALL|UNINSTALL'
+        . ')\b/i';
+
     /** Statement-level read-only introspection prefixes (never write). */
     private const LEAD_RE = '/^(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN)\b/i';
 
@@ -87,10 +106,25 @@ final class SqlGuard
     ];
 
     /**
-     * @param string $dialect target server the SQL will run on: mysql,
-     *        pgsql or sqlserver (connections.db_type; aliases accepted).
-     *        Defaults to mysql — the metadata DB dialect, and the only one
-     *        the gateway can assume when a caller cannot know.
+     * The policy entry point every execution and admin-save path uses.
+     *
+     * @param bool $allowWrites scripts mode (connections.allow_writes = 1):
+     *        run the relaxed statement policy instead of the read-only one
+     * @throws \RuntimeException when the SQL does not pass the chosen policy
+     */
+    public static function assert(string $sql, string $dialect, bool $allowWrites): void
+    {
+        if ($allowWrites) {
+            self::assertScript($sql, $dialect);
+        } else {
+            self::assertReadOnly($sql, $dialect);
+        }
+    }
+
+    /**
+     * Strict, historical policy: provably read-only, exactly one statement.
+     * Every connection without allow_writes = 1 runs under this.
+     *
      * @throws \RuntimeException when the SQL is not provably read-only
      */
     public static function assertReadOnly(string $sql, string $dialect = 'mysql'): void
@@ -161,6 +195,50 @@ final class SqlGuard
     {
         if (preg_match(self::BLOCKED, $sql, $m) === 1) {
             throw new SqlRejectedException("Disallowed keyword in read-only SQL: {$m[0]}");
+        }
+    }
+
+    /**
+     * Scripts mode (connections.allow_writes = 1): a multi-statement batch is
+     * fine — the classic shape is "declare variables, stage #temp tables,
+     * one final SELECT, drop the temp tables" — and the strict read-only
+     * lead/statement rules do not apply. What still applies:
+     *   - the same scanner (comments, strings, quoted identifiers, dollar
+     *     quotes and executable comments are handled exactly as above);
+     *   - every statement must pass SCRIPT_BLOCKED (see the const above);
+     *   - at least one non-empty statement after stripping.
+     *
+     * The result contract is unchanged: the client gets whatever rows the
+     * batch returns, streamed in order (drivers advance across result sets
+     * in scripts mode). A batch that returns no rows is a successful run
+     * with row_count 0.
+     *
+     * @throws \RuntimeException when any statement carries a blocked keyword
+     */
+    public static function assertScript(string $sql, string $dialect = 'mysql'): void
+    {
+        $dialect = self::normalizeDialect($dialect);
+        $stripped = self::strip($sql, $dialect);
+        // Any ';' outside a quoted region separates statements. T-SQL's
+        // leading ";WITH" turns into an empty first part, which is skipped.
+        $statements = [];
+        foreach (explode(';', $stripped) as $part) {
+            $part = trim($part);
+            if ($part !== '') {
+                $statements[] = $part;
+            }
+        }
+        if ($statements === []) {
+            throw new SqlRejectedException('The SQL is empty once comments are removed.');
+        }
+        foreach ($statements as $i => $stmt) {
+            if (preg_match(self::SCRIPT_BLOCKED, $stmt, $m) === 1) {
+                throw new SqlRejectedException(sprintf(
+                    'Blocked keyword in statement #%d of the script: %s',
+                    $i + 1,
+                    $m[0]
+                ));
+            }
         }
     }
 

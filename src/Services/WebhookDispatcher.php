@@ -24,7 +24,9 @@ use Core\Time;
  *    (Services\ExecutionError) - never the driver text stored in
  *    executions.error_message.
  *  - Headers: X-Gateway-Signature: sha256=<HMAC-SHA256 of
- *    "<unix timestamp>.<raw body>" with the client's webhook_secret>,
+ *    "<unix timestamp>.<raw body>" with the client's webhook secret
+ *    (decrypted from clients.webhook_secret_enc; rows still holding the
+ *    legacy plaintext are signed the same way and upgraded in place),
  *    X-Gateway-Timestamp: <unix timestamp — receivers must refuse timestamps
  *    older than ~5 minutes (replay protection)>, X-Gateway-Call: <call_id>,
  *    X-Gateway-Attempt: <n>.
@@ -44,7 +46,7 @@ use Core\Time;
  *    be spoken.
  *
  * Deliveries of clients that cannot receive anything (inactive, or empty
- * webhook_url/webhook_secret) are NOT selected at all - they stay pending and
+ * webhook_url/webhook_secret_enc) are NOT selected at all - they stay pending and
  * invisible until an admin fixes the client, without consuming the per-pass
  * LIMIT. Rows are still skipped in place (state stays 'pending', no attempt is
  * burned) while the attached execution has not settled (scheduled/running). A
@@ -65,7 +67,7 @@ final class WebhookDispatcher
         $db = Db::instance();
         $limit = $maxPerPass ?? max(1, (int)Config::get('webhook.max_per_pass', 10));
         // Only deliveries that can actually be sent are selected: an inactive
-        // client (or one with no webhook_url/webhook_secret) stays pending
+        // client (or one with no webhook_url/secret at rest) stays pending
         // forever, and would otherwise eat the whole per-pass LIMIT.
         $due = $db->rows(
             "SELECT d.id, d.call_id, d.attempt
@@ -73,9 +75,10 @@ final class WebhookDispatcher
              JOIN calls c ON c.id = d.call_id
              JOIN clients cl ON cl.id = c.client_id
              WHERE d.state = 'pending' AND (d.next_retry_at IS NULL OR d.next_retry_at <= NOW())
-               AND cl.is_active = 1 AND cl.webhook_url <> '' AND cl.webhook_secret <> ''
+               AND cl.is_active = 1 AND cl.webhook_url <> '' AND cl.webhook_secret_enc <> ''
              ORDER BY d.id
-             LIMIT " . $limit
+             LIMIT ?",
+            [$limit]
         );
         $stats = ['sent' => 0, 'failed' => 0, 'exhausted' => 0, 'skipped' => 0];
         foreach ($due as $delivery) {
@@ -94,13 +97,13 @@ final class WebhookDispatcher
 
         $call = $db->one(
             'SELECT c.id, c.client_id, c.request_id, c.execution_id,
-                    cl.is_active, cl.webhook_url, cl.webhook_secret
+                    cl.is_active, cl.webhook_url, cl.webhook_secret_enc
              FROM calls c JOIN clients cl ON cl.id = c.client_id
              WHERE c.id = ?',
             [$callId]
         );
         $url = trim((string)($call['webhook_url'] ?? ''));
-        $secret = (string)($call['webhook_secret'] ?? '');
+        $secret = self::secretOf((string)($call['webhook_secret_enc'] ?? ''), (int)($call['client_id'] ?? 0));
         if ($call === null || (int)$call['is_active'] !== 1 || $url === '' || $secret === '') {
             return 'skipped'; // nothing configured to send to; retry when an admin sets it up
         }
@@ -153,8 +156,10 @@ final class WebhookDispatcher
                 'error' => ExecutionError::forExecution($exec),
             ]);
         } else {
-            if ($status === 'expired' || (!empty($exec['expires_at']) && $exec['expires_at'] <= Time::now())) {
-                // The link would 410 by the time the receiver uses it; no point retrying.
+            if ($status === 'expired' || empty($exec['expires_at']) || $exec['expires_at'] <= Time::now()) {
+                // The link would 410 by the time the receiver uses it (a ready
+                // row without an expiry stamp downloads nothing either), so
+                // there is no point retrying.
                 $db->execute(
                     "UPDATE webhook_deliveries SET state = 'exhausted', next_retry_at = NULL, last_error = ?
                      WHERE id = ? AND state = 'pending'",
@@ -167,6 +172,13 @@ final class WebhookDispatcher
             }
             if ($status !== 'ready') {
                 return 'skipped'; // still scheduled/running - deliver when it is settled
+            }
+            if (!empty($exec['ready_at']) && (string)$exec['ready_at'] > Time::now()) {
+                // The scheduler finished the run before the delay promise
+                // opened: sending 'ready' now would send the receiver into
+                // the 409 hold. The row stays pending; a later pass sends
+                // it once the download window opens.
+                return 'skipped';
             }
             $payload = Str::json([
                 'call_id' => $callId,
@@ -205,6 +217,44 @@ final class WebhookDispatcher
             : 'HTTP ' . $httpCode;
         return self::recordFailure($call, $callId, $deliveryId, $attempt, $httpCode, $detail,
             $durationMs, (int)($exec['row_count'] ?? 0));
+    }
+
+    /**
+     * The signing secret for one client, from clients.webhook_secret_enc.
+     *
+     * Current rows hold an AES-256-GCM blob ("gcm:v1:...") and are decrypted
+     * here, at send time. Rows written before encryption-at-rest still hold
+     * legacy plaintext: they keep signing deliveries (so nothing breaks after
+     * the column rename) and the value is upgraded to an encrypted blob on the
+     * spot — guarded by a compare-and-swap so a secret an admin rotates
+     * concurrently cannot be clobbered by the lazy upgrade. A blob that no
+     * longer decrypts (the master key was rotated) yields '' and the delivery
+     * stays pending rather than going out with a garbage signature.
+     */
+    private static function secretOf(string $stored, int $clientId): string
+    {
+        if ($stored === '') {
+            return '';
+        }
+        if (!str_starts_with($stored, 'gcm:')) {
+            try {
+                Db::instance()->execute(
+                    'UPDATE clients SET webhook_secret_enc = ? WHERE id = ? AND webhook_secret_enc = ?',
+                    [Encryption::encrypt($stored), $clientId, $stored]
+                );
+            } catch (\Throwable $e) {
+                Logger::event('webhook_failed', $clientId, null, '', null, null, null, null,
+                    'webhook secret could not be re-encrypted: ' . Str::truncate($e->getMessage(), 200));
+            }
+            return $stored; // legacy plaintext still signs correctly
+        }
+        try {
+            return Encryption::decrypt($stored);
+        } catch (\Throwable $e) {
+            Logger::event('webhook_failed', $clientId, null, '', null, null, null, null,
+                'webhook secret undecryptable (master key mismatch?): ' . Str::truncate($e->getMessage(), 200));
+            return '';
+        }
     }
 
     /**

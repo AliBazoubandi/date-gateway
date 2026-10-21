@@ -32,26 +32,45 @@ final class QueryRunner
         $driver = null;
         try {
             // Every execution path funnels through here, so this is the
-            // enforcement point for the read-only guarantee (P1-6). The
-            // dialect comes from the connection: the same bytes mean different
-            // things on MySQL, PostgreSQL and SQL Server (see SqlGuard).
-            SqlGuard::assertReadOnly($sql, (string)($connectionRow['db_type'] ?? ''));
+            // enforcement point for the SQL policy (P1-6). The dialect and
+            // the mode come from the connection: the same bytes mean
+            // different things on MySQL, PostgreSQL and SQL Server, and the
+            // relaxed scripts policy only applies where the driver can
+            // actually stream a multi-statement batch (sqlsrv).
+            $dbType = (string)($connectionRow['db_type'] ?? '');
+            $scriptsMode = !empty($connectionRow['allow_writes']);
+            if ($scriptsMode && $dbType !== 'sqlserver') {
+                // ConnectionController refuses to save this combination; a
+                // hand-edited row must not fall back to a silently stricter
+                // (or looser) policy than the admin configured.
+                $out['rejected'] = true;
+                $out['error'] = 'Scripts mode (allow writes) is only available for SQL Server connections.';
+                return $out;
+            }
+            SqlGuard::assert($sql, $dbType, $scriptsMode);
             $driver = ConnectionFactory::fromConnectionRow($connectionRow, $timeoutSeconds);
             $driver->setQueryTimeout($timeoutSeconds);
             $stmt = $driver->query($sql);
-            while (true) {
-                $row = $driver->fetchRow($stmt);
-                if ($row === null) {
-                    break;
+            // In scripts mode the batch may hand back several result sets
+            // (one per SELECT in the script); stream them in order. A plain
+            // single-statement run never advances past the first set.
+            $more = true;
+            while ($more) {
+                while (true) {
+                    $row = $driver->fetchRow($stmt);
+                    if ($row === null) {
+                        break;
+                    }
+                    if ($out['row_count'] >= $maxRows) {
+                        $out['truncated'] = true;
+                        break 2;
+                    }
+                    $out['row_count']++;
+                    if ($onRow !== null) {
+                        $onRow($row);
+                    }
                 }
-                if ($out['row_count'] >= $maxRows) {
-                    $out['truncated'] = true;
-                    break;
-                }
-                $out['row_count']++;
-                if ($onRow !== null) {
-                    $onRow($row);
-                }
+                $more = $scriptsMode ? $driver->nextResult($stmt) : false;
             }
             $out['ok'] = true;
         } catch (ResultTooLargeException $e) {

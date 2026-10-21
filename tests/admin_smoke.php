@@ -292,6 +292,21 @@ $cliId = (int)db()->value('SELECT id FROM clients WHERE name = ?', [$clientName]
 $clientId = $cliId;
 $check('only the hash is stored',
     strlen((string)db()->value('SELECT api_key_hash FROM clients WHERE id = ?', [$cliId])) === 64);
+$check('peppered API-key hash stored alongside the SHA-256',
+    strlen((string)db()->value('SELECT api_key_hash_hmac FROM clients WHERE id = ?', [$cliId])) === 64);
+
+// The create left the webhook field empty, so the panel auto-generated a
+// secret, showed it exactly once and stored it ENCRYPTED (AES-256-GCM).
+$revealedSecret = '';
+if (preg_match_all('/<code class="key">([0-9a-z_]+)<\/code>/', $body, $kmAll) >= 2) {
+    $revealedSecret = (string)($kmAll[1][1] ?? '');
+}
+$check('auto-generated webhook secret revealed once',
+    $revealedSecret !== '' && $revealedSecret !== $apiKey);
+$secretBlob = (string)db()->value('SELECT webhook_secret_enc FROM clients WHERE id = ?', [$cliId]);
+$check('webhook secret stored encrypted at rest', str_starts_with($secretBlob, 'gcm:v1:'));
+$check('encrypted webhook secret decrypts to the revealed value',
+    $revealedSecret !== '' && \Services\Encryption::decrypt($secretBlob) === $revealedSecret);
 
 [$code, $body] = http('GET', '/admin/clients/' . $cliId);
 $check('permissions editor lists request', str_contains($body, $code));
@@ -305,8 +320,9 @@ $check('checkbox is checked', str_contains($body, 'value="' . $reqId . '" checke
 $check('stored webhook secret never rendered',
     preg_match('/name="webhook_secret" value="[^"]+"/', $body) !== 1);
 // Empty secret field must mean "keep": save with the field blank and the
-// stored secret must survive (verified indirectly via a second save+login...
-// here we just assert the masked placeholder is present).
+// stored (encrypted) secret must survive untouched — verified directly: the
+// masked placeholder is rendered, and the blob re-read after the accepted
+// save below is byte-identical.
 $check('secret field renders as masked', str_contains($body, 'leave empty to keep'));
 
 // Webhook URL policy on save (Services\WebhookUrl) ------------------------
@@ -328,6 +344,8 @@ $check('blocked webhook URL refused on save',
 ]);
 $check('policy-allowed webhook URL saved',
     (string)db()->value('SELECT webhook_url FROM clients WHERE id = ?', [$cliId]) === 'http://127.0.0.1:9/hook');
+$check('empty webhook field keeps the encrypted secret',
+    (string)db()->value('SELECT webhook_secret_enc FROM clients WHERE id = ?', [$cliId]) === $secretBlob);
 
 // Key reveal page shows the same key only when just regenerated -----------
 [$code, $body] = http('POST', '/admin/clients/regen-key', ['_csrf' => $token, 'id' => $cliId]);
@@ -335,6 +353,19 @@ $check('regen key once-page', preg_match('/The previous key stopped working/', $
 $newKey = $km[0] ?? '';
 preg_match('/<code class="key">([0-9a-z_]+)<\/code>/', $body, $km2);
 $check('new key != old key', ($km2[1] ?? '') !== $apiKey);
+
+// Webhook secret rotation: the new secret is shown exactly once and is the
+// only value ever written to the encrypted column.
+[$code, $body] = http('POST', '/admin/clients/gen-secret', ['_csrf' => $token, 'id' => $cliId]);
+preg_match('/<code class="key">([0-9a-z_]+)<\/code>/', $body, $sm);
+$rotatedSecret = $sm[1] ?? '';
+$rotatedBlob = (string)db()->value('SELECT webhook_secret_enc FROM clients WHERE id = ?', [$cliId]);
+$check('webhook secret rotated and shown exactly once',
+    $rotatedSecret !== '' && $rotatedSecret !== $revealedSecret
+    && strlen($rotatedSecret) === strlen($revealedSecret));
+$check('rotated secret stored encrypted and decrypts to the new value',
+    str_starts_with($rotatedBlob, 'gcm:v1:')
+    && \Services\Encryption::decrypt($rotatedBlob) === $rotatedSecret);
 
 // CSRF rejection ----------------------------------------------------------
 $ch = curl_init('http://127.0.0.1:' . $port . '/admin/requests/delete');

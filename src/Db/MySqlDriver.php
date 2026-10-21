@@ -145,6 +145,14 @@ final class MySqlDriver implements DriverInterface
             : array_combine($keys, $row);
     }
 
+    public function nextResult(mixed $stmt): bool
+    {
+        // Single statement per session by construction: real_query() runs with
+        // CLIENT_MULTI_STATEMENTS off, so a batch never reaches this driver —
+        // scripts mode (allow_writes) is SQL Server only.
+        return false;
+    }
+
     public function free(mixed $stmt): void
     {
         if (is_object($stmt) && method_exists($stmt, 'free')) {

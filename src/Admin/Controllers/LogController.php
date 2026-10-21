@@ -45,8 +45,8 @@ final class LogController
              LEFT JOIN executions e ON e.id = l.execution_id
              $where
              ORDER BY l.id DESC
-             LIMIT " . self::PER_PAGE . " OFFSET $offset",
-            $params
+             LIMIT ? OFFSET ?",
+            array_merge($params, [self::PER_PAGE, $offset])
         );
 
         // Dropdown sources (bounded: an internal system has tens of these).

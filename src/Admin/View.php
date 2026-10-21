@@ -22,16 +22,30 @@ final class View
             // outlives the session.
             header('Cache-Control: no-store');
             header("Content-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; frame-ancestors 'none'");
+            // Only meaningful over HTTPS: claiming it on a plain-HTTP dev or
+            // proxy hop would pin the browser to TLS the host is not offering.
+            $https = (string)($_SERVER['HTTPS'] ?? '');
+            if ($https !== '' && strcasecmp($https, 'off') !== 0) {
+                header('Strict-Transport-Security: max-age=31536000; includeSubDomains');
+            }
         }
-        // $title/$csrf/$admin are pinned by the explicit writes below, but
-        // $template (include path) and $content are read after extract() —
-        // caller vars must never be able to rename the template or inject
-        // output, so strip those keys before extraction.
-        unset($vars['template'], $vars['content']);
-        $vars['title'] = $title !== '' ? $title : 'Admin';
-        $vars['csrf'] = \Core\Csrf::field();
-        $vars['admin'] = \Admin\Auth::current();
-        extract($vars, EXTR_OVERWRITE);
+        // No extract(): a caller var must never be able to overwrite this
+        // method's own scope. Template variables are assigned explicitly by
+        // name instead, and the names the renderer and the layout own are
+        // pinned AFTER the loop, so a caller-provided 'title', 'csrf' or
+        // 'admin' cannot forge session state or rename the template.
+        $reserved = ['template' => true, 'content' => true, 'title' => true,
+            'csrf' => true, 'admin' => true, 'vars' => true, 'reserved' => true];
+        foreach ($vars as $key => $value) {
+            if (!is_string($key) || isset($reserved[$key])
+                || preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $key) !== 1) {
+                continue; // only real, non-reserved PHP variable names pass
+            }
+            ${$key} = $value;
+        }
+        $title = $title !== '' ? $title : 'Admin';
+        $csrf = \Core\Csrf::field();
+        $admin = \Admin\Auth::current();
         ob_start();
         include __DIR__ . '/views/' . $template . '.php';
         $content = (string)ob_get_clean();
@@ -52,5 +66,19 @@ final class View
     public static function badge(string $class, string $text): string
     {
         return '<span class="badge b-' . \Core\Str::e($class) . '">' . \Core\Str::e($text) . '</span>';
+    }
+
+    /** ' input-error' for a field with a validation error (red border in CSS). */
+    public static function fcls(array $errors, string $field): string
+    {
+        return isset($errors[$field]) ? ' input-error' : '';
+    }
+
+    /** The inline error message of a field, or '' when the field is valid. */
+    public static function ferr(array $errors, string $field): string
+    {
+        return isset($errors[$field])
+            ? '<div class="field-error">' . \Core\Str::e((string)$errors[$field]) . '</div>'
+            : '';
     }
 }

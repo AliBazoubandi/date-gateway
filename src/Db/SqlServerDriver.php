@@ -14,6 +14,8 @@ final class SqlServerDriver implements DriverInterface
     private string $lastError = '';
     /** @var list<string>|null deduplicated column names of the open statement */
     private ?array $columnKeys = null;
+    /** Set once sqlsrv_next_result reports the batch fully drained. */
+    private bool $exhausted = false;
 
     public function connect(array $o): void
     {
@@ -76,12 +78,51 @@ final class SqlServerDriver implements DriverInterface
     public function query(string $sql): mixed
     {
         $this->columnKeys = null;
+        $this->exhausted = false;
         $stmt = @sqlsrv_query($this->conn, $sql, [], ['QueryTimeout' => $this->timeout]);
         if ($stmt === false) {
             $msg = $this->collectErrors(null);
             $this->lastError = $msg;
             throw new DbQueryException($msg, $this->isTimeoutText($msg));
         }
+        $this->refreshColumnKeys($stmt);
+        return $stmt;
+    }
+
+    public function nextResult(mixed $stmt): bool
+    {
+        if ($stmt === null || $this->exhausted) {
+            return false;
+        }
+        while (true) {
+            $r = @sqlsrv_next_result($stmt);
+            if ($r === null) {
+                $this->exhausted = true;
+                return false; // no more results in the batch
+            }
+            if ($r === false) {
+                // FALSE can mean "this result has no rows" or a real error;
+                // only the error case carries sqlsrv_errors() entries.
+                $errs = @sqlsrv_errors(SQLSRV_ERR_ERRORS);
+                if (is_array($errs) && $errs !== []) {
+                    $msg = self::formatErrors($errs);
+                    $this->lastError = $msg;
+                    throw new DbQueryException($msg, $this->isTimeoutText($msg));
+                }
+                continue; // rowless result (INSERT / CREATE INDEX inside the batch)
+            }
+            $this->refreshColumnKeys($stmt);
+            if ($this->columnKeys === []) {
+                continue; // rows-affected placeholder: keep advancing
+            }
+            return true;
+        }
+    }
+
+    /** Column names of the ACTIVE result set (after query() or nextResult()). */
+    private function refreshColumnKeys(mixed $stmt): void
+    {
+        $this->columnKeys = null;
         $meta = @sqlsrv_field_metadata($stmt);
         if (is_array($meta)) {
             $names = [];
@@ -90,11 +131,20 @@ final class SqlServerDriver implements DriverInterface
             }
             $this->columnKeys = ColumnNames::deduplicate($names);
         }
-        return $stmt;
     }
 
     public function fetchRow(mixed $stmt): ?array
     {
+        if ($stmt === null || $this->exhausted) {
+            return null;
+        }
+        // An empty columnKeys means the ACTIVE result is a rows-affected
+        // placeholder (DECLARE / SELECT INTO / CREATE INDEX at the head of a
+        // scripts-mode batch). sqlsrv_fetch_array raises IMSSP -28 on such a
+        // result, so skip placeholders until a real result set is active.
+        if ($this->columnKeys === [] && !$this->nextResult($stmt)) {
+            return null; // the batch produced no fielded result at all
+        }
         // Numeric, not assoc: a repeated column name would otherwise collapse
         // and the earlier value would vanish (see ColumnNames).
         $row = @sqlsrv_fetch_array($stmt, SQLSRV_FETCH_NUMERIC);
@@ -118,6 +168,7 @@ final class SqlServerDriver implements DriverInterface
             @sqlsrv_free_stmt($stmt);
         }
         $this->columnKeys = null;
+        $this->exhausted = false;
     }
 
     public function close(): void
@@ -144,6 +195,12 @@ final class SqlServerDriver implements DriverInterface
         if (!is_array($errs) || $errs === []) {
             return 'unknown sqlsrv error';
         }
+        return self::formatErrors($errs);
+    }
+
+    /** @param array<int,array<string,mixed>> $errs */
+    private static function formatErrors(array $errs): string
+    {
         $parts = [];
         foreach ($errs as $err) {
             $parts[] = '[' . ($err['SQLSTATE'] ?? '') . ' ' . ($err['code'] ?? '') . '] '

@@ -63,6 +63,10 @@ CREATE TABLE IF NOT EXISTS `connections` (
   `username`           VARCHAR(128) NOT NULL,
   `password_encrypted` TEXT         NOT NULL,
   `max_concurrency`    INT UNSIGNED NULL DEFAULT NULL COMMENT 'NULL = use config default (2)',
+  -- 1 = scripts mode: multi-statement batches (DECLARE/#temp/INSERT/CREATE/
+  -- DROP + a final SELECT) run under the relaxed SqlGuard policy. SQL Server
+  -- connections only; UPDATE/DELETE/EXEC-style keywords stay blocked.
+  `allow_writes`       TINYINT(1)   NOT NULL DEFAULT 0,
   `is_active`          TINYINT(1)   NOT NULL DEFAULT 1,
   `created_by`         INT UNSIGNED NULL DEFAULT NULL,
   `created_at`         DATETIME     NOT NULL,
@@ -101,21 +105,30 @@ CREATE TABLE IF NOT EXISTS `requests` (
 
 -- ---------------------------------------------------------------------------
 -- Clients (API consumers: agents or humans)
--- api_key_hash: SHA-256 hex of the API key (key itself shown once, never stored)
+-- api_key_hash: bare SHA-256 hex of the API key (key shown once, never stored).
+--   Legacy form: kept so keys stored before the pepper still authenticate.
+-- api_key_hash_hmac: HMAC-SHA256 of the API key, peppered (keyed) with
+--   security.master_key — GATEWAY_MASTER_KEY in the untracked config/.env.
+--   This is the primary lookup form; new and rotated keys always write it,
+--   and a legacy-only row is upgraded on its first successful API call.
+-- webhook_secret_enc: the webhook HMAC signing secret as an AES-256-GCM blob
+--   (gcm:v1:...) under the same master key as connection passwords.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `clients` (
   `id`             INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `name`           VARCHAR(100) NOT NULL,
   `type`           ENUM('agent','human') NOT NULL DEFAULT 'agent',
   `api_key_hash`   CHAR(64)     NOT NULL,
+  `api_key_hash_hmac` CHAR(64)  NULL DEFAULT NULL,
   `webhook_url`    VARCHAR(500) NULL DEFAULT NULL,
-  `webhook_secret` VARCHAR(128) NULL DEFAULT NULL,
+  `webhook_secret_enc` VARCHAR(255) NULL DEFAULT NULL,
   `is_active`      TINYINT(1)   NOT NULL DEFAULT 1,
   `created_by`     INT UNSIGNED NULL DEFAULT NULL,
   `created_at`     DATETIME     NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_clients_name` (`name`),
-  UNIQUE KEY `uq_clients_api_key_hash` (`api_key_hash`)
+  UNIQUE KEY `uq_clients_api_key_hash` (`api_key_hash`),
+  UNIQUE KEY `uq_clients_api_key_hmac` (`api_key_hash_hmac`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -329,6 +342,20 @@ ALTER TABLE `client_rate_limits`
 -- worker_state, each only when information_schema says it is absent, so the
 -- file can be applied again safely. Apply it BEFORE deploying the code and
 -- then run `php cli\check.php` (13/13 tables + the four upgrade columns).
+--
+-- Secret hardening (webhook secret encrypted at rest + peppered API-key
+-- hashes) is its own re-runnable file, applied the same way BEFORE deploying:
+--
+--   sql\migrations\2026-10-20-secret-hardening.sql
+--
+-- followed by the one-off re-encryption of any webhook secret that is still
+-- stored as plaintext:
+--   php cli\encrypt_webhook_secrets.php
+--
+-- Scripts mode (connections.allow_writes, see README section 12) is its own
+-- re-runnable file, applied the same way BEFORE deploying the code that
+-- reads the column:
+--   sql\migrations\2026-10-20-scripts-mode.sql
 --
 -- A database created before the webhook feature also needs this one-off
 -- ALTER, which the migration deliberately does not repeat (it is not part of

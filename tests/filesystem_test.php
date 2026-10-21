@@ -41,6 +41,12 @@ $ok = \Core\Filesystem::resultPath('cache/abc.JSON');
 $check('legacy cache path + uppercase ext accepted',
     str_replace('\\', '/', (string)realpath(dirname($ok))) === $base . '/cache', $ok);
 
+// storage/archive/ is where expired results are KEPT (moved at expiry, never
+// served): prepare() must create it alongside results/.
+$check('archive dir prepared next to results', is_dir(\Core\Filesystem::archiveDir())
+    && basename(str_replace('\\', '/', \Core\Filesystem::archiveDir()))
+        === \Core\Config::get('storage.archive_subdir', 'archive'));
+
 $check('dot-dot traversal throws', $throws('../config/.env'));
 $check('nested dot-dot throws', $throws('results/../secrets.json'));
 $check('absolute path throws', $throws('/etc/passwd'));

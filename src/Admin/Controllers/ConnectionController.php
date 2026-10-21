@@ -28,7 +28,7 @@ final class ConnectionController
     {
         $row = null;
         if ($id > 0) {
-            $row = Db::instance()->one('SELECT id, name, db_type, host, port, db_name, username, max_concurrency, is_active FROM connections WHERE id = ?', [$id]);
+            $row = Db::instance()->one('SELECT id, name, db_type, host, port, db_name, username, max_concurrency, allow_writes, is_active FROM connections WHERE id = ?', [$id]);
             if ($row === null) {
                 Flashes::set('error', 'Connection not found.');
                 Http::redirect('/admin/connections');
@@ -44,8 +44,12 @@ final class ConnectionController
         $in = self::input();
         $errors = self::validate($in, $id);
         if ($errors !== []) {
-            Flashes::set('error', implode(' ', $errors));
-            Http::redirect($id > 0 ? '/admin/connections/' . $id : '/admin/connections/new');
+            // Re-render with everything the admin typed plus a red border on
+            // the offending field — a redirect would blank the whole form.
+            View::render('connections/edit',
+                ['row' => self::rowFromInput($in, $id), 'errors' => $errors],
+                $id > 0 ? 'Edit connection' : 'New connection');
+            return;
         }
 
         $now = Time::now();
@@ -56,10 +60,11 @@ final class ConnectionController
             $passwordChanged = $in['password'] !== '';
             $db->execute(
                 'UPDATE connections SET name=?, db_type=?, host=?, port=?, db_name=?, username=?,
-                    max_concurrency=?, is_active=?, updated_by=?, updated_at=?
+                    max_concurrency=?, allow_writes=?, is_active=?, updated_by=?, updated_at=?
                  WHERE id=?',
                 [$in['name'], $in['db_type'], $in['host'], $in['port'] === 0 ? null : $in['port'],
-                    $in['db_name'], $in['username'], $in['max_concurrency'], $in['is_active'], $adminId, $now, $id]
+                    $in['db_name'], $in['username'], $in['max_concurrency'], $in['allow_writes'],
+                    $in['is_active'], $adminId, $now, $id]
             );
             if ($passwordChanged) {
                 $db->execute('UPDATE connections SET password_encrypted = ? WHERE id = ?',
@@ -72,11 +77,11 @@ final class ConnectionController
         } else {
             // Empty password is allowed for intranet accounts (stored encrypted).
             $db->execute(
-                'INSERT INTO connections (name, db_type, host, port, db_name, username, password_encrypted, max_concurrency, is_active, created_by, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                'INSERT INTO connections (name, db_type, host, port, db_name, username, password_encrypted, max_concurrency, allow_writes, is_active, created_by, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                 [$in['name'], $in['db_type'], $in['host'], $in['port'] === 0 ? null : $in['port'],
                     $in['db_name'], $in['username'], Encryption::encrypt($in['password']),
-                    $in['max_concurrency'], $in['is_active'], $adminId, $now]
+                    $in['max_concurrency'], $in['allow_writes'], $in['is_active'], $adminId, $now]
             );
             $id = $db->insertId();
             $after = self::snapshotRow($db->one('SELECT * FROM connections WHERE id = ?', [$id]));
@@ -121,39 +126,48 @@ final class ConnectionController
             'username' => trim((string)Http::param('username', 'p')),
             'password' => (string)Http::param('password', 'p'),
             'max_concurrency' => $mc === '' ? null : (ctype_digit($mc) && (int)$mc > 0 ? (int)$mc : 0),
+            'allow_writes' => Http::param('allow_writes', 'p') !== null ? 1 : 0,
             'is_active' => Http::param('is_active', 'p') !== null ? 1 : 0,
         ];
     }
 
-    /** @return array<int,string> */
+    /** The shape connections/edit.php renders, rebuilt from the POST input. */
+    private static function rowFromInput(array $in, int $id): array
+    {
+        return ['id' => $id] + $in; // password is never echoed back
+    }
+
+    /** @return array<string,string> field name => error message */
     private static function validate(array $in, int $id): array
     {
         $e = [];
         if ($in['name'] === '') {
-            $e[] = 'Name is required.';
+            $e['name'] = 'Name is required.';
         }
         if ($in['db_type'] === '') {
-            $e[] = 'Pick a database type (sqlserver, pgsql or mysql).';
+            $e['db_type'] = 'Pick a database type (sqlserver, pgsql or mysql).';
         }
         if ($in['host'] === '') {
-            $e[] = 'Host is required.';
+            $e['host'] = 'Host is required.';
         }
         if ($in['port'] === 0) {
-            $e[] = 'Port must be an integer between 1 and 65535 (or empty).';
+            $e['port'] = 'Port must be an integer between 1 and 65535 (or empty).';
         }
         if ($in['db_name'] === '') {
-            $e[] = 'Database name is required.';
+            $e['db_name'] = 'Database name is required.';
         }
         if ($in['username'] === '') {
-            $e[] = 'Username is required.';
+            $e['username'] = 'Username is required.';
         }
         if ($in['max_concurrency'] === 0) {
-            $e[] = 'Max concurrency must be a positive integer (or leave empty for the default).';
+            $e['max_concurrency'] = 'Max concurrency must be a positive integer (or leave empty for the default).';
         }
-        if ($id === 0 && $in['password'] === '') {
-            // An empty password IS allowed (some intranet MySQL accounts have
-            // none) — it is stored as an encrypted blob so the DB stays opaque.
+        if ($in['allow_writes'] === 1 && $in['db_type'] !== 'sqlserver') {
+            // Only the sqlsrv driver can stream a multi-statement batch.
+            $e['allow_writes'] = 'Scripts mode (allow writes) is only available for SQL Server connections.';
         }
+        // An empty password IS allowed (some intranet MySQL accounts have
+        // none) — it is stored as an encrypted blob so the DB stays opaque.
         return $e;
     }
 

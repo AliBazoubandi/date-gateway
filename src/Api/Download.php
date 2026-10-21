@@ -6,18 +6,19 @@ use Api\Errors;
 use Core\Config;
 use Core\Db;
 use Core\Filesystem;
-use Core\Str;
 use Core\Time;
 use Services\Logger;
-use Worker\Cleanup;
+use Services\ResultArchive;
 
 /**
  * GET /api/v1/results/{token} — chunked, time-limited JSON delivery.
  * Needs: the raw token + the client's Bearer key + a call by THAT client
- * attached to the execution. 410 when expired, 404 when unknown/foreign.
- * The streamed body carries Content-Disposition so browsers and curl -O
- * save it under a stable name. The same streaming path serves instant
- * submissions when they are called with ?download=1.
+ * attached to the execution. Refused when expired (410 status, no body —
+ * see Api\Errors::refusedDelivery), 404 when unknown/foreign.
+ * The streamed body carries Content-Disposition under the run's
+ * deterministic name (="{request code}_{expiry stamp}_client{n}_e{id}.json",
+ * the same name the archive keeps for it). The same streaming path serves
+ * instant submissions when they are called with ?download=1.
  */
 final class Download
 {
@@ -54,8 +55,12 @@ final class Download
 
     /**
      * Shared result-file delivery for the GET download endpoint and for
-     * instant submissions called with ?download=1. Guards status/expiry
-     * (410 when past TTL) and streams the JSON envelope file chunk by chunk.
+     * instant submissions called with ?download=1. Guards status/expiry and
+     * streams the JSON envelope file chunk by chunk. An expired result is
+     * REFUSED as headers + a deliberately undelivered body
+     * (Api\Errors::refusedDelivery): no bytes are ever streamed, so a plain
+     * `curl -o` re-run after expiry fails visibly instead of overwriting the
+     * client's previously saved download with an error payload.
      *
      * @param array<string,mixed> $exec a full executions row
      */
@@ -66,21 +71,33 @@ final class Download
         $status = (string)$exec['status'];
 
         if ($status === 'expired') {
-            self::purgeExpiredFile($exec); // the row may predate cleanup's expiry pass
+            self::purgeExpiredFile($exec); // the row may predate cleanup's archive pass
             Logger::event('expired', $clientId, (int)$exec['request_id'], $callId, (int)$exec['id'], $ip,
                 null, (int)($exec['row_count'] ?? 0), 'download after expiry');
-            Errors::gone('This result has expired.');
+            Errors::refusedDelivery('expired', 'This result has expired.');
         }
         if ($status !== 'ready') {
             Errors::notFound('Unknown token.');
         }
-        if (!empty($exec['expires_at']) && $exec['expires_at'] <= Time::now()) {
-            // Expired between cleanup passes: delete the file BEFORE the 410
-            // so no expired result survives on disk waiting for the sweeper.
+        if (!empty($exec['ready_at']) && (string)$exec['ready_at'] > Time::now()) {
+            // Finished before the delay promise opened: the result exists but
+            // its window has not. Retryable, with the exact wait.
+            $retryAfter = max(1, Time::fromSql((string)$exec['ready_at'])->getTimestamp() - time());
+            Errors::emit(409, 'result_not_ready',
+                'This result is ready but its download window has not opened yet.',
+                ['Retry-After' => (string)$retryAfter]);
+        }
+        if (empty($exec['expires_at']) || $exec['expires_at'] <= Time::now()) {
+            // Expired between cleanup passes: archive the file BEFORE the
+            // refusal (kept, but no longer at its downloadable path — the
+            // sweeper would do the same within minutes; this answers first).
+            // A ready row with NO expires_at fails closed the same way:
+            // without a stamp there is no way to prove the window is still
+            // open, so nothing streams.
             self::purgeExpiredFile($exec, true);
             Logger::event('expired', $clientId, (int)$exec['request_id'], $callId,
                 (int)$exec['id'], $ip, null, (int)($exec['row_count'] ?? 0), 'expired during download');
-            Errors::gone('This result has expired.');
+            Errors::refusedDelivery('expired', 'This result has expired.');
         }
 
         $absolute = '';
@@ -92,13 +109,27 @@ final class Download
             }
         }
         if ($absolute === '' || !is_file($absolute)) {
-            // Ready but the file vanished (manual cleanup?): treat as gone.
+            // Ready but the file vanished (manual cleanup?): treat as gone —
+            // nothing can be delivered, and the refusal never writes a body.
             $db->execute("UPDATE executions SET status = 'expired' WHERE id = ?", [$exec['id']]);
-            Errors::gone('This result is no longer available.');
+            Errors::refusedDelivery('expired', 'This result is no longer available.');
         }
 
         $code = (string)$db->value('SELECT code FROM requests WHERE id = ?', [$exec['request_id']]);
-        $filename = 'result-' . (Str::isCode($code) ? $code : 'request') . '-' . (string)$exec['id'] . '.json';
+        // The delivered file carries the SAME deterministic name the archive
+        // uses for this run (ResultArchive::nameFor; the client is the one
+        // whose call first triggered the execution, like the evidence copy),
+        // so a saved download and its archived twin match by name.
+        $origClient = $db->value(
+            'SELECT client_id FROM calls WHERE execution_id = ? ORDER BY created_at ASC, id ASC LIMIT 1',
+            [(int)$exec['id']]
+        );
+        $filename = ResultArchive::nameFor(
+            (int)$exec['id'],
+            $code,
+            $origClient !== null ? (int)$origClient : null,
+            (string)$exec['expires_at']
+        );
 
         header('Content-Type: application/json; charset=utf-8');
         header('X-Content-Type-Options: nosniff');
@@ -128,16 +159,31 @@ final class Download
     }
 
     /**
-     * Delete the on-disk result of an execution that is being refused as
-     * expired: unlink first, then clear the stored reference (and mark the
-     * row expired when it was caught by the TTL race). A racing re-read then
-     * self-heals to 410 and no expired file survives on disk.
+     * Archive the on-disk result of an execution that is being refused as
+     * expired: move it to storage/archive/ first (it stays as evidence and is
+     * not downloadable either way — the 410 above is the access check), then
+     * clear the stored reference (and mark the row expired when it was caught
+     * by the TTL race). A racing re-read then self-heals to 410 and no
+     * downloadable result survives at its published path.
      * @param array<string,mixed> $exec a full executions row
      */
     private static function purgeExpiredFile(array $exec, bool $markExpired = false): void
     {
         if (!empty($exec['result_path'])) {
-            Cleanup::safeUnlink((string)$exec['result_path']);
+            // File under the originating client's name (same deterministic
+            // name the ready-time copy and the cleanup sweep use), so a run
+            // archives to exactly one evidence file whoever triggers it.
+            $origClient = Db::instance()->value(
+                'SELECT client_id FROM calls WHERE execution_id = ? ORDER BY created_at ASC, id ASC LIMIT 1',
+                [(int)$exec['id']]
+            );
+            ResultArchive::storeResult(
+                (string)$exec['result_path'],
+                (int)$exec['id'],
+                (string)Db::instance()->value('SELECT code FROM requests WHERE id = ?', [$exec['request_id']]),
+                $origClient !== null ? (int)$origClient : null,
+                (string)($exec['expires_at'] ?? Time::now())
+            );
         }
         $sql = "UPDATE executions SET result_path = NULL, result_size_bytes = NULL";
         if ($markExpired) {

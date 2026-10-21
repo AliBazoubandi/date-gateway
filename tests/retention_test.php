@@ -7,9 +7,15 @@
 // receives the windows through the environment, because config is read at
 // bootstrap: php tests\retention_test.php --prune
 //
+// One deliberate default-pass exception is asserted too: a ready row whose
+// expires_at was never stamped is refused by every endpoint anyway (a window
+// that cannot be proven is not one), so cleanup expunges it under the defaults.
+//
 // Asserted: pending deliveries keep their call, settled deliveries of a pruned
 // call go before it (fk_whd_call is RESTRICT), an execution survives while a
-// call points at it, live (scheduled) work is never pruned, files go with their
+// call points at it, live (scheduled) work is never pruned, an old-but-still-
+// live ready run (window open) is left alone by the default pass while a
+// ready row with NO expires_at is expunged even by it, files go with their
 // rows, >1000 old rows need several batches, and a volume under the floor makes
 // the worker fail a run with storage_low before writing anything.
 // Usage: php tests\retention_test.php
@@ -55,6 +61,13 @@ $now = now_str();
 // --------------------------- fixtures + self-clean ---------------------------
 $connectionIds = $requestIds = $clientIds = [];
 $wipe = static function () use ($db, $run, &$connectionIds, &$requestIds, &$clientIds): void {
+    // The no-TTL sweep files the moved result into storage/archive/ under the
+    // deterministic name ({code}_{stamp}_client{n}_e{id}.json) starting with
+    // this run's request-code prefix; collected here like the per-execution
+    // results, since result_path no longer points at it.
+    foreach (glob(Filesystem::archiveDir() . '/rtk' . $run . '*.json') ?: [] as $f) {
+        @unlink($f);
+    }
     if ($requestIds !== []) {
         $r = implode(',', array_map('intval', $requestIds));
         foreach ($db->rows("SELECT id, result_path FROM executions WHERE request_id IN ($r)") as $row) {
@@ -111,7 +124,7 @@ $requestIds[] = $reqPrune;
 $requestIds[] = $reqDisk;
 
 $db->execute(
-    'INSERT INTO clients (name, api_key_hash, webhook_url, webhook_secret, is_active, created_at)
+    'INSERT INTO clients (name, api_key_hash, webhook_url, webhook_secret_enc, is_active, created_at)
      VALUES (?, ?, NULL, NULL, 1, ?)',
     ["rtk{$run} client", hash('sha256', 'rtk' . $run), $now]
 );
@@ -136,10 +149,22 @@ $mkFile = static function (int $execId, string $suffix = '.json'): string {
     return $path;
 };
 
-// Old ready run holding a file nobody else owns: prune must delete both.
-$execFile = $mkExec(['status' => 'ready']);
+// Old LIVE ready run: scheduled and finished 60 days ago, but its download
+// window (expires_at) is still open, so the default pass must leave the row
+// and the file alone. The executions window later deletes both; nobody
+// points at either.
+$execFile = $mkExec(['status' => 'ready', 'expires_at' => $ago(-60)]);
 $db->execute('UPDATE executions SET result_path = ? WHERE id = ?', ['results/' . $execFile . '.json', $execFile]);
 $fileOfExecFile = $mkFile($execFile);
+
+// A legacy ready run whose expires_at was never stamped: cleanup expunges it
+// under the SHIPPED defaults (file archived, row marked expired, 'expired'
+// event logged) because every endpoint refuses it regardless. Its row is kept
+// RECENT (finished two days ago) so the executions window later leaves the
+// row in place — only the file is expected to move.
+$execNoTtl = $mkExec(['status' => 'ready', 'finished_at' => $ago(2)]);
+$db->execute('UPDATE executions SET result_path = ? WHERE id = ?', ['results/' . $execNoTtl . '.json', $execNoTtl]);
+$execNoTtlFile = $mkFile($execNoTtl);
 
 // Old expired run whose result row is gone but a .tmp sibling survived.
 $execTmp = $mkExec(['status' => 'expired']);
@@ -207,7 +232,7 @@ $db->execute(
     [$ago(2), 'client', "rtk{$run} audit new", 'create']
 );
 
-$liveExecs = [$execFile, $execTmp, $execOldCall, $execYoungCall, $execScheduled];
+$liveExecs = [$execFile, $execNoTtl, $execTmp, $execOldCall, $execYoungCall, $execScheduled];
 $liveCalls = [$callPlain, $callPending, $callYoungDelivery, $callOnOldExec, $callYoung, $callYoungDelivery2];
 $countIn = static fn (string $sql, array $params = []): int => (int)$db->value($sql, $params);
 
@@ -228,10 +253,20 @@ $check('all fixtures survive the default pass',
     $countIn('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqPrune]) === count($liveExecs)
     && $countIn('SELECT COUNT(*) FROM calls WHERE request_id = ?', [$reqPrune]) === count($liveCalls)
     && $countIn('SELECT COUNT(*) FROM webhook_deliveries') === 3
-    && $countIn("SELECT COUNT(*) FROM request_logs WHERE request_id = ?", [$reqPrune]) === 1204
+    // request_logs of this request only, ignoring log rows that carry an
+    // execution id — the no-TTL sweep's 'expired' event, asserted above.
+    && $countIn('SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND execution_id IS NULL',
+        [$reqPrune]) === 1204
     && $countIn('SELECT COUNT(*) FROM admin_audit_log WHERE entity_name LIKE ?', ["rtk{$run}%"]) === 2);
-$check('no result file is touched by the default pass',
+$check('live fixtures keep their result files under the default pass',
     is_file($fileOfExecFile) && is_file($tmpSibling) && is_file($execYoungCallFile));
+$check('a ready row without expires_at is swept under the defaults',
+    (string)$db->value('SELECT status FROM executions WHERE id = ?', [$execNoTtl]) === 'expired'
+    && $db->value('SELECT result_path FROM executions WHERE id = ?', [$execNoTtl]) === null
+    && !is_file($execNoTtlFile)
+    && count(glob(Filesystem::archiveDir() . "/*_e{$execNoTtl}.json") ?: []) === 1
+    && $countIn("SELECT COUNT(*) FROM request_logs WHERE execution_id = ? AND event = 'expired'",
+        [$execNoTtl]) === 1);
 
 // ------------------- phase 2: the same pass with windows ---------------------
 putenv('GATEWAY_RETENTION_REQUEST_LOGS_DAYS=7');
@@ -263,10 +298,12 @@ $check('summary reports what went away', ($s1['logs_removed'] ?? 0) >= 1202
     json_encode($report ?? []));
 
 $check('old logs pruned in several batches, recent kept',
-    $countIn("SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND `timestamp` < ?",
-        [$reqPrune, $ago(7)]) === 0
-    && $countIn("SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND `timestamp` >= ?",
-        [$reqPrune, $ago(7)]) === 2);
+    // execution_id IS NULL skips the no-TTL sweep's 'expired' event, which
+    // stays on purpose (see phase 1).
+    $countIn("SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND execution_id IS NULL
+              AND `timestamp` < ?", [$reqPrune, $ago(7)]) === 0
+    && $countIn("SELECT COUNT(*) FROM request_logs WHERE request_id = ? AND execution_id IS NULL
+              AND `timestamp` >= ?", [$reqPrune, $ago(7)]) === 2);
 $check('old audit row pruned, recent kept',
     $countIn("SELECT COUNT(*) FROM admin_audit_log WHERE entity_name = ?", ["rtk{$run} audit old"]) === 0
     && $countIn("SELECT COUNT(*) FROM admin_audit_log WHERE entity_name = ?", ["rtk{$run} audit new"]) === 1);

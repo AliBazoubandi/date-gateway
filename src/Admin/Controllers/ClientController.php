@@ -2,13 +2,16 @@
 declare(strict_types=1);
 namespace Admin\Controllers;
 
+use Admin\Auth;
 use Admin\Flashes;
 use Admin\View;
+use Core\ApiKeyHash;
 use Core\Db;
 use Core\Http;
 use Core\Str;
 use Core\Time;
 use Services\AuditLogger;
+use Services\Encryption;
 use Services\WebhookUrl;
 
 final class ClientController
@@ -33,6 +36,12 @@ final class ClientController
             Flashes::set('error', 'Client not found.');
             Http::redirect('/admin/clients');
         }
+        self::renderEdit($db, $row ?? self::defaults(), $id, []);
+    }
+
+    /** The edit form: a DB row, or the rejected POST input with field errors. */
+    private static function renderEdit(Db $db, array $row, int $id, array $errors): void
+    {
         $requests = $db->rows('SELECT id, code, name, response_mode FROM requests WHERE is_active = 1 ORDER BY code');
         $granted = [];
         if ($id > 0) {
@@ -40,8 +49,8 @@ final class ClientController
                 $granted[(int)$g['request_id']] = true;
             }
         }
-        View::render('clients/edit', ['row' => $row ?? self::defaults(), 'requests' => $requests, 'granted' => $granted],
-            $row === null ? 'New client' : 'Edit client');
+        View::render('clients/edit', ['row' => $row, 'requests' => $requests, 'granted' => $granted, 'errors' => $errors],
+            $row['id'] ?? 0 ? 'Edit client' : 'New client');
     }
 
     public static function save(int $id): void
@@ -50,10 +59,12 @@ final class ClientController
         $in = self::input();
         $errors = self::validate($in, $id);
         if ($errors !== []) {
-            Flashes::set('error', implode(' ', $errors));
-            Http::redirect($id > 0 ? '/admin/clients/' . $id : '/admin/clients/new');
+            // Re-render with everything the admin typed plus a red border on
+            // the offending field — a redirect would blank the whole form.
+            self::renderEdit($db, ['id' => $id] + $in, $id, $errors);
+            return;
         }
-        $adminId = (int)($_SESSION['admin_user_id'] ?? 0);
+        $adminId = (int)(Auth::current()['id'] ?? 0);
         $now = Time::now();
 
         if ($id > 0) {
@@ -62,9 +73,9 @@ final class ClientController
             // means "keep it"; only a non-empty value rotates the secret.
             $keepSecret = $in['webhook_secret'] === '';
             $db->execute(
-                'UPDATE clients SET name=?, type=?, webhook_url=?, webhook_secret=?, is_active=? WHERE id=?',
+                'UPDATE clients SET name=?, type=?, webhook_url=?, webhook_secret_enc=?, is_active=? WHERE id=?',
                 [$in['name'], $in['type'], $in['webhook_url'],
-                    $keepSecret ? (string)($before['webhook_secret'] ?? '') : $in['webhook_secret'],
+                    $keepSecret ? (string)($before['webhook_secret_enc'] ?? '') : Encryption::encrypt($in['webhook_secret']),
                     $in['is_active'], $id]
             );
             $after = $db->one('SELECT * FROM clients WHERE id = ?', [$id]);
@@ -76,12 +87,14 @@ final class ClientController
         }
 
         // Create: generate the API key here and show it exactly once.
-        $apiKey = 'gw_' . Str::hex(24); // 51 chars incl. prefix; only SHA-256 is stored
+        $apiKey = 'gw_' . Str::hex(24); // 51 chars incl. prefix; only hashes are stored
         $secret = Str::hex(24);
         $db->execute(
-            'INSERT INTO clients (name, type, api_key_hash, webhook_url, webhook_secret, is_active, created_by, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [$in['name'], $in['type'], hash('sha256', $apiKey), $in['webhook_url'], $in['webhook_secret'] ?: $secret, $in['is_active'], $adminId, $now]
+            'INSERT INTO clients (name, type, api_key_hash, api_key_hash_hmac, webhook_url, webhook_secret_enc, is_active, created_by, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            [$in['name'], $in['type'], ApiKeyHash::legacy($apiKey), ApiKeyHash::peppered($apiKey),
+                $in['webhook_url'], Encryption::encrypt($in['webhook_secret'] ?: $secret),
+                $in['is_active'], $adminId, $now]
         );
         $newId = $db->insertId();
         $after = self::mask($db->one('SELECT * FROM clients WHERE id = ?', [$newId]), true, false);
@@ -121,7 +134,10 @@ final class ClientController
             Http::redirect('/admin/clients');
         }
         $apiKey = 'gw_' . Str::hex(24);
-        $db->execute('UPDATE clients SET api_key_hash = ? WHERE id = ?', [hash('sha256', $apiKey), $id]);
+        // Both hash forms are written: the bare SHA-256 must stop matching the
+        // old key immediately, and the peppered HMAC is the new primary lookup.
+        $db->execute('UPDATE clients SET api_key_hash = ?, api_key_hash_hmac = ? WHERE id = ?',
+            [ApiKeyHash::legacy($apiKey), ApiKeyHash::peppered($apiKey), $id]);
         $afterAudit = ['id' => $id, 'name' => $row['name'], 'api_key' => '(changed)'];
         AuditLogger::record('client', 'update', $id, (string)$row['name'], ['api_key' => '(unchanged)'], $afterAudit);
         View::render('clients/key_reveal', ['client' => ['name' => $row['name']], 'api_key' => $apiKey,
@@ -138,7 +154,10 @@ final class ClientController
             Http::redirect('/admin/clients');
         }
         $secret = Str::hex(24);
-        $db->execute('UPDATE clients SET webhook_secret = ? WHERE id = ?', [$secret, $id]);
+        // Encrypted at rest (AES-256-GCM under the master key); the plaintext
+        // exists only here, on the one-time reveal page.
+        $db->execute('UPDATE clients SET webhook_secret_enc = ? WHERE id = ?',
+            [Encryption::encrypt($secret), $id]);
         AuditLogger::record('client', 'update', $id, (string)$row['name'],
             ['webhook_secret' => '(stored value)'],
             ['webhook_secret' => '(rotated; shown once)']);
@@ -155,7 +174,7 @@ final class ClientController
             Flashes::set('error', 'Client not found.');
             Http::redirect('/admin/clients');
         }
-        $adminId = (int)($_SESSION['admin_user_id'] ?? 0);
+        $adminId = (int)(Auth::current()['id'] ?? 0);
         $posted = [];
         if (is_array($_POST['request_ids'] ?? null)) {
             foreach ($_POST['request_ids'] as $rid) {
@@ -211,7 +230,7 @@ final class ClientController
     private static function defaults(): array
     {
         return ['id' => 0, 'name' => '', 'type' => 'agent', 'is_active' => 1,
-            'webhook_url' => '', 'webhook_secret' => '', 'api_key_hash' => ''];
+            'webhook_url' => '', 'webhook_secret_enc' => '', 'api_key_hash' => ''];
     }
 
     private static function input(): array
@@ -226,15 +245,16 @@ final class ClientController
         ];
     }
 
+    /** @return array<string,string> field name => error message */
     private static function validate(array $in, int $id): array
     {
         $db = Db::instance();
         $e = [];
         if ($in['name'] === '') {
-            $e[] = 'Name is required.';
+            $e['name'] = 'Name is required.';
         }
         if ($db->value('SELECT id FROM clients WHERE name = ? AND id <> ?', [$in['name'], $id]) !== null) {
-            $e[] = 'Name already exists.';
+            $e['name'] = 'Name already exists.';
         }
         if ($in['webhook_url'] !== '') {
             // Full SSRF gate, not just a prefix check: an admin must not be
@@ -242,13 +262,18 @@ final class ClientController
             // or any other address the policy blocks (Services\WebhookUrl).
             $error = WebhookUrl::check($in['webhook_url'])['error'];
             if ($error !== '') {
-                $e[] = $error;
+                $e['webhook_url'] = $error;
             }
+        }
+        if (strlen($in['webhook_secret']) > 128) {
+            // Kept at the legacy storage cap: 128 chars turn into a ~220-char
+            // gcm:v1: blob, which fits webhook_secret_enc VARCHAR(255).
+            $e['webhook_secret'] = 'Webhook secret is too long (128 characters max).';
         }
         return $e;
     }
 
-    /** Never let the API key or webhook secret reach the audit JSON. */
+    /** Never let the API key, webhook secret or their hashes reach the audit JSON. */
     private static function mask(?array $row, bool $isNew, bool $secretChanged): ?array
     {
         if ($row === null) {
@@ -256,8 +281,11 @@ final class ClientController
         }
         $out = $row;
         $out['api_key'] = $isNew ? '(generated, shown once)' : '(unchanged)';
-        unset($out['api_key_hash']);
-        $out['webhook_secret'] = $secretChanged ? '(changed to a new value; stored as is)' : '(stored as is)';
+        unset($out['api_key_hash'], $out['api_key_hash_hmac']);
+        unset($out['webhook_secret_enc']);
+        $out['webhook_secret'] = $secretChanged
+            ? '(changed to a new value; encrypted at rest)'
+            : '(encrypted at rest)';
         return $out;
     }
 }

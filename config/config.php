@@ -50,13 +50,22 @@ return [
         // throwaway directory so a run can never touch real result files).
         'dir' => \Core\Env::get('GATEWAY_STORAGE_DIR'),   // null = <project root>/storage
         'results_subdir' => 'results',
+        // Where an expired result file is KEPT after its TTL: the file is
+        // moved here (same volume, atomic rename), named
+        // {request_code}_{expires_at}_client{client_id}_e{execution_id}.json,
+        // and every endpoint refuses expired results regardless - nothing
+        // ever serves from this directory. See README "Archived results".
+        'archive_subdir' => 'archive',
     ],
 
     'limits' => [
         // Per-target-connection cap for concurrently RUNNING executions. The
         // delayed worker and the instant path share this one counter: the
-        // target database sees queries, not gateway modes.
-        'connection_concurrency' => 2,
+        // target database sees queries, not gateway modes. The scheduler runs
+        // delayed queries as soon as they are submitted (scheduled_at is the
+        // earliest DOWNLOAD time), so this cap is what throttles the target:
+        // 5 concurrent runs, earliest promise first, the rest queue.
+        'connection_concurrency' => 5,
         'instant' => [
             // Sane upper bounds enforced by the admin UI for instant requests.
             'max_timeout_seconds' => 60,

@@ -6,10 +6,10 @@ use Core\Config;
 use Core\Str;
 
 /**
- * AES-256-GCM encryption for connection passwords, keyed by
- * `security.master_key`: the real value is GATEWAY_MASTER_KEY in the untracked
- * config/.env, and the config/config.php fallback is a placeholder that
- * assertUsableKey() refuses to run with.
+ * AES-256-GCM encryption for secrets at rest (connection passwords, webhook
+ * secrets), keyed by `security.master_key`: the real value is
+ * GATEWAY_MASTER_KEY in the untracked config/.env, and the config/config.php
+ * fallback is a placeholder that assertUsableKey() refuses to run with.
  *
  * Blob format: gcm:v1:<iv_b64>:<tag_b64>:<ct_b64>
  */
@@ -68,13 +68,13 @@ final class Encryption
     {
         $parts = explode(':', $blob);
         if (count($parts) !== 5 || $parts[0] !== 'gcm' || $parts[1] !== 'v1') {
-            throw new \RuntimeException('Stored connection password has an unknown format.');
+            throw new \RuntimeException('Stored secret has an unknown format.');
         }
         $iv = base64_decode($parts[2], true);
         $tag = base64_decode($parts[3], true);
         $ct = base64_decode($parts[4], true);
         if ($iv === false || $tag === false || $ct === false || strlen($iv) !== 12) {
-            throw new \RuntimeException('Stored connection password is corrupted.');
+            throw new \RuntimeException('Stored secret is corrupted.');
         }
         $plain = openssl_decrypt($ct, 'aes-256-gcm', self::key(), OPENSSL_RAW_DATA, $iv, $tag);
         if ($plain === false) {

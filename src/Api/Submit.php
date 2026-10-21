@@ -151,6 +151,13 @@ final class Submit
             && (string)$prior['expires_at'] <= Time::now()) {
             $status = 'expired';
         }
+        // And the scheduler's early-finish hold: ready, but the download
+        // window has not opened yet — a delayed replay answers 'scheduled'
+        // exactly like the status endpoint does.
+        if ($status === 'ready' && $prior['ready_at'] !== null
+            && (string)$prior['ready_at'] > Time::now()) {
+            $status = 'scheduled';
+        }
         $inFlight = (string)$prior['mode'] === 'instant'
             && ($status === 'scheduled' || $status === 'running');
         if ($inFlight) {
@@ -291,12 +298,16 @@ final class Submit
             Logger::event('shared', (int)$client['id'], $requestId, $callId, (int)$ready['id'], $ip,
                 null, (int)$ready['row_count'], 'attached to ready execution (cache rule 2, fresh call token)');
             $release();
+            // The attach is correct even during the early-finish hold (it
+            // prevents a duplicate run); only the response waits for the
+            // download window, exactly like the status endpoint.
+            $held = (string)$ready['ready_at'] > Time::now();
             json_out([
                 'call_id' => $callId,
-                'status' => 'ready',
+                'status' => $held ? 'scheduled' : 'ready',
                 'ready_at' => Time::iso((string)$ready['ready_at']),
                 'expires_at' => Time::iso((string)$ready['expires_at']),
-                'link' => Links::download($token),
+                'link' => $held ? null : Links::download($token),
             ]);
         }
 

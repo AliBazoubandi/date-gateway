@@ -10,11 +10,22 @@ use Core\Time;
 use Services\ExecutionError;
 use Services\Logger;
 use Services\QueryRunner;
+use Services\ResultArchive;
 use Services\ResultTooLargeException;
 use Services\StorageGuard;
 
 /**
  * Delayed-execution worker: moves executions scheduled -> running -> ready|failed.
+ *
+ * Scheduler model (P2): a delayed execution starts running as soon as the
+ * worker sees it — scheduled_at is the earliest DOWNLOAD time the client was
+ * promised (delay_minutes), not the earliest run time. Priority is
+ * earliest-deadline-first (ORDER BY scheduled_at): when a connection is at
+ * its concurrency cap, the run whose promise opens soonest claims the next
+ * free slot, so results are stored before their promised time whenever
+ * capacity allows. ready_at never precedes scheduled_at: a run that finishes
+ * early holds its result (status/download refuse it until the promise opens)
+ * and expires_at measures the TTL from the moment downloads actually open.
  *
  * Concurrency model:
  *  - A pass is sequential inside itself. Parallelism comes from running one
@@ -25,7 +36,7 @@ use Services\StorageGuard;
  *    `gw_cli_worker:<id>` / worker-<id>.lock, which is what lets different
  *    connections run at the same time while two workers never share one.
  *  - Claims are atomic: UPDATE ... WHERE status = 'scheduled' (InnoDB row lock).
- *  - The per-connection cap (connections.max_concurrency, else config default 2)
+ *  - The per-connection cap (connections.max_concurrency, else config default 5)
  *    limits concurrently RUNNING executions of BOTH modes; it is checked DB-side
  *    so it stays valid when several hosts share one metadata DB. A
  *    single-connection pass still runs its own rows one after another: the cap
@@ -42,11 +53,14 @@ use Services\StorageGuard;
  *  - No automatic retries: a failed execution stays failed; clients resubmit.
  *
  * Success flow (per execution): stream rows to storage/results/{id}.json, mark
- * ready with ready_at/expires_at = ready_at + request ttl_minutes, set
- * result_path/size/row_count/truncated (download credentials are per call).
- * Webhook deliveries for the attached calls are enqueued by the worker as
- * 'pending' rows on success AND on failure, to be sent by the webhook
- * deliverer; the payload follows the execution status.
+ * ready with ready_at = max(completion, scheduled_at) and expires_at =
+ * ready_at + request ttl_minutes, set result_path/size/row_count/truncated
+ * (download credentials are per call), and copy the finished file to the
+ * archive (ResultArchive::copyResult) so the evidence exists whatever the
+ * client does next. Webhook deliveries for the attached calls are enqueued by
+ * the worker as 'pending' rows on success AND on failure, to be sent by the
+ * webhook deliverer; the payload follows the execution status and the
+ * deliverer holds 'ready' payloads whose download window has not opened yet.
  */
 final class Worker
 {
@@ -83,12 +97,17 @@ final class Worker
         }
 
         $db = Db::instance();
+        // Every scheduled execution is runnable NOW: scheduled_at is the
+        // earliest-download promise, not a start time. Earliest deadline
+        // first, so a connection at its cap frees its next slot to the run
+        // whose promise opens soonest and results land before promise time
+        // whenever capacity allows.
         $dueSql =
             "SELECT e.id, r.connection_id
              FROM executions e
              JOIN requests r ON r.id = e.request_id
              JOIN connections c ON c.id = r.connection_id
-             WHERE e.mode = 'delayed' AND e.status = 'scheduled' AND e.scheduled_at <= NOW()
+             WHERE e.mode = 'delayed' AND e.status = 'scheduled'
                AND r.is_active = 1 AND c.is_active = 1";
         $dueArgs = [];
         if ($connectionId !== null) {
@@ -328,7 +347,13 @@ final class Worker
         array $result
     ): void {
         $execId = (int)$exec['id'];
-        $readyAt = Time::now();
+        $completedAt = Time::now();
+        // The download window opens at the later of "the query finished" and
+        // "the delay promise the client was given": a fast query holds its
+        // result until scheduled_at (status/download refuse it before then),
+        // and expires_at measures the TTL from the moment downloads open.
+        $scheduledAt = (string)($exec['scheduled_at'] ?? '');
+        $readyAt = ($scheduledAt !== '' && $scheduledAt > $completedAt) ? $scheduledAt : $completedAt;
         $ttl = max(1, (int)$request['ttl_minutes']);
         $expiresAt = Time::mysql(Time::addMinutes(new \DateTimeImmutable($readyAt, Time::timezone()), $ttl));
         $absolute = Filesystem::resultsDir() . '/' . $execId . '.json';
@@ -341,7 +366,7 @@ final class Worker
                 'row_count' => $result['row_count'],
                 'truncated' => (bool)$result['truncated'],
                 'duration_ms' => $result['duration_ms'],
-                'executed_at' => Time::iso($readyAt),
+                'executed_at' => Time::iso($completedAt),
             ]);
         } catch (\RuntimeException $e) {
             $writer->discard();
@@ -384,6 +409,33 @@ final class Worker
         Logger::event('succeeded', null, (int)$exec['request_id'], null, $execId, null,
             (int)$result['duration_ms'], (int)$result['row_count'],
             $result['truncated'] ? 'result ready; truncated at max_rows' : 'result ready');
+
+        // Keep the result no matter what the client does next: archive a copy
+        // NOW, while the run is fresh. The live file stays at its downloadable
+        // path; the expiry sweep later moves it and recognises this copy by
+        // its deterministic name. A failed copy must not fail the run — the
+        // live result still serves, and the sweep archives it at expiry.
+        $archived = ResultArchive::copyResult(
+            'results/' . $execId . '.json',
+            $execId,
+            (string)$request['code'],
+            self::originatingClientId($execId),
+            $expiresAt
+        );
+        if ($archived === null) {
+            error_log("ResultArchive: ready-time copy failed for execution {$execId}; "
+                . 'the expiry sweep will archive the live file instead');
+        }
+    }
+
+    /** The client whose call first triggered the execution (archive naming). */
+    private static function originatingClientId(int $execId): ?int
+    {
+        $v = Db::instance()->value(
+            'SELECT client_id FROM calls WHERE execution_id = ? ORDER BY created_at ASC, id ASC LIMIT 1',
+            [$execId]
+        );
+        return $v !== null ? (int)$v : null;
     }
 
     private static function finalizeFailure(

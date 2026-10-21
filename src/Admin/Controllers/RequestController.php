@@ -48,8 +48,14 @@ final class RequestController
         $in = self::input();
         $errors = self::validate($in, $id);
         if ($errors !== []) {
-            Flashes::set('error', implode(' ', $errors));
-            Http::redirect($id > 0 ? '/admin/requests/' . $id : '/admin/requests/new');
+            // Re-render with everything the admin typed plus a red border on
+            // the offending field — a redirect would blank the whole form.
+            View::render('requests/edit', [
+                'row' => self::rowFromInput($in, $id),
+                'connections' => $db->rows('SELECT id, name, db_type, is_active FROM connections ORDER BY name'),
+                'errors' => $errors,
+            ], $id > 0 ? 'Edit request' : 'New request');
+            return;
         }
         $adminId = (int)($_SESSION['admin_user_id'] ?? 0);
         $now = Time::now();
@@ -195,7 +201,7 @@ final class RequestController
             $maxTimeout = 1800;
             $maxRows = 10000000;
         }
-        $int = static function (string $key, ?string $src, int $min, int $max, int $default): int {
+        $int = static function (string $key, string $src, int $min, int $max, int $default): int {
             $raw = trim((string)(Http::param($key, $src) ?? ''));
             $n = ($raw === '') ? $default : (int)$raw;
             return min(max($n, $min), $max);
@@ -223,35 +229,49 @@ final class RequestController
         ];
     }
 
+    /** The shape requests/edit.php renders, rebuilt from the POST input. */
+    private static function rowFromInput(array $in, int $id): array
+    {
+        return ['id' => $id, 'instant_defaults' => (array)Config::get('limits.instant.defaults', [])] + $in;
+    }
+
+    /** @return array<string,string> field name => error message */
     private static function validate(array $in, int $id): array
     {
         $db = Db::instance();
         $e = [];
         if (!Str::isCode($in['code'])) {
-            $e[] = 'Code must be 1-64 chars of [A-Za-z0-9._-].';
+            $e['code'] = 'Code must be 1-64 chars of [A-Za-z0-9._-].';
         }
         $dupe = $db->value('SELECT id FROM requests WHERE code = ? AND id <> ?', [$in['code'], $id]);
         if ($dupe !== null) {
-            $e[] = 'Code already exists for another request.';
+            $e['code'] = 'Code already exists for another request.';
         }
         if ($in['name'] === '') {
-            $e[] = 'Name is required.';
+            $e['name'] = 'Name is required.';
         }
         if (trim($in['sql_text']) === '') {
-            $e[] = 'SQL text is required.';
+            $e['sql_text'] = 'SQL text is required.';
         } else {
-            $conn = $db->one('SELECT id, db_type FROM connections WHERE id = ?', [$in['connection_id']]);
+            $conn = $db->one('SELECT id, db_type, allow_writes FROM connections WHERE id = ?', [$in['connection_id']]);
             if ($conn === null) {
-                $e[] = 'Pick a connection.';
+                $e['connection_id'] = 'Pick a connection.';
             }
-            // Save-time gate so a non-read-only statement is rejected before
-            // it can ever be scheduled (QueryRunner re-checks at execution).
+            // Save-time gate so a forbidden statement is rejected before it
+            // can ever be scheduled (QueryRunner re-checks at execution).
             // Scanned with the target's dialect: `#` comments, backslash
-            // escapes and `[...]` identifiers mean different things per server.
-            try {
-                \Services\SqlGuard::assertReadOnly($in['sql_text'], (string)($conn['db_type'] ?? ''));
-            } catch (\RuntimeException $ex) {
-                $e[] = 'SQL must be a single read-only SELECT statement. ' . $ex->getMessage();
+            // escapes and `[...]` identifiers mean different things per
+            // server. A scripts-mode connection (allow_writes, SQL Server
+            // only) may carry a multi-statement batch; everything else must
+            // be provably read-only.
+            if (!isset($e['connection_id'])) {
+                try {
+                    \Services\SqlGuard::assert($in['sql_text'], (string)$conn['db_type'], !empty($conn['allow_writes']));
+                } catch (\RuntimeException $ex) {
+                    $e['sql_text'] = !empty($conn['allow_writes'])
+                        ? 'SQL rejected by the script policy (UPDATE, DELETE and EXEC-style statements stay blocked): ' . $ex->getMessage()
+                        : 'SQL must be a single read-only SELECT statement. ' . $ex->getMessage();
+                }
             }
         }
         return $e;

@@ -143,5 +143,56 @@ $blocked('discard all', 'DISCARD ALL');
 $blocked('lock table', 'LOCK TABLE t IN ACCESS EXCLUSIVE MODE');
 $blocked('do block', "DO \$\$ BEGIN END \$\$");
 
+// ---- scripts mode: SqlGuard::assert(..., allowWrites = true) ----
+// The relaxed per-connection policy (connections.allow_writes = 1, SQL Server
+// only): multi-statement batches are fine, INSERT/CREATE/DROP/SET are fine,
+// but row mutation of EXISTING data and code invocation stay blocked.
+$allowedS = static function (string $label, string $sql, string $dialect = 'sqlserver') use ($check): void {
+    try {
+        \Services\SqlGuard::assert($sql, $dialect, true);
+        $check($label, true);
+    } catch (\RuntimeException $e) {
+        $check($label, false, 'unexpectedly rejected: ' . $e->getMessage());
+    }
+};
+$blockedS = static function (string $label, string $sql, string $dialect = 'sqlserver') use ($check): void {
+    try {
+        \Services\SqlGuard::assert($sql, $dialect, true);
+        $check($label, false, 'unexpectedly allowed');
+    } catch (\RuntimeException $e) {
+        $check($label, true, $e->getMessage());
+    }
+};
+
+$allowedS('classic temp-table script shape',
+    "DECLARE @AccYear INT = 1405;\n"
+    . "SELECT GoodsRef, SUM(OnHandQty) AS TotalQty INTO #Mojoodi FROM gnr.tblStockGoods WHERE AccYear = @AccYear GROUP BY GoodsRef;\n"
+    . "CREATE INDEX IX_M ON #Mojoodi (GoodsRef);\n"
+    . "SELECT * FROM #Mojoodi;\n"
+    . "DROP INDEX IX_M ON #Mojoodi;\n"
+    . "DROP TABLE #Mojoodi;");
+$allowedS('insert is fine in scripts mode', 'INSERT INTO #stage (a) VALUES (1); SELECT a FROM #stage;');
+$allowedS('leading-semicolon WITH (T-SQL)', ';WITH x AS (SELECT 1 AS n) SELECT * FROM x;');
+$allowedS('create and drop table', 'CREATE TABLE #t (id INT); DROP TABLE #t;');
+$allowedS('keyword inside string is inert', "SELECT 'update' AS w; SELECT 'delete' AS w2;");
+$allowedS('bracketed identifiers stay inert', 'SELECT [update], [delete] FROM #t; SELECT [exec] FROM #u;');
+$allowedS('declare with solar function call', "DECLARE @NowDate VARCHAR(10) = gnr.DateTimeToSolar(GETDATE(), ''); SELECT @NowDate AS d;");
+
+$blockedS('update anywhere in the batch', 'SELECT 1; UPDATE t SET x = 1;');
+$blockedS('delete anywhere in the batch', 'SELECT 1; DELETE FROM t WHERE id = 1;');
+$blockedS('merge', 'MERGE INTO t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET t.x = s.x;');
+$blockedS('truncate', 'TRUNCATE TABLE t;');
+$blockedS('exec', 'EXEC sp_configure;');
+$blockedS('execute', 'EXECUTE dbo.sp_x 1;');
+$blockedS('call', 'CALL do_something();');
+$blockedS('select into outfile', "SELECT * FROM t INTO OUTFILE '/tmp/x.txt';");
+$blockedS('update hidden in the last statement', 'CREATE TABLE #t (id INT); SELECT 1; UPDATE #t SET id = 2;');
+$blockedS('comment-only script', '-- nothing here');
+$blockedS('empty script', '   ');
+
+// The dispatch itself: allowWrites = false must keep the strict read-only
+// policy even for a connection-style call.
+$blocked('assert(read-only) still refuses batches', 'SELECT 1; SELECT 2;');
+
 echo $failures === 0 ? '=== SQLGUARD TEST PASS ===' : "=== SQLGUARD TEST FAIL ({$failures}) ===", PHP_EOL;
 exit($failures === 0 ? 0 : 1);

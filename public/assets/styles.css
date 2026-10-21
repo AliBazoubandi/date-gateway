@@ -43,6 +43,10 @@ h2 { font-size: 15px; margin: 0 0 8px; color: var(--accent-2); }
   border-radius: 7px; font: inherit; background: #fff; color: var(--text);
 }
 .form textarea { font-family: Consolas, "Courier New", monospace; white-space: pre; }
+.form .input-error, .form select.input-error, .form textarea.input-error {
+  border-color: var(--error); box-shadow: 0 0 0 2px rgba(178, 58, 58, 0.12);
+}
+.field-error { color: var(--error); font-size: 12px; font-weight: 600; margin-top: 3px; }
 .form fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 8px 0; }
 .form .mode .chk { display: block; margin-top: 6px; font-weight: 400; }
 .form .chk { font-weight: 400; display: flex; align-items: center; gap: 8px; }
@@ -56,6 +60,11 @@ table.rows td { border-bottom: 1px solid #edf1f6; padding: 7px 8px; vertical-ali
 table.rows tr:hover td { background: #f8fafc; }
 table.meta td { padding: 3px 10px 3px 0; }
 td.msg, .msg { font-size: 12.5px; color: #44505c; max-width: 430px; overflow-wrap: anywhere; }
+/* Wide result grids (request test-run): every column sizes to its content on
+   one line and the card scrolls sideways instead of wrapping cells. */
+.table-scroll { overflow-x: auto; }
+table.result-grid th, table.result-grid td { white-space: nowrap; }
+table.result-grid td.msg { max-width: none; }
 code { background: var(--code-bg); border: 1px solid var(--line); border-radius: 5px;
   padding: 1px 5px; font-size: 12.5px; }
 code.key { font-size: 15px; padding: 8px 12px; display: inline-block; }

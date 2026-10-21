@@ -2,11 +2,12 @@
 // End-to-end smoke test for the CLI worker + cleanup (build step 4).
 // Seeds delayed executions directly in the metadata DB, runs the REAL CLI
 // entry points (php cli\worker.php and php cli\cleanup.php via proc_open)
-// and asserts: ready flow (streamed file envelope + token + TTL), webhook
-// enqueue per attached call, query failure + timeout classification,
-// truncation, per-connection cap block, future scheduled_at, inactive
-// sweep, stale 'running' recovery, then the cleanup pass (expiry, file
-// removal, failed leftovers, stale instant recovery).
+// and asserts: ready flow (streamed file envelope + token + TTL), ready-time
+// archive copy, webhook enqueue per attached call, query failure + timeout
+// classification, truncation, per-connection cap block, scheduler immediacy
+// (a future scheduled_at runs NOW and its ready_at clamps to the promise),
+// inactive sweep, stale 'running' recovery, then the cleanup pass (expiry,
+// file archiving to storage/archive, failed leftovers, stale instant recovery).
 // Usage: php tests\worker_smoke.php
 
 use Core\Filesystem;
@@ -40,9 +41,14 @@ $fixtureFileRels = [];
 $connectionIds = [];
 $requestIds = [];
 $clientIds = [];
-$wipe = static function () use ($db, &$fixtureFileRels, &$connectionIds, &$requestIds, &$clientIds): void {
+$wipe = static function () use ($db, $run, &$fixtureFileRels, &$connectionIds, &$requestIds, &$clientIds): void {
     foreach ($fixtureFileRels as $rel) {
         Cleanup::safeUnlink($rel);
+    }
+    // Ready-time and expiry-time archive copies carry the fixture run id in
+    // the deterministic name ({code}_{stamp}_client{n}_e{id}.json).
+    foreach (glob(Filesystem::archiveDir() . "/*swk{$run}*.json") ?: [] as $f) {
+        @unlink($f);
     }
     if ($requestIds !== []) {
         $r = implode(',', array_map('intval', $requestIds));
@@ -146,6 +152,10 @@ $execSharedInstant = $mkExec(['request_id' => $rShared, 'mode' => 'instant',
 $execFreshRunning = $mkExec(['request_id' => $rCap, 'status' => 'running', 'started_at' => $due]);
 // Crashed-worker leftover: old 'running' row with a partial file to purge.
 $staleFileRel = "results/wsmk_{$run}_stale.json";
+// prepare() first: run_all only mkdirs the storage root, and results/ is not
+// created until a child runs — without it this fixture write fails silently
+// and the purge assertion below never has anything to purge.
+Filesystem::prepare();
 file_put_contents(Filesystem::absoluteFromRelative($staleFileRel), '{"data":[');
 $fixtureFileRels[] = $staleFileRel;
 $execStale = $mkExec(['request_id' => $rFuture, 'status' => 'running',
@@ -229,6 +239,25 @@ $check('ready: logs started + succeeded',
 $check('ready: expires = ready_at + ttl 15min', $ttlDiff($e) !== null
     && abs($ttlDiff($e) - 900) <= 2, (string)($e['expires_at'] ?? 'null'));
 
+// Archive-at-ready: the worker copies every fresh result to storage/archive
+// under the deterministic name, whatever the client does next, and the live
+// file keeps serving.
+$archName = static fn (string $code, string $stamp, int $cid, int $eid): string =>
+    Filesystem::archiveDir() . "/{$code}_{$stamp}_client{$cid}_e{$eid}.json";
+$ew = $execRow($execWebhook);
+$webhookArchived = $archName("swk{$run}.ready",
+    Time::fromSql((string)$ew['expires_at'])->format('Ymd_His'), $clientId, $execWebhook);
+$er = $execRow($execReady);
+$noCallArchived = $archName("swk{$run}.ready",
+    Time::fromSql((string)$er['expires_at'])->format('Ymd_His'), 0, $execReady);
+$check('archive: ready-time copy exists for the call-owned run',
+    is_file($webhookArchived), basename($webhookArchived));
+$check('archive: run without calls files under client0',
+    is_file($noCallArchived), basename($noCallArchived));
+$check('archive: copy carries the envelope, live file still in place',
+    (json_decode((string)file_get_contents($webhookArchived), true)['meta']['row_count'] ?? -1) === 2
+    && is_file(Filesystem::resultsDir() . '/' . $execWebhook . '.json'));
+
 $check('ttl3: expires = ready_at + 3min', $ttlDiff($execRow($execTtl)) !== null
     && abs($ttlDiff($execRow($execTtl)) - 180) <= 2);
 
@@ -270,8 +299,15 @@ $check('cap: cap=1 connection blocked new claims', $execRow($execCap)['status'] 
     && empty($execRow($execCap)['started_at']), 'running at claim time on that connection: '
     . (string)$db->value("SELECT COUNT(*) FROM executions e JOIN requests r ON r.id = e.request_id
         WHERE e.mode = 'delayed' AND e.status = 'running' AND r.connection_id = ?", [$connCap]));
-$check('future: stays scheduled and untouched', $execRow($execFuture)['status'] === 'scheduled'
-    && empty($execRow($execFuture)['started_at']));
+// The scheduler claims scheduled rows immediately: scheduled_at is the
+// earliest-DOWNLOAD promise, not a start time. A run that finishes early
+// holds its result until the promise (ready_at clamps to scheduled_at).
+$e = $execRow($execFuture);
+$check('future: scheduler ran it immediately', $e['status'] === 'ready'
+    && !empty($e['started_at']), (string)$e['status']);
+$check('future: ready_at clamped to the promise, TTL from the window opening',
+    (string)$e['ready_at'] === $future && $ttlDiff($e) !== null && abs($ttlDiff($e) - 900) <= 2,
+    'ready_at=' . (string)$e['ready_at'] . ' scheduled_at=' . $future);
 $check('shared cap: an instant run blocks a delayed claim on that connection',
     $execRow($execShared)['status'] === 'scheduled' && empty($execRow($execShared)['started_at']),
     'running on that connection: ' . (int)$db->value(
@@ -290,8 +326,8 @@ $check('stale: recovered to failed', $e['status'] === 'failed'
 $check('stale: partial file deleted + path cleared',
     !is_file(Filesystem::absoluteFromRelative($staleFileRel)) && $e['result_path'] === null);
 $check('stale: failure logged', $logCount('failed', $execStale) === 1);
-$check('summary line: due=8 ready=4 failed=2 blocked=2 + swept counts',
-    str_contains($wOut, 'due=8') && str_contains($wOut, 'ready=4')
+$check('summary line: due=9 ready=5 failed=2 blocked=2 + swept counts',
+    str_contains($wOut, 'due=9') && str_contains($wOut, 'ready=5')
     && str_contains($wOut, 'failed=2') && str_contains($wOut, 'blocked=2')
     && str_contains($wOut, 'stale-cleaned=1') && str_contains($wOut, 'inactive-cleaned=1'),
     substr($wOut, 0, 200));
@@ -359,6 +395,30 @@ $check('cleanup: expired ready marked', $execRow($execReady)['status'] === 'expi
 $check('cleanup: their files deleted',
     !is_file(Filesystem::resultsDir() . '/' . $execReady . '.json')
     && !is_file(Filesystem::resultsDir() . '/' . $execTtl . '.json'));
+
+// Expiry keeps the result: the file is MOVED to storage/archive/ and named
+// {code}_{expires_at stamp}_client{originating client}_e{execution id}.json.
+// These fixtures have no calls row, so they are filed under client0.
+$stampOf = static function (int $execId) use ($db): string {
+    $row = $db->one('SELECT expires_at FROM executions WHERE id = ?', [$execId]);
+    $dt = ($row !== null && $row['expires_at'] !== null) ? Time::fromSql((string)$row['expires_at']) : null;
+    return $dt !== null ? $dt->format('Ymd_His') : 'nostamp';
+};
+$archived = static fn (string $code, int $execId): string =>
+    Filesystem::archiveDir() . "/{$code}_{$stampOf($execId)}_client0_e{$execId}.json";
+$archivedFiles = [
+    $archived("swk{$run}.ready", $execReady),
+    $archived("swk{$run}.ttl", $execTtl),
+    // The stale legacy cache/ fixture (expired instant) is archived too.
+    $archived("swk{$run}.ready", $execCacheStale),
+];
+$check('cleanup: expired results archived, named code_stamp_client_exec',
+    is_file($archivedFiles[0]) && is_file($archivedFiles[1]),
+    implode(' | ', array_map(static fn (string $f): string => basename($f), $archivedFiles)));
+$check('cleanup: legacy cache file archived as well', is_file($archivedFiles[2]));
+$check('cleanup: archive copies keep the envelope',
+    is_file($archivedFiles[0])
+    && (json_decode((string)file_get_contents($archivedFiles[0]), true)['meta']['row_count'] ?? -1) === 2);
 $check('cleanup: expiry logged', $logCount('expired', $execReady) === 1);
 $check('cleanup: stale cache file removed + marked',
     !is_file(Filesystem::absoluteFromRelative($cacheStaleRel))
@@ -381,6 +441,7 @@ foreach ([
     Filesystem::absoluteFromRelative($cacheFreshRel),
     Filesystem::absoluteFromRelative($staleFileRel),
     Filesystem::absoluteFromRelative($failedFileRel),
+    ...$archivedFiles,
 ] as $f) {
     if (is_file($f)) {
         @unlink($f);

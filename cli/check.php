@@ -137,6 +137,56 @@ try {
     $ok('calls.idempotency_key_hash present (idempotent submits)', $hasIdemKey === 1,
         'every submit INSERT names this column; keyless submits break too - ' . $migration);
 
+    // Secret hardening (sql\migrations\2026-10-20-secret-hardening.sql):
+    // clients.api_key_hash_hmac (peppered API-key hash) and
+    // clients.webhook_secret_enc (webhook secret encrypted at rest).
+    $hardening = 'apply sql\\migrations\\2026-10-20-secret-hardening.sql';
+    $hasHmac = (int)db()->value(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'clients' AND column_name = 'api_key_hash_hmac'"
+    );
+    $ok('clients.api_key_hash_hmac present (peppered key lookup)', $hasHmac === 1, $hardening);
+    if ($hasHmac === 1) {
+        $legacyOnly = (int)db()->value('SELECT COUNT(*) FROM clients WHERE api_key_hash_hmac IS NULL');
+        if ($legacyOnly > 0) {
+            $warn("{$legacyOnly} client(s) still on the bare SHA-256 API-key hash",
+                'they upgrade to the peppered hash on their next API call - nothing to do');
+        }
+    }
+    $hasSecretEnc = (int)db()->value(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'clients' AND column_name = 'webhook_secret_enc'"
+    );
+    $ok('clients.webhook_secret_enc present (webhook secret at rest)', $hasSecretEnc === 1, $hardening);
+    if ($hasSecretEnc === 1) {
+        $plain = (int)db()->value(
+            "SELECT COUNT(*) FROM clients
+              WHERE webhook_secret_enc IS NOT NULL AND webhook_secret_enc <> ''
+                AND webhook_secret_enc NOT LIKE 'gcm:%'"
+        );
+        $ok('every stored webhook secret is encrypted at rest', $plain === 0,
+            $plain > 0 ? 'run php cli\\encrypt_webhook_secrets.php (' . $plain . ' plaintext value(s) left)' : '');
+    }
+
+    // Scripts mode (sql\migrations\2026-10-20-scripts-mode.sql):
+    // connections.allow_writes gates the relaxed multi-statement SQL policy.
+    // Optional column: 0 rows are fine without it, but the panel saves it, so
+    // a missing column breaks connection saves.
+    $hasAllowWrites = (int)db()->value(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'connections' AND column_name = 'allow_writes'"
+    );
+    $ok('connections.allow_writes present (scripts mode)', $hasAllowWrites === 1,
+        'apply sql\\migrations\\2026-10-20-scripts-mode.sql');
+    if ($hasAllowWrites === 1) {
+        $badMode = (int)db()->value(
+            "SELECT COUNT(*) FROM connections
+              WHERE allow_writes = 1 AND db_type <> 'sqlserver'"
+        );
+        $ok('scripts mode only on SQL Server connections', $badMode === 0,
+            $badMode > 0 ? $badMode . ' non-SQL Server connection(s) carry allow_writes; the runner refuses them' : '');
+    }
+
     // A webhook delivery stays 'pending' when the receiver is down or the
     // client lost its URL/secret: a growing backlog means clients are not
     // being told, and it also blocks call pruning.

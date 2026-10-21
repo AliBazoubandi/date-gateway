@@ -1,5 +1,9 @@
-<?php /** @var array $row @var array $connections */ $isNew = ($row['id'] ?? 0) === 0;
+<?php /** @var array $row @var array $connections @var array<string,string> $errors */
+$errors = $errors ?? [];
+$isNew = ($row['id'] ?? 0) === 0;
 $inst = $row['instant_defaults'] ?? [];
+$fe = static fn(string $f): string => \Admin\View::ferr($errors, $f);
+$fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
 ?>
 <h1><?= $isNew ? 'New request' : 'Edit request — ' . e((string)$row['code']) ?></h1>
 <section class="card slim">
@@ -8,14 +12,15 @@ $inst = $row['instant_defaults'] ?? [];
   <input type="hidden" name="id" value="<?= (int)($row['id'] ?? 0) ?>">
   <div class="grid2">
     <label>Code <small>used in URLs: POST /api/v1/request/{code}</small>
-      <input name="code" value="<?= e((string)$row['code']) ?>" required pattern="[A-Za-z0-9._\-]{1,64}">
+      <input name="code" value="<?= e((string)$row['code']) ?>" class="<?= $fc('code') ?>" required pattern="[A-Za-z0-9._\-]{1,64}">
+      <?= $fe('code') ?>
     </label>
-    <label>Name <input name="name" value="<?= e((string)$row['name']) ?>" required></label>
+    <label>Name <input name="name" value="<?= e((string)$row['name']) ?>" class="<?= $fc('name') ?>" required><?= $fe('name') ?></label>
   </div>
   <label>Short description for the data team <textarea name="description" rows="2"><?= e((string)$row['description']) ?></textarea></label>
 
   <label>Target connection
-    <select name="connection_id" required>
+    <select name="connection_id" class="<?= $fc('connection_id') ?>" required>
       <option value="">— pick —</option>
       <?php foreach ($connections as $c): ?>
       <option value="<?= (int)$c['id'] ?>" <?= (int)$row['connection_id'] === (int)$c['id'] ? 'selected' : '' ?>>
@@ -23,10 +28,12 @@ $inst = $row['instant_defaults'] ?? [];
       </option>
       <?php endforeach; ?>
     </select>
+    <?= $fe('connection_id') ?>
   </label>
 
   <label>SQL (reviewed by the data team — clients never send SQL)
-    <textarea name="sql_text" rows="8" required spellcheck="false"><?= e((string)$row['sql_text']) ?></textarea>
+    <textarea name="sql_text" rows="8" class="<?= $fc('sql_text') ?>" required spellcheck="false"><?= e((string)$row['sql_text']) ?></textarea>
+    <?= $fe('sql_text') ?>
   </label>
 
   <div class="grid2">
@@ -59,6 +66,7 @@ $inst = $row['instant_defaults'] ?? [];
 Instant mode upper bounds (from config): <?= (int)\Core\Config::get('limits.instant.max_timeout_seconds', 60) ?>s timeout and
 <?= number_format((int)\Core\Config::get('limits.instant.max_rows', 20000)) ?> rows. Suggested instant defaults:
 <?= (int)($inst['timeout_seconds'] ?? 30) ?>s / <?= number_format((int)($inst['max_rows'] ?? 5000)) ?>.
+Requests on a SQL Server connection with "Allow script batches" may hold a multi-statement script (DECLARE, #temp tables, INSERT, CREATE/DROP + a final SELECT); UPDATE, DELETE and EXEC-style statements stay blocked everywhere.
 </div>
 <script>
 function modeSwitch(m) {

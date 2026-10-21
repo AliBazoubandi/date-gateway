@@ -120,17 +120,25 @@ $reqIdemFlight = $addRequest($codeIdemFlight, 'instant', 30, 100, 0, 'SELECT SLE
 array_push($requestIds, $reqDelayed, $reqDeny, $reqInst, $reqBad, $reqSlow, $reqRl, $reqInstDl, $reqBig, $reqCacheMiss, $reqClamp,
     $reqIdemInst, $reqIdemDelay, $reqIdemFlight);
 
-$mkClient = static function (string $name, bool $active = true) use ($db, $now): array {
+// mkClient writes api_key_hash directly (bare SHA-256, the pre-pepper form).
+// Pass peppered=true to also store api_key_hash_hmac, as the admin panel and
+// the rotation path do — that row authenticates through the peppered branch,
+// while a plain row proves the legacy branch still works and upgrades itself
+// on first use.
+$mkClient = static function (string $name, bool $active = true, bool $peppered = false) use ($db, $now): array {
     $key = 'gw_smoketest_' . \Core\Str::hex(16);
     $db->execute(
-        'INSERT INTO clients (name, type, api_key_hash, is_active, created_at) VALUES (?, ?, ?, ?, ?)',
-        [$name, 'agent', hash('sha256', $key), $active ? 1 : 0, $now]
+        'INSERT INTO clients (name, type, api_key_hash, api_key_hash_hmac, is_active, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)',
+        [$name, 'agent', hash('sha256', $key),
+            $peppered ? hash_hmac('sha256', $key, (string)\Core\Config::get('security.master_key', '')) : null,
+            $active ? 1 : 0, $now]
     );
     $id = $db->insertId();
     return ['id' => $id, 'key' => $key];
 };
 $A = $mkClient("smk {$run} A");
-$B = $mkClient("smk {$run} B");
+$B = $mkClient("smk {$run} B", true, true);
 $C = $mkClient("smk {$run} C (inactive)", false);
 array_push($clientIds, (int)$A['id'], (int)$B['id'], (int)$C['id']);
 $db->execute('INSERT INTO client_request_permissions (client_id, request_id, granted_at) VALUES (?, ?, ?)', [$A['id'], $reqDelayed, $now]);
@@ -171,7 +179,18 @@ function api(string $method, string $path, ?string $key = null, bool $tailHeader
 {
     global $port;
     $ch = curl_init('http://127.0.0.1:' . $port . $path);
-    $opts = [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30, CURLOPT_HEADER => $tailHeaders];
+    // Raw response headers, kept even for a refused transfer: libcurl throws
+    // its buffered header text away when a transfer is cut short (the expired
+    // download refusal sends headers and no body — err 18), so with
+    // $tailHeaders the header block is collected through the callback instead.
+    $headerText = '';
+    $opts = [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30];
+    if ($tailHeaders) {
+        $opts[CURLOPT_HEADERFUNCTION] = static function ($ch, string $line) use (&$headerText): int {
+            $headerText .= $line;
+            return strlen($line);
+        };
+    }
     if ($method === 'POST') {
         $opts[CURLOPT_POST] = true;
         $opts[CURLOPT_POSTFIELDS] = '';
@@ -187,16 +206,10 @@ function api(string $method, string $path, ?string $key = null, bool $tailHeader
     $raw = (string)curl_exec($ch);
     $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $type = (string)curl_getinfo($ch, CURLINFO_CONTENT_TYPE);
-    $headers = '';
-    if ($tailHeaders) {
-        $cut = strpos($raw, "\r\n\r\n");
-        if ($cut !== false) {
-            $headers = substr($raw, 0, $cut);
-            $raw = substr($raw, $cut + 4);
-        }
-    }
+    $errno = curl_errno($ch); // e.g. CURLE_PARTIAL_FILE on a refused download transfer
+    $headers = $tailHeaders ? $headerText : '';
     curl_close($ch);
-    return [$code, $raw, $type, $headers];
+    return [$code, $raw, $type, $headers, $errno];
 }
 
 $pass = 0;
@@ -209,6 +222,11 @@ $check = static function (string $label, bool $ok, string $detail = '') use (&$p
 $getErr = static function (string $body): string {
     $d = json_decode($body, true);
     return is_array($d) ? (string)($d['error']['code'] ?? '?') : '?';
+};
+// The Ymd_His part of the deterministic archive name, built from a row's
+// expires_at exactly like Services\ResultArchive does.
+$stampOf = static function (array $row): string {
+    return (new DateTimeImmutable((string)$row['expires_at'], \Core\Time::timezone()))->format('Ymd_His');
 };
 
 // ----------------- auth failure paths -----------------
@@ -235,6 +253,10 @@ $payload = json_decode($body, true);
 $check('first submit -> 200 scheduled', $code === 200 && ($payload['status'] ?? '') === 'scheduled'
     && isset($payload['call_id']) && $payload['link'] === null && $payload['expires_at'] === null, $body);
 $call1 = (string)$payload['call_id'];
+// Client A was created with the legacy bare SHA-256 hash only: this request
+// authenticated through the legacy branch and must have upgraded the row.
+$check('legacy key upgraded to the peppered hash on first use',
+    strlen((string)$db->value('SELECT api_key_hash_hmac FROM clients WHERE id = ?', [$A['id']])) === 64);
 $execRow = $db->one('SELECT * FROM executions WHERE request_id = ? ORDER BY id DESC LIMIT 1', [$reqDelayed]);
 $check('execution row scheduled', $execRow !== null && $execRow['status'] === 'scheduled'
     && $execRow['scheduled_at'] !== null);
@@ -258,6 +280,9 @@ $check('status for owner -> scheduled', $code === 200 && ($st['status'] ?? '') =
     && array_key_exists('error', $st) && $st['error'] === null, $body);
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1, $B['key']);
 $check('status for foreign client -> 404', $code === 404);
+// B was created with the peppered hash already stored: this 404 (not 401)
+// proves the peppered-hash lookup branch authenticated it.
+$check('peppered-hash lookup authenticates', $code === 404);
 [$code, $body] = api('GET', '/api/v1/calls/' . $call1);
 $check('status w/o key -> 401', $code === 401);
 
@@ -289,10 +314,20 @@ $check('rule 2 -> link returned now', $code === 200 && ($payload3['status'] ?? '
     && ($payload3['expires_at'] ?? null) !== null, $body);
 
 $dlToken = basename((string)parse_url((string)($payload3['link'] ?? ''), PHP_URL_PATH));
-[$code, $body, $type] = api('GET', '/api/v1/results/' . $dlToken, $A['key']);
+[$code, $body, $type, $dlHeaders] = api('GET', '/api/v1/results/' . $dlToken, $A['key'], true);
 $check('download streams the file', $code === 200 && str_contains($type, 'application/json')
     && json_decode($body, true) === $rows
     && (int)$db->value("SELECT COUNT(*) FROM request_logs WHERE event = 'downloaded'") >= 1);
+// The delivered file is named exactly like the archived evidence copy of the
+// same run: {code}_{expires stamp Ymd_His Tehran}_client{client}_e{id}.json.
+$dlName = '';
+if (preg_match('/^content-disposition:\s*attachment;\s*filename="([^"]*)"\s*$/im', $dlHeaders, $m)) {
+    $dlName = $m[1];
+}
+$readyExp = $db->one('SELECT expires_at FROM executions WHERE id = ?', [$readyExecId]);
+$expectedName = $codeDelayed . '_' . $stampOf($readyExp) . '_client' . $A['id'] . '_e' . $readyExecId . '.json';
+$check('the download carries the run\'s archive name', $dlName === $expectedName,
+    $dlName !== '' ? $dlName : '(no content-disposition) vs ' . $expectedName);
 [$code, $body] = api('GET', '/api/v1/results/' . $dlToken, $B['key']);
 $check('download by foreign client -> 404', $code === 404);
 $check("the foreign attempt is audited as 'denied' on that call",
@@ -310,9 +345,134 @@ $check('unissued execution-shaped token -> 404', $code === 404);
 $check('unissued execution-shaped token for another client -> 404', $code === 404);
 
 $db->execute('UPDATE executions SET expires_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE id = ?', [$readyExecId]);
-[$code, $body] = api('GET', '/api/v1/results/' . $dlToken, $A['key']);
-$check('expired -> 410 + marked', $code === 410
-    && (int)$db->value("SELECT status = 'expired' FROM executions WHERE id = ?", [$readyExecId]) === 1);
+[$code, $body, $type, $hdrs, $err] = api('GET', '/api/v1/results/' . $dlToken, $A['key'], true);
+$check('expired -> 410 status, marked, and no file is sent',
+    $code === 410 && $err === CURLE_PARTIAL_FILE && $body === ''
+    && str_contains($type, 'application/json')
+    && !str_contains(strtolower($hdrs), 'content-disposition')
+    && json_decode($body, true) !== $rows
+    && (int)$db->value("SELECT status = 'expired' FROM executions WHERE id = ?", [$readyExecId]) === 1,
+    "code={$code} err={$err} body=" . substr($body, 0, 80));
+$check('the 410 says why in X-Gateway headers instead of a body',
+    (bool)preg_match('/^x-gateway-error:\s*expired\r?$/mi', $hdrs)
+    && (bool)preg_match('/^x-gateway-message:\s*This result has expired\.\r?$/mi', $hdrs),
+    trim(str_replace("\r\n", ' | ', $hdrs)));
+// The situation that forced the refusal design: a client re-runs its manual
+// download command after the link expired. Any delivered body would be
+// saved OVER the result file downloaded during the live window (curl -o
+// writes error bodies too, and exits 0); with the refused delivery the REAL
+// curl fails with a non-zero exit code and the previously saved file is
+// byte-identical afterwards.
+$keepPath = (string)(\Core\Filesystem::storageDir() . '/' . bin2hex(random_bytes(6)) . 'previous.json');
+file_put_contents($keepPath, 'GOOD-PREVIOUS-RESULT');
+$expiredUrl = 'http://127.0.0.1:' . $GLOBALS['port'] . '/api/v1/results/' . $dlToken; // the dev server itself, never a rebuilt link
+$curlOut = [];
+exec('curl.exe -sk -X POST -H "Authorization: Bearer ' . $A['key'] . '" -o "' . $keepPath . '" "' . $expiredUrl . '" 2>&1', $curlOut, $curlRc);
+$check('curl -o after expiry fails instead of downloading anything',
+    $curlRc !== 0
+    && file_get_contents($keepPath) === 'GOOD-PREVIOUS-RESULT',
+    'exit=' . $curlRc . ' content=' . substr((string)file_get_contents($keepPath), 0, 60));
+unlink($keepPath);
+// The refusal itself archives the file instead of unlinking it: the copy is
+// named {code}_{expires stamp}_client{client}_e{execution id}.json — the stamp
+// comes from the (artificially moved) expires_at, so it reflects the row's
+// final state, not the name the live-window download announced.
+$archivedDownloads = glob(\Core\Filesystem::archiveDir() . "/*_client{$A['id']}_e{$readyExecId}.json") ?: [];
+$archivedExp = $db->one('SELECT expires_at FROM executions WHERE id = ?', [$readyExecId]);
+$check('expired download leaves the result in the archive as evidence',
+    $archivedDownloads !== [] && is_file($archivedDownloads[0])
+    && str_starts_with((string)basename($archivedDownloads[0]), $codeDelayed . '_'),
+    implode(' | ', array_map('basename', $archivedDownloads)));
+$check('the archived copy carries the deterministic name of the run',
+    $archivedDownloads !== [] && $archivedExp !== null
+    && basename((string)$archivedDownloads[0]) === $codeDelayed . '_' . $stampOf($archivedExp)
+        . '_client' . $A['id'] . '_e' . $readyExecId . '.json',
+    implode(' | ', array_map('basename', $archivedDownloads)));
+$extraFiles = array_merge($extraFiles, $archivedDownloads);
+
+// ----------------- scheduler hold window -----------------
+// A delayed execution the scheduler finished EARLY: the row is ready, but
+// ready_at (the delay promise) is still in the future. Every client-facing
+// path must hold the result until the window opens.
+$holdFile = bin2hex(random_bytes(8)) . '.json';
+file_put_contents(\Core\Filesystem::resultsDir() . '/' . $holdFile, $json);
+$extraFiles[] = \Core\Filesystem::resultsDir() . '/' . $holdFile;
+$holdReady = \Core\Time::mysql(\Core\Time::addMinutes(new DateTimeImmutable('now', \Core\Time::timezone()), 3));
+$holdExpires = \Core\Time::mysql(\Core\Time::addMinutes(new DateTimeImmutable('now', \Core\Time::timezone()), 18));
+$db->execute(
+    "INSERT INTO executions (request_id, mode, status, scheduled_at, started_at, finished_at, ready_at, expires_at,
+        result_path, result_size_bytes, row_count)
+     VALUES (?, 'delayed', 'ready', ?, ?, ?, ?, ?, ?, ?, 2)",
+    [$reqDelayed, $holdReady, $now, $now, $holdReady, $holdExpires, 'results/' . $holdFile, strlen($json)]
+);
+$holdExecId = $db->insertId();
+$holdToken = \Core\Str::hex(24);
+$holdCallId = \Core\Str::hex(16);
+$db->execute(
+    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, created_at, ip, was_shared)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0)',
+    [$holdCallId, $A['id'], $reqDelayed, $holdExecId, hash('sha256', $holdToken), $now, 'api-test']
+);
+
+[$code, $body] = api('GET', '/api/v1/calls/' . $holdCallId, $A['key']);
+$holdStatus = json_decode($body, true);
+$check('hold: status reports scheduled until the promise opens',
+    $code === 200 && ($holdStatus['status'] ?? '') === 'scheduled'
+    && ($holdStatus['link'] ?? null) === null
+    && ($holdStatus['ready_at'] ?? '') !== '', $body);
+
+// Rule 2 attaches to a held result (no duplicate run) but answers 'scheduled'.
+[$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, $A['key']);
+$attach = json_decode($body, true);
+$check('hold: a submit during the hold attaches without re-running and answers scheduled',
+    $code === 200 && ($attach['status'] ?? '') === 'scheduled' && ($attach['link'] ?? null) === null
+    && (int)$db->value("SELECT COUNT(*) FROM executions WHERE request_id = ? AND status = 'ready'", [$reqDelayed]) === 1,
+    $body);
+
+[$code, $body, $type, $hdrs] = api('GET', '/api/v1/results/' . $holdToken, $A['key'], true);
+$retryAfter = 0;
+if (preg_match('/^Retry-After:\s*(\d+)\r?$/mi', $hdrs, $m)) {
+    $retryAfter = (int)$m[1];
+}
+$check('hold: download refused with 409 + Retry-After, no file body',
+    $code === 409 && str_contains($type, 'application/json')
+    && $getErr($body) === 'result_not_ready'
+    && !str_contains(strtolower($hdrs), 'content-disposition')
+    && json_decode($body, true) !== $rows // an error envelope, not the result bytes
+    && $retryAfter > 0 && $retryAfter <= 180,
+    "code={$code} retry={$retryAfter}");
+
+// Once the window opens the same token streams the file.
+$db->execute('UPDATE executions SET ready_at = ? WHERE id = ?', [$now, $holdExecId]);
+[$code, $body, , $holdHdrs] = api('GET', '/api/v1/results/' . $holdToken, $A['key'], true);
+$check('hold: download streams after the window opens',
+    $code === 200 && json_decode($body, true) === $rows);
+// The name a client downloaded is the name the archive eventually uses for
+// the same run. This fixture is refused by STATUS alone (below), letting
+// expires_at stand untouched, so nothing truncates it between the two events
+// and the downloaded name and the archived name must match exactly.
+$holdName = '';
+if (preg_match('/^content-disposition:\s*attachment;\s*filename="([^"]*)"\s*$/im', $holdHdrs, $mh)) {
+    $holdName = $mh[1];
+}
+$holdExp = $db->one('SELECT expires_at FROM executions WHERE id = ?', [$holdExecId]);
+$check('hold: the download carries the run\'s archive name',
+    $holdExp !== null
+    && $holdName === $codeDelayed . '_' . $stampOf($holdExp) . '_client' . $A['id'] . '_e' . $holdExecId . '.json',
+    $holdName . ' vs ' . ($holdExp['expires_at'] ?? '?'));
+
+// Refusing by status alone (an already-expired row whose TTL stamp says
+// nothing moved it): the answer is the same 410-with-no-body refusal, and the
+// archived twin keeps EXACTLY the name the client downloaded a moment ago.
+$db->execute("UPDATE executions SET status = 'expired' WHERE id = ?", [$holdExecId]);
+[$code, $body, , , $holdErr] = api('GET', '/api/v1/results/' . $holdToken, $A['key'], true);
+$check('hold: refusal by status is 410 with no delivered body',
+    $code === 410 && $holdErr === CURLE_PARTIAL_FILE && $body === '');
+$archivedHold = glob(\Core\Filesystem::archiveDir() . "/*_e{$holdExecId}.json") ?: [];
+$check('the archived twin of a refused download keeps the downloaded name',
+    $archivedHold !== [] && is_file($archivedHold[0]) && basename((string)$archivedHold[0]) === $holdName,
+    implode(' | ', array_map('basename', $archivedHold)));
+$extraFiles = array_merge($extraFiles, $archivedHold);
 
 // ----------------- instant flows -----------------
 [$code, $body] = api('POST', '/api/v1/request/' . $codeInst, $A['key']);
@@ -356,6 +516,16 @@ $check('?download=1 returns the file directly', $code === 200
     && (bool)preg_match('/^content-disposition:\s*attachment/im', $hdrs)
     && ($direct['data'][0]['ping'] ?? null) === '1'
     && (($direct['meta']['mode'] ?? '') === 'instant'), $body);
+$directName = '';
+if (preg_match('/^content-disposition:\s*attachment;\s*filename="([^"]*)"\s*$/im', $hdrs, $md)) {
+    $directName = $md[1];
+}
+$directExecId = (int)($direct['meta']['execution_id'] ?? 0);
+$directExp = $db->one('SELECT expires_at FROM executions WHERE id = ?', [$directExecId]);
+$check('?download=1 carries the run\'s archive name',
+    $directExp !== null
+    && $directName === $codeInstDl . '_' . $stampOf($directExp) . '_client' . $A['id'] . '_e' . $directExecId . '.json',
+    $directName . ' vs e' . $directExecId);
 [$code, $body] = api('POST', '/api/v1/request/' . $codeInst, $A['key']);
 $inst2 = json_decode($body, true);
 $check('instant cache hit replays same data', $code === 200 && ($inst2['data'] ?? null) === $inst['data']

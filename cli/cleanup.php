@@ -2,8 +2,9 @@
 // ============================================================================
 // Data Gateway - cleanup pass        (run: php cli\cleanup.php)
 // Scheduled every 5 minutes via Windows Task Scheduler (see README).
-// Deletes expired result/cache files, marks expired executions, and fails
-// instant executions left 'running' by an aborted web request.
+// Archives expired result files into storage\archive\ (kept, no longer
+// downloadable), marks expired executions, fails instant executions left
+// 'running' by an aborted web request, and prunes optional retention windows.
 //
 // Exit codes: 0 = pass completed, 1 = the pass itself crashed.
 // ============================================================================
@@ -40,7 +41,8 @@ try {
 
 try {
     $s = \Worker\Cleanup::run();
-    echo "[cleanup] expired-marked={$s['expired']} leftover-files-removed={$s['files_removed']}",
+    echo "[cleanup] expired-marked={$s['expired']} archived={$s['archived']}",
+        " leftover-files-removed={$s['files_removed']}",
         " stale-instant-cleaned={$s['stale_instant']}", PHP_EOL,
         "[cleanup] pruned logs={$s['logs_removed']} deliveries={$s['deliveries_removed']}",
         " calls={$s['calls_removed']} executions={$s['executions_removed']}",

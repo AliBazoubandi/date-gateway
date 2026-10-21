@@ -30,12 +30,14 @@ $r = $result;
 <?php if ($preview !== []): ?>
 <section class="card">
   <h2>First <?= count($preview) ?> row<?= count($preview) === 1 ? '' : 's' ?></h2>
-  <table class="rows">
+  <div class="table-scroll">
+  <table class="rows result-grid">
     <tr><?php foreach (array_keys($preview[0]) as $col): ?><th><?= e($col) ?></th><?php endforeach; ?></tr>
     <?php foreach ($preview as $row): ?>
       <tr><?php foreach ($row as $v): ?><td class="msg"><code><?= e((string)$v) ?></code></td><?php endforeach; ?></tr>
     <?php endforeach; ?>
   </table>
+  </div>
   <p class="hint">Full result never loaded — the fetch stops after the limit.</p>
 </section>
 <?php endif; ?>

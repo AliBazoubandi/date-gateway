@@ -1,4 +1,8 @@
-<?php /** @var array $row @var array $requests @var array $granted */ $isNew = ($row['id'] ?? 0) === 0;
+<?php /** @var array $row @var array $requests @var array $granted @var array<string,string> $errors */
+$errors = $errors ?? [];
+$isNew = ($row['id'] ?? 0) === 0;
+$fe = static fn(string $f): string => \Admin\View::ferr($errors, $f);
+$fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
 ?>
 <h1><?= $isNew ? 'New client' : 'Edit client — ' . e((string)$row['name']) ?></h1>
 <section class="card slim">
@@ -6,7 +10,7 @@
   <?= $csrf ?>
   <input type="hidden" name="id" value="<?= (int)($row['id'] ?? 0) ?>">
   <div class="grid2">
-    <label>Name <input name="name" value="<?= e((string)$row['name']) ?>" required></label>
+    <label>Name <input name="name" value="<?= e((string)$row['name']) ?>" class="<?= $fc('name') ?>" required><?= $fe('name') ?></label>
     <label>Type
       <select name="type">
         <option value="agent" <?= ($row['type'] ?? '') === 'agent' ? 'selected' : '' ?>>Agent (calls the API)</option>
@@ -16,13 +20,15 @@
   </div>
   <div class="grid2">
     <label>Webhook URL (admin-controlled; empty = no webhooks)
-      <input name="webhook_url" value="<?= e((string)$row['webhook_url']) ?>" placeholder="https://client-systems.example/hook/gw">
+      <input name="webhook_url" value="<?= e((string)$row['webhook_url']) ?>" class="<?= $fc('webhook_url') ?>" placeholder="https://client-systems.example/hook/gw">
+      <?= $fe('webhook_url') ?>
     </label>
     <label>Webhook secret (HMAC-SHA256 key the client verifies)
-      <input name="webhook_secret" value="" placeholder="stored — leave empty to keep" autocomplete="new-password">
+      <input name="webhook_secret" value="" class="<?= $fc('webhook_secret') ?>" placeholder="encrypted at rest — leave empty to keep" autocomplete="new-password">
+      <?= $fe('webhook_secret') ?>
     </label>
   </div>
-  <?php if (!$isNew): ?><p class="hint">The stored secret is never shown. Leave the field empty to keep it; rotate with the button below — the new secret is then shown exactly once.</p><?php endif; ?>
+  <?php if (!$isNew): ?><p class="hint">The stored secret is kept encrypted and is never shown. Leave the field empty to keep it; rotate with the button below — the new secret is then shown exactly once.</p><?php endif; ?>
   <div class="form-ops">
     <label class="chk"><input type="checkbox" name="is_active" <?= !empty($row['is_active']) ? 'checked' : '' ?>> Active</label>
     <button type="submit">Save</button>
