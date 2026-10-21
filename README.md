@@ -1365,6 +1365,14 @@ grant.
 
 ## 13. Admin panel: sessions, auditing, known limitations
 
+**Look and feel (2026-10 redesign).** The console ships as a light theme with an
+optional dark one — the sun/moon button in the topbar switches it, the browser
+remembers the choice (`localStorage['gw-theme']`, falling back to the OS
+`prefers-color-scheme` on first visit). It is presentation only: one stylesheet
+(`public/assets/styles.css`), two tiny inline scripts and an inline svg mark —
+no frameworks, no external fonts or CDN assets (the CSP forbids them), and no
+changes to controllers, forms or the markup the smoke test asserts.
+
 The panel is a single-user-per-account, cookie-authenticated app with no
 framework in front of it. What it does guarantee:
 
