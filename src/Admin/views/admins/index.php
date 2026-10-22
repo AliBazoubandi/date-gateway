@@ -17,7 +17,7 @@ use Admin\View;
     <?= $csrf ?>
     <div class="inline" style="align-items:end">
       <label style="flex:1;min-width:200px">Username
-        <input name="username" required pattern="[A-Za-z0-9._\-]{3,64}" autocomplete="username" spellcheck="false"
+        <input type="text" name="username" required pattern="[A-Za-z0-9._\-]{3,64}" autocomplete="username" spellcheck="false"
                placeholder="ops.alireza">
       </label>
       <label style="flex:1;min-width:200px">Password

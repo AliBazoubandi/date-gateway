@@ -1,13 +1,22 @@
 <?php if ($admin !== null): ?>
 </main>
 <footer class="foot wrap">
-  <span>Asia/Tehran · <?= e(now_str()) ?></span>
-  <span>Control Room</span>
+  <div class="foot-copy">
+    <span>✨ All rights of this website are reserved for the Rahbarian Rabin Business Intelligence Team. ✨</span>
+  </div>
+  <div class="foot-meta">
+    <span>Asia/Tehran · <?= e(now_str()) ?></span>
+    <span class="foot-dot">·</span>
+    <span>Control Room</span>
+  </div>
 </footer>
 </div><!-- /.content -->
 </div><!-- /.shell -->
 <?php else: ?>
 </main>
+<footer class="foot login-foot">
+  <span>✨ All rights of this website are reserved for the Rahbarian Rabin Business Intelligence Team. ✨</span>
+</footer>
 <?php endif; ?>
 
 <!-- ================== page-level scaffolding (JS presentation only) ======== -->

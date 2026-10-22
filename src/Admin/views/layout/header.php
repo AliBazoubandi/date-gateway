@@ -66,7 +66,7 @@ if ($authed) {
 <div class="shell">
 <aside class="rail" id="rail" aria-label="Main navigation">
   <div class="rail-top">
-    <span class="brand">
+    <a class="brand" href="/admin" title="Overview">
       <svg class="brand-mark" width="26" height="26" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
         <path d="M16 3.2 26.4 9.2v14L16 29 5.6 23.2v-14Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
         <circle cx="16" cy="16" r="3" fill="currentColor"/>
@@ -75,7 +75,7 @@ if ($authed) {
         <circle cx="8.6" cy="20.5" r="1.4" fill="currentColor"/>
       </svg>
       <span class="brand-t"><?= Str::e((string)Config::get('app.name', 'Data Gateway')) ?></span>
-    </span>
+    </a>
     <button id="rail-pin" type="button" class="rail-pin" title="Pin / unpin rail"
         aria-pressed="false" aria-label="Pin rail open">
       <?= Admin\View::icon('pin', 14) ?>
@@ -103,11 +103,26 @@ if ($authed) {
 
 <div class="content">
 <header class="strip">
-  <div class="strip-crumb">
-    <span><?= Str::e((string)Config::get('app.name', 'Data Gateway')) ?></span>
-    <?= Admin\View::icon('chevron-end', 12) ?>
-    <b class="crumb-here"><?= Str::e($title) ?></b>
-  </div>
+  <?php
+    $uri = (string)($_SERVER['REQUEST_URI'] ?? '');
+    $crumbs = [
+        ['label' => (string)Config::get('app.name', 'Data Gateway'), 'url' => '/admin'],
+    ];
+    if (str_starts_with($uri, '/admin/requests') && $title !== 'Requests') {
+        $crumbs[] = ['label' => 'Requests', 'url' => '/admin/requests'];
+    } elseif (str_starts_with($uri, '/admin/connections') && $title !== 'Connections') {
+        $crumbs[] = ['label' => 'Connections', 'url' => '/admin/connections'];
+    } elseif (str_starts_with($uri, '/admin/clients') && $title !== 'Clients') {
+        $crumbs[] = ['label' => 'Clients', 'url' => '/admin/clients'];
+    }
+  ?>
+  <nav class="strip-crumb" aria-label="Breadcrumbs">
+    <?php foreach ($crumbs as $c): ?>
+      <a href="<?= e($c['url']) ?>" class="crumb-link"><?= Str::e($c['label']) ?></a>
+      <?= Admin\View::icon('chevron-end', 12) ?>
+    <?php endforeach; ?>
+    <b class="crumb-here" aria-current="page"><?= Str::e($title) ?></b>
+  </nav>
   <div class="strip-spacer"></div>
   <button type="button" class="strip-search" id="strip-search" aria-label="Search (Ctrl+K)">
     <?= Admin\View::icon('search', 14) ?>
@@ -129,9 +144,11 @@ if ($authed) {
       <svg class="i i-moon" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-moon"></use></svg>
     </button>
     <div class="user-menu" id="user-menu">
-      <button type="button" class="icon-btn" id="um-btn" aria-haspopup="true" aria-expanded="false"
+      <button type="button" class="um-btn" id="um-btn" aria-haspopup="true" aria-expanded="false"
               title="Account &amp; session">
         <span class="who-av"><?= Str::e(strtoupper(substr((string)$admin['username'], 0, 2))) ?></span>
+        <span class="who-name"><?= Str::e((string)$admin['username']) ?></span>
+        <?= Admin\View::icon('chevron-down', 12) ?>
       </button>
       <div class="um-menu" role="menu">
         <span class="um-id"><b><?= Str::e((string)$admin['username']) ?></b><small>Admin session · audited</small></span>

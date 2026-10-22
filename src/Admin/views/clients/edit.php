@@ -19,29 +19,25 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
 </div>
 
 <div id="client-pane-settings" role="tabpanel">
-<section class="card slim form">
-<form method="post" action="/admin/clients">
+<section class="card slim">
+<form method="post" action="/admin/clients" class="form grid2">
   <?= $csrf ?>
   <input type="hidden" name="id" value="<?= (int)($row['id'] ?? 0) ?>">
-  <div class="grid2">
-    <label>Name <input name="name" value="<?= e((string)$row['name']) ?>" class="<?= $fc('name') ?>" required><?= $fe('name') ?></label>
-    <label>Type
-      <select name="type">
-        <option value="agent" <?= ($row['type'] ?? '') === 'agent' ? 'selected' : '' ?>>Agent (calls the API)</option>
-        <option value="human" <?= ($row['type'] ?? '') === 'human' ? 'selected' : '' ?>>Human</option>
-      </select>
-    </label>
-  </div>
-  <div class="grid2">
-    <label>Webhook URL (admin-controlled; empty = no webhooks)
-      <input name="webhook_url" value="<?= e((string)$row['webhook_url']) ?>" class="<?= $fc('webhook_url') ?>" placeholder="https://client-systems.example/hook/gw">
-      <?= $fe('webhook_url') ?>
-    </label>
-    <label>Webhook secret (HMAC-SHA256 key the client verifies)
-      <input name="webhook_secret" value="" class="<?= $fc('webhook_secret') ?>" placeholder="encrypted at rest — leave empty to keep" autocomplete="new-password">
-      <?= $fe('webhook_secret') ?>
-    </label>
-  </div>
+  <label>Name <input type="text" name="name" value="<?= e((string)$row['name']) ?>" class="<?= $fc('name') ?>" required><?= $fe('name') ?></label>
+  <label>Type
+    <select name="type">
+      <option value="agent" <?= ($row['type'] ?? '') === 'agent' ? 'selected' : '' ?>>Agent (calls the API)</option>
+      <option value="human" <?= ($row['type'] ?? '') === 'human' ? 'selected' : '' ?>>Human</option>
+    </select>
+  </label>
+  <label>Webhook URL (admin-controlled; empty = no webhooks)
+    <input type="url" name="webhook_url" value="<?= e((string)$row['webhook_url']) ?>" class="<?= $fc('webhook_url') ?>" placeholder="https://client-systems.example/hook/gw">
+    <?= $fe('webhook_url') ?>
+  </label>
+  <label>Webhook secret (HMAC-SHA256 key the client verifies)
+    <input type="text" name="webhook_secret" value="" class="<?= $fc('webhook_secret') ?>" placeholder="encrypted at rest — leave empty to keep" autocomplete="new-password">
+    <?= $fe('webhook_secret') ?>
+  </label>
   <?php if (!$isNew): ?>
   <p class="hint">The stored secret is kept encrypted and is never shown. Leave the field empty to keep it; rotate with the button below — the new secret is then shown exactly once.</p>
   <?php endif; ?>
@@ -53,12 +49,12 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
   </div>
 </form>
 <?php if (!$isNew): ?>
-<div class="grid2" style="margin-top:14px">
-  <form method="post" action="/admin/clients/regen-key" data-confirm="Regenerate the API key of “<?= e((string)$row['name']) ?>”? The old key stops working immediately.">
+<div class="card-sec-ops" style="border-top: 1px solid var(--hairline); margin-top: 22px; padding-top: 18px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+  <form method="post" action="/admin/clients/regen-key" data-confirm="Regenerate the API key of “<?= e((string)$row['name']) ?>”? The old key stops working immediately." class="inline" style="margin:0">
     <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
     <button class="btn" type="submit"><?= View::icon('key', 14) ?><span>Regenerate API key</span></button>
   </form>
-  <form method="post" action="/admin/clients/gen-secret" data-confirm="Generate a new webhook secret? The current one stops verifying.">
+  <form method="post" action="/admin/clients/gen-secret" data-confirm="Generate a new webhook secret? The current one stops verifying." class="inline" style="margin:0">
     <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
     <button class="btn" type="submit"><?= View::icon('send', 14) ?><span>Generate new webhook secret</span></button>
   </form>

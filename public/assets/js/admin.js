@@ -39,13 +39,16 @@
 
   /* ------------------------------------------------------------ rail pin - */
   var pin = $('#rail-pin');
+  var railEl = $('#rail');
   if (load('gw-rail') === '1') {
     document.documentElement.classList.add('rail-open');
+    if (railEl) { railEl.classList.add('rail-open'); }
     if (pin) { pin.setAttribute('aria-pressed', 'true'); }
   }
   if (pin) {
     pin.addEventListener('click', function () {
       var open = document.documentElement.classList.toggle('rail-open');
+      if (railEl) { railEl.classList.toggle('rail-open', open); }
       pin.setAttribute('aria-pressed', open ? 'true' : 'false');
       store('gw-rail', open ? '1' : '0');
     });
@@ -142,6 +145,72 @@
     if (!isNaN(saved) && saved > 0 && saved < tabBtns.length) { focusTab(saved); }
   }
   $$('.tabs[id]').forEach(tabs);
+
+  /* ------------------------------------------------ permission checklist -- */
+  var permFilter = $('#perm-filter');
+  var permAll = $('#perm-all');
+  var permRows = $$('#perm-list .perm-row');
+  var permCount = $('#perm-count');
+
+  if (permFilter && permRows.length > 0) {
+    permFilter.addEventListener('input', function () {
+      var q = (permFilter.value || '').trim().toLowerCase();
+      var visible = 0;
+      permRows.forEach(function (row) {
+        var term = row.getAttribute('data-search') || '';
+        var match = !q || term.indexOf(q) !== -1;
+        row.style.display = match ? 'flex' : 'none';
+        if (match) { visible++; }
+      });
+      if (permCount) { permCount.textContent = String(visible); }
+      if (permAll) {
+        var visibleBoxes = permRows.filter(function (r) { return r.style.display !== 'none'; })
+          .map(function (r) { return $('input[type="checkbox"]', r); })
+          .filter(Boolean);
+        permAll.checked = visibleBoxes.length > 0 && visibleBoxes.every(function (cb) { return cb.checked; });
+      }
+    });
+  }
+
+  if (permAll && permRows.length > 0) {
+    permAll.addEventListener('change', function () {
+      var check = permAll.checked;
+      permRows.forEach(function (row) {
+        if (row.style.display !== 'none') {
+          var cb = $('input[type="checkbox"]', row);
+          if (cb) { cb.checked = check; }
+        }
+      });
+    });
+  }
+
+  /* ------------------------------------------- requests view toggle -------- */
+  var viewToggle = $('#view-toggle');
+  if (viewToggle) {
+    var cardsEl = $('#req-cards');
+    var tableEl = $('#req-table');
+    var viewBtns = $$('button[data-view]', viewToggle);
+
+    function setReqView(view) {
+      viewBtns.forEach(function (b) {
+        b.classList.toggle('on', b.getAttribute('data-view') === view);
+      });
+      if (cardsEl) { cardsEl.hidden = (view !== 'cards'); }
+      if (tableEl) { tableEl.hidden = (view !== 'table'); }
+      store('gw-requests-view', view);
+    }
+
+    viewBtns.forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        setReqView(btn.getAttribute('data-view'));
+      });
+    });
+
+    var savedView = load('gw-requests-view');
+    if (savedView === 'cards' || savedView === 'table') {
+      setReqView(savedView);
+    }
+  }
 
   /* ------------------------------------------------------ table sorting -- */
   $$('table.sortable').forEach(function (table) {

@@ -47,11 +47,11 @@ $changed = $changed ?? [];
   <!-- -------------------------------------------------------- settings --- -->
   <div class="ed-right">
     <label>Code <small>POST /api/v1/request/{code}</small>
-      <input name="code" value="<?= e((string)$row['code']) ?>" class="<?= $fc('code') ?>" required pattern="[A-Za-z0-9._\-]{1,64}" spellcheck="false">
+      <input type="text" name="code" value="<?= e((string)$row['code']) ?>" class="<?= $fc('code') ?>" required pattern="[A-Za-z0-9._\-]{1,64}" spellcheck="false">
       <?= $fe('code') ?>
     </label>
     <label>Name
-      <input name="name" value="<?= e((string)$row['name']) ?>" class="<?= $fc('name') ?>" required>
+      <input type="text" name="name" value="<?= e((string)$row['name']) ?>" class="<?= $fc('name') ?>" required>
       <?= $fe('name') ?>
     </label>
     <label>Description for the data team
@@ -74,17 +74,17 @@ $changed = $changed ?? [];
     <label class="chk"><input type="radio" name="response_mode" value="instant" <?php if (($row['response_mode'] ?? '') === 'instant'): ?>checked<?php endif; ?> onchange="modeSwitch('instant')"> Instant — synchronous, small + fast queries only</label>
 
     <div id="delayed-fields" class="grid2">
-      <label>Delay before run (min) <input name="delay_minutes" value="<?= (int)($row['delay_minutes'] ?? 0) ?>" inputmode="numeric"></label>
-      <label>TTL of result link (min) <input name="ttl_minutes" value="<?= (int)($row['ttl_minutes'] ?? 15) ?>" inputmode="numeric"></label>
+      <label>Delay before run (min) <input type="text" name="delay_minutes" value="<?= (int)($row['delay_minutes'] ?? 0) ?>" inputmode="numeric"></label>
+      <label>TTL of result link (min) <input type="text" name="ttl_minutes" value="<?= (int)($row['ttl_minutes'] ?? 15) ?>" inputmode="numeric"></label>
     </div>
     <div id="instant-fields" style="display:none">
       <label>Cache window (seconds, 0 = off, max <?= min(86400, \Services\InstantExecutor::resultTtlMinutes() * 60) ?>)
-        <input name="instant_cache_seconds" value="<?= (int)($row['instant_cache_seconds'] ?? 0) ?>" inputmode="numeric">
+        <input type="text" name="instant_cache_seconds" value="<?= (int)($row['instant_cache_seconds'] ?? 0) ?>" inputmode="numeric">
       </label>
     </div>
     <div class="grid2">
-      <label>Timeout (seconds) <input name="timeout_seconds" value="<?= (int)($row['timeout_seconds'] ?? 60) ?>" inputmode="numeric"></label>
-      <label>Max rows <input name="max_rows" value="<?= (int)($row['max_rows'] ?? 100000) ?>" inputmode="numeric"></label>
+      <label>Timeout (seconds) <input type="text" name="timeout_seconds" value="<?= (int)($row['timeout_seconds'] ?? 60) ?>" inputmode="numeric"></label>
+      <label>Max rows <input type="text" name="max_rows" value="<?= (int)($row['max_rows'] ?? 100000) ?>" inputmode="numeric"></label>
     </div>
 
     <div class="form-ops">

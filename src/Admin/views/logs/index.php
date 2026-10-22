@@ -24,11 +24,11 @@ use Core\Str;
       <span class="term-title">request_logs</span>
       <div class="term-spacer"></div>
       <div class="chips">
-        <select id="tail-client" class="chip" style="width:auto;padding-block:3px" aria-label="Filter by client">
+        <select id="tail-client" class="chip" aria-label="Filter by client">
           <option value="">all clients</option>
           <?php foreach ($clients as $c): ?><option value="<?= (int)$c['id'] ?>"><?= e((string)$c['name']) ?></option><?php endforeach; ?>
         </select>
-        <select id="tail-event" class="chip" style="width:auto;padding-block:3px" aria-label="Filter by event">
+        <select id="tail-event" class="chip" aria-label="Filter by event">
           <option value="">all events</option>
           <?php foreach ($events as $ev): ?><option value="<?= e($ev) ?>"><?= e($ev) ?></option><?php endforeach; ?>
         </select>

@@ -1366,19 +1366,22 @@ grant.
 ## 13. Admin panel: sessions, auditing, known limitations
 
 **Look and feel (2026-10 redesign, round 3 "Control Room").** A console-style
-shell: an icon rail that opens on hover (and can be pinned, remembered in
-`localStorage['gw-rail']`), a sticky top strip with breadcrumbs, a search
-trigger, a worker-heartbeat chip (green <2 min, amber <5 min, coral beyond,
-read straight from `worker_state` — no new table) and light/dark theme. The
-theme is dark-first: `localStorage['gw-theme']` wins, else the OS
-`prefers-color-scheme`, else dark. On-page niceties, all progressive
+shell: an icon rail that opens on hover (and can be pinned with full text labels
+retained, remembered in `localStorage['gw-rail']`), a sticky top strip with
+interactive hierarchical breadcrumbs, a clickable Gateway brand link pointing to
+the Overview (`/admin`), a search trigger, a worker-heartbeat chip (green <2 min,
+amber <5 min, coral beyond, read straight from `worker_state` — no new table)
+and light/dark theme. The theme is dark-first: `localStorage['gw-theme']` wins,
+else the OS `prefers-color-scheme`, else dark. On-page niceties, all progressive
 enhancements that degrade to plain links and tables without JavaScript:
 a command palette (Ctrl+K, `/`, `g`-mnemonic routes like `g l` → logs),
-click-to-sort list tables, copy buttons beside revealed API keys and webhook
-secrets, count-up tiles, countdown rings on pipeline cards, a live log tail
-polled from `/admin/api/tail` and a call-inspector drawer fed from
-`/admin/api/call`. The overview page polls `/admin/api/state` every 4 s and
-pauses while the tab is hidden (no websockets).
+click-to-sort list tables, a Cards vs. Table view toggle on `/admin/requests`
+(persisted in `localStorage['gw-requests-view']`), copy buttons beside revealed
+API keys and webhook secrets, count-up tiles, countdown rings on pipeline cards,
+a live log tail with aligned filter chips polled from `/admin/api/tail`,
+a call-inspector drawer fed from `/admin/api/call`, and a unified English footer
+honoring the Rahbarian Rabin Business Intelligence Team. The overview page
+polls `/admin/api/state` every 4 s and pauses while the tab is hidden (no websockets).
 
 Everything is presentational and self-hosted: tokens in
 `public/assets/css/tokens.css`, components in

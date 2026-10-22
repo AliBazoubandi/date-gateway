@@ -11,7 +11,7 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
 <form method="post" action="/admin/connections" class="form grid2">
   <?= $csrf ?>
   <input type="hidden" name="id" value="<?= (int)$m('id', 0) ?>">
-  <label>Name <input name="name" value="<?= e((string)$m('name')) ?>" class="<?= $fc('name') ?>" required></label>
+  <label>Name <input type="text" name="name" value="<?= e((string)$m('name')) ?>" class="<?= $fc('name') ?>" required></label>
   <label>Database type
     <select name="db_type" class="<?= $fc('db_type') ?>">
       <?php foreach (['sqlserver' => 'SQL Server (sqlsrv)', 'pgsql' => 'PostgreSQL (pg)', 'mysql' => 'MySQL/MariaDB (mysqli)'] as $t => $label): ?>
@@ -20,15 +20,15 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
     </select>
     <?= $fe('db_type') ?>
   </label>
-  <label>Host <input name="host" value="<?= e((string)$m('host')) ?>" class="<?= $fc('host') ?>" required placeholder="host or instance"><?= $fe('host') ?></label>
-  <label>Port <input name="port" value="<?= $m('port') === null ? '' : (int)$m('port') ?>" class="<?= $fc('port') ?>" placeholder="default"><?= $fe('port') ?></label>
-  <label>Database name <input name="db_name" value="<?= e((string)$m('db_name')) ?>" class="<?= $fc('db_name') ?>" required><?= $fe('db_name') ?></label>
-  <label>Username <input name="username" value="<?= e((string)$m('username')) ?>" class="<?= $fc('username') ?>" required><?= $fe('username') ?></label>
+  <label>Host <input type="text" name="host" value="<?= e((string)$m('host')) ?>" class="<?= $fc('host') ?>" required placeholder="host or instance"><?= $fe('host') ?></label>
+  <label>Port <input type="text" name="port" value="<?= $m('port') === null ? '' : (int)$m('port') ?>" class="<?= $fc('port') ?>" placeholder="default"><?= $fe('port') ?></label>
+  <label>Database name <input type="text" name="db_name" value="<?= e((string)$m('db_name')) ?>" class="<?= $fc('db_name') ?>" required><?= $fe('db_name') ?></label>
+  <label>Username <input type="text" name="username" value="<?= e((string)$m('username')) ?>" class="<?= $fc('username') ?>" required><?= $fe('username') ?></label>
   <label>Password
     <input type="password" name="password" placeholder="<?= $isNew ? 'required' : 'leave empty to keep current' ?>">
   </label>
   <label>Max concurrent runs
-    <input name="max_concurrency" value="<?= $m('max_concurrency') === null ? '' : (int)$m('max_concurrency') ?>"
+    <input type="text" name="max_concurrency" value="<?= $m('max_concurrency') === null ? '' : (int)$m('max_concurrency') ?>"
            class="<?= $fc('max_concurrency') ?>" placeholder="default (2)" inputmode="numeric">
     <?= $fe('max_concurrency') ?>
   </label>
@@ -36,7 +36,7 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
   <label class="chk"><input type="checkbox" name="is_active" <?= $m('is_active') ? 'checked' : '' ?>> Active</label>
   <?= $fe('allow_writes') ?>
   <div class="form-ops">
-    <button type="submit">Save</button>
+    <button class="btn btn-primary" type="submit"><?= \Admin\View::icon('check', 14) ?><span>Save</span></button>
     <a class="btn" href="/admin/connections">Cancel</a>
   </div>
 </form>

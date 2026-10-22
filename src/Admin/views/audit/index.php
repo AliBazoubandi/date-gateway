@@ -43,7 +43,7 @@ $cell = static function (string $v): string {
     <label>From <input type="date" name="date_from" value="<?= e($f['date_from']) ?>"></label>
     <label>To <input type="date" name="date_to" value="<?= e($f['date_to']) ?>"></label>
     <div class="form-ops">
-      <button type="submit"><?= Admin\View::icon('filter', 13) ?> Filter</button>
+      <button class="btn btn-primary" type="submit"><?= Admin\View::icon('filter', 13) ?><span>Filter</span></button>
       <a class="btn" href="/admin/audit">Reset</a>
     </div>
   </form>

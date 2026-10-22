@@ -20,7 +20,7 @@ $err = $error ?? '';
   <form method="post" action="/admin/login" class="form">
     <?= $csrf ?? '<input type="hidden" name="_csrf" value="' . e(Core\Csrf::token()) . '">' ?>
     <label>Username
-      <input name="username" value="<?= e($username ?? '') ?>" required autofocus autocomplete="username">
+      <input type="text" name="username" value="<?= e($username ?? '') ?>" required autofocus autocomplete="username">
     </label>
     <label>Password
       <input type="password" name="password" required autocomplete="current-password">
