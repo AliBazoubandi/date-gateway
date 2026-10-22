@@ -67,7 +67,7 @@ set_exception_handler(static function (\Throwable $e): void {
         fwrite(STDERR, 'Uncaught ' . get_class($e) . ': ' . $e->getMessage() . PHP_EOL);
         exit(1);
     }
-    if (($_SERVER['REQUEST_URI'] ?? '') !== '' && str_starts_with($_SERVER['REQUEST_URI'], '/api/')) {
+    if (str_starts_with(\Core\Http::path(), '/api/')) {
         http_response_code(500);
         header('Content-Type: application/json; charset=utf-8');
         $detail = (bool)Core\Config::get('app.debug', false) ? $e->getMessage() : null;

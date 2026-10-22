@@ -31,4 +31,4 @@ if (str_starts_with($path, '/admin')) {
 
 http_response_code(404);
 echo '<!doctype html><meta charset="utf-8"><title>404</title>';
-echo '<h1>404 - not found</h1><p><a href="/admin">Admin</a></p>';
+echo '<h1>404 - not found</h1><p><a href="' . Core\Str::e(Core\Http::url('/admin')) . '">Admin</a></p>';

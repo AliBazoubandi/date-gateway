@@ -20,10 +20,19 @@
         return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
       });
   }
+  var BASE = (document.body && document.body.getAttribute('data-base')) || '';
+  function appUrl(p) {
+    if (!p) { return p; }
+    if (p.indexOf('http://') === 0 || p.indexOf('https://') === 0) { return p; }
+    if (BASE && p.indexOf(BASE) !== 0) {
+      return BASE + (p.charAt(0) === '/' ? p : '/' + p);
+    }
+    return p;
+  }
   function icon(name, size) {
     return '<svg class="i" width="' + (size || 14) + '" height="' + (size || 14)
       + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"'
-      + ' stroke-linejoin="round" aria-hidden="true" focusable="false"><use href="/assets/icons.svg#i-' + name + '"></use></svg>';
+      + ' stroke-linejoin="round" aria-hidden="true" focusable="false"><use href="' + appUrl('/assets/icons.svg#i-') + name + '"></use></svg>';
   }
 
   /* ------------------------------------------------------------ theme ---- */
@@ -337,7 +346,7 @@
 
   /* ================================================= POLLING + RENDER === */
   if (document.body.dataset.page === 'overview') {
-    var stateUrl = '/admin/api/state';
+    var stateUrl = appUrl('/admin/api/state');
     var failNote = 0;
 
     function sparkSvgJs(pts, danger) {
@@ -533,7 +542,7 @@
     var firstFill = true;
 
     function url() {
-      var u = '/admin/api/tail?since=' + lastId;
+      var u = appUrl('/admin/api/tail?since=') + lastId;
       if (selClient && selClient.value) { u += '&client_id=' + encodeURIComponent(selClient.value); }
       if (selEvent && selEvent.value) { u += '&event=' + encodeURIComponent(selEvent.value); }
       return u;
@@ -649,7 +658,7 @@
       document.body.classList.add('d-open');
       drawer.setAttribute('aria-hidden', 'false');
       $('#drawer-close').focus();
-      fetch('/admin/api/call?id=' + encodeURIComponent(callId), { credentials: 'same-origin' })
+      fetch(appUrl('/admin/api/call?id=') + encodeURIComponent(callId), { credentials: 'same-origin' })
         .then(function (r) { if (!r.ok) { throw 0; } return r.json(); })
         .then(function (j) {
           var c = j.call;
@@ -730,16 +739,16 @@
     var stripBtn = $('#strip-search');
     var mode = $('#palette-mode');
     var PAGES = [
-      { t: 'Overview', h: '/admin', icon: 'grid' },
-      { t: 'Connections', h: '/admin/connections', icon: 'database' },
-      { t: 'New connection', h: '/admin/connections/new', icon: 'plus' },
-      { t: 'Requests', h: '/admin/requests', icon: 'file' },
-      { t: 'New request', h: '/admin/requests/new', icon: 'plus' },
-      { t: 'Clients', h: '/admin/clients', icon: 'users' },
-      { t: 'New client', h: '/admin/clients/new', icon: 'plus' },
-      { t: 'Logs', h: '/admin/logs', icon: 'terminal' },
-      { t: 'Audit log', h: '/admin/audit', icon: 'shield' },
-      { t: 'Admin users', h: '/admin/admins', icon: 'user' }
+      { t: 'Overview', h: appUrl('/admin'), icon: 'grid' },
+      { t: 'Connections', h: appUrl('/admin/connections'), icon: 'database' },
+      { t: 'New connection', h: appUrl('/admin/connections/new'), icon: 'plus' },
+      { t: 'Requests', h: appUrl('/admin/requests'), icon: 'file' },
+      { t: 'New request', h: appUrl('/admin/requests/new'), icon: 'plus' },
+      { t: 'Clients', h: appUrl('/admin/clients'), icon: 'users' },
+      { t: 'New client', h: appUrl('/admin/clients/new'), icon: 'plus' },
+      { t: 'Logs', h: appUrl('/admin/logs'), icon: 'terminal' },
+      { t: 'Audit log', h: appUrl('/admin/audit'), icon: 'shield' },
+      { t: 'Admin users', h: appUrl('/admin/admins'), icon: 'user' }
     ].map(function (p) { return { t: p.t, h: p.h, g: 'Pages', ico: p.icon }; });
     var ENTITIES = null;          // fetched once on first open
     var shown = [];
@@ -747,7 +756,7 @@
 
     function fetchEntities() {
       if (ENTITIES !== null) { return; }
-      fetch('/admin/api/quick', { credentials: 'same-origin' })
+      fetch(appUrl('/admin/api/quick'), { credentials: 'same-origin' })
         .then(function (r) { if (!r.ok) { throw 0; } return r.json(); })
         .then(function (j) { ENTITIES = j.items || []; render(q.value); })
         .catch(function () { ENTITIES = []; });
@@ -806,7 +815,7 @@
     function go(idx) {
       if (idx < 0 || idx >= shown.length) { return; }
       close();
-      location.href = shown[idx].h;
+      location.href = appUrl(shown[idx].h);
     }
 
     function openPal() {
@@ -846,14 +855,14 @@
   var gPending = false;
   var gTimer = null;
   var ROUTES = {
-    d: '/admin',
-    h: '/admin',
-    r: '/admin/requests',
-    c: '/admin/connections',
-    u: '/admin/clients',
-    l: '/admin/logs',
-    a: '/admin/audit',
-    m: '/admin/admins'
+    d: appUrl('/admin'),
+    h: appUrl('/admin'),
+    r: appUrl('/admin/requests'),
+    c: appUrl('/admin/connections'),
+    u: appUrl('/admin/clients'),
+    l: appUrl('/admin/logs'),
+    a: appUrl('/admin/audit'),
+    m: appUrl('/admin/admins')
   };
   document.addEventListener('keydown', function (e) {
     var el = e.target;

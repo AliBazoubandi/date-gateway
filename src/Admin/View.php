@@ -50,9 +50,30 @@ final class View
         ob_start();
         include __DIR__ . '/views/' . $template . '.php';
         $content = (string)ob_get_clean();
+        ob_start();
         include __DIR__ . '/views/layout/header.php';
         echo $content;
         include __DIR__ . '/views/layout/footer.php';
+        $html = (string)ob_get_clean();
+
+        $base = \Core\Http::basePath();
+        if ($base !== '') {
+            $replaced = preg_replace_callback(
+                '~\\b(href|action|src|data-pause-base)=(["\'])/(admin|assets|health)([/?"\'#]|$)~i',
+                static fn(array $m): string => $m[1] . '=' . $m[2] . $base . '/' . $m[3] . $m[4],
+                $html
+            );
+            if (is_string($replaced)) {
+                $html = $replaced;
+            }
+        }
+        echo $html;
+    }
+
+    /** Resolve a relative path with the base URL path prefix if configured. */
+    public static function url(string $path): string
+    {
+        return \Core\Http::url($path);
     }
 
     /** Escape + format a MySQL datetime for display (short form). */
@@ -86,7 +107,7 @@ final class View
         return '<svg class="i" width="' . (int)$size . '" height="' . (int)$size
             . '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"'
             . ' stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
-            . ' focusable="false"><use href="/assets/icons.svg#i-' . $name . '"></use></svg>';
+            . ' focusable="false"><use href="' . \Core\Http::url('/assets/icons.svg#i-' . $name) . '"></use></svg>';
     }
 
     public static function badge(string $class, string $text): string

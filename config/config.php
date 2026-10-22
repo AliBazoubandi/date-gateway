@@ -15,9 +15,13 @@ return [
         // NEVER enable on a live system; shows errors to the browser.
         // Override with GATEWAY_DEBUG=1 in config/.env for development.
         'debug' => (string)\Core\Env::get('GATEWAY_DEBUG', '0') === '1',
-        // Public base URL used to build download links, e.g. 'http://gw.internal'.
+        // Public base URL used to build download links, e.g. 'http://gw.internal'
+        // or 'https://rbb.palood.ir/gateway'.
         // Empty = build from the incoming Host header. (config/.env: GATEWAY_BASE_URL)
         'base_url' => (string)\Core\Env::get('GATEWAY_BASE_URL', ''),
+        // Explicit subpath prefix override, e.g. '/gateway'. Empty = auto-derived
+        // from GATEWAY_BASE_URL, X-Forwarded-Prefix, or SCRIPT_NAME.
+        'base_path' => (string)\Core\Env::get('GATEWAY_BASE_PATH', ''),
         // Admin panel text direction: 'ltr' or 'rtl' (set in config/.env with
         // GATEWAY_ADMIN_DIRECTION). The layout uses CSS logical properties, so
         // the whole shell mirrors under 'rtl' with no extra stylesheets.
@@ -173,6 +177,8 @@ return [
 
     'admin' => [
         'session_name' => 'datagateway_admin',
+        // Cookie path for the admin session. null = auto-scope to base_path (or '/').
+        'cookie_path' => \Core\Env::get('GATEWAY_ADMIN_COOKIE_PATH'),
         'max_attempts' => 5,        // failed logins before lockout
         'lockout_minutes' => 15,
         // Minutes an authenticated admin page may sit without a request

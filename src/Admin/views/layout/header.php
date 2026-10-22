@@ -7,7 +7,7 @@ use Core\Config;
 $dir  = strtolower(trim((string)Config::get('app.direction', 'ltr'))) === 'rtl' ? 'rtl' : 'ltr';
 $lang = (string)Config::get('app.language', 'en');
 $page = isset($page) && is_string($page) ? $page : '';
-$uri  = Str::e($_SERVER['REQUEST_URI'] ?? '');
+$uri  = Str::e(\Core\Http::path());
 $on   = static fn(string $prefix): string
     => ($prefix === '/admin' ? $uri === '/admin' : str_starts_with($uri, $prefix)) ? ' class="on" aria-current="page"' : '';
 $navItem = static fn(string $prefix, string $href, string $icon, string $label): string
@@ -59,7 +59,7 @@ if ($authed) {
 })();
 </script>
 </head>
-<body data-page="<?= Str::e($page) ?>" class="<?= $authed ? 'shell-page' : 'login' ?>">
+<body data-page="<?= Str::e($page) ?>" data-base="<?= Str::e(\Core\Http::basePath()) ?>" class="<?= $authed ? 'shell-page' : 'login' ?>">
 <?php if (!$authed): ?>
 <main class="wrap" id="content">
 <?php else: ?>
@@ -104,15 +104,15 @@ if ($authed) {
 <div class="content">
 <header class="strip">
   <?php
-    $uri = (string)($_SERVER['REQUEST_URI'] ?? '');
+    $curPath = \Core\Http::path();
     $crumbs = [
         ['label' => (string)Config::get('app.name', 'Data Gateway'), 'url' => '/admin'],
     ];
-    if (str_starts_with($uri, '/admin/requests') && $title !== 'Requests') {
+    if (str_starts_with($curPath, '/admin/requests') && $title !== 'Requests') {
         $crumbs[] = ['label' => 'Requests', 'url' => '/admin/requests'];
-    } elseif (str_starts_with($uri, '/admin/connections') && $title !== 'Connections') {
+    } elseif (str_starts_with($curPath, '/admin/connections') && $title !== 'Connections') {
         $crumbs[] = ['label' => 'Connections', 'url' => '/admin/connections'];
-    } elseif (str_starts_with($uri, '/admin/clients') && $title !== 'Clients') {
+    } elseif (str_starts_with($curPath, '/admin/clients') && $title !== 'Clients') {
         $crumbs[] = ['label' => 'Clients', 'url' => '/admin/clients'];
     }
   ?>

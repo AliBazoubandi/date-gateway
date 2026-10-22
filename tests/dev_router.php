@@ -10,5 +10,22 @@ if (PHP_SAPI === 'cli-server') {
     if ($path !== '/' && is_file(__DIR__ . '/../public' . $path)) {
         return false; // static asset: let the built-in server stream it
     }
+    if (str_starts_with($path, '/gateway/')) {
+        $sub = substr($path, strlen('/gateway'));
+        if ($sub !== '/' && is_file(__DIR__ . '/../public' . $sub)) {
+            $ext = pathinfo($sub, PATHINFO_EXTENSION);
+            $mime = match ($ext) {
+                'css' => 'text/css; charset=utf-8',
+                'js' => 'application/javascript; charset=utf-8',
+                'svg' => 'image/svg+xml',
+                'woff2' => 'font/woff2',
+                'png' => 'image/png',
+                default => 'application/octet-stream',
+            };
+            header('Content-Type: ' . $mime);
+            readfile(__DIR__ . '/../public' . $sub);
+            exit;
+        }
+    }
     require __DIR__ . '/../public/index.php';
 }

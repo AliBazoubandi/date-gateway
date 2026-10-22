@@ -33,6 +33,10 @@ $baseThrows = static function (): string {
 $with(['base_url' => 'https://gw.internal/', 'debug' => false]);
 $check('https base_url, trailing slash trimmed', \Api\Links::base() === 'https://gw.internal', \Api\Links::base());
 
+$with(['base_url' => 'https://rbb.palood.ir/gateway/', 'debug' => false]);
+$check('https base_url with subpath, trailing slash trimmed', \Api\Links::base() === 'https://rbb.palood.ir/gateway', \Api\Links::base());
+$check('download link contains subpath', \Api\Links::download('tok123') === 'https://rbb.palood.ir/gateway/api/v1/results/tok123', \Api\Links::download('tok123'));
+
 $with(['base_url' => 'http://gw.internal', 'debug' => false]);
 $check('http base_url in production throws', $baseThrows() !== '');
 

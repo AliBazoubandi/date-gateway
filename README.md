@@ -153,23 +153,54 @@ policy never blocks them.
    changes for everyone who cloned), which is a separate, deliberate decision
    and not part of this fix.
 
-4. **Point Apache at `public/`** — the project root itself must never be
-   the document root. In `C:\xampp\apache\conf\extra\httpd-vhosts.conf`:
+4. **Configure Apache (Dedicated Host or Subpath Alias)** — the project root itself must never be
+   the document root; only `public/` is web-accessible.
 
-   ```
+   **Option A: Dedicated VirtualHost (Domain Root, e.g. `http://gw.internal`):**
+   In `C:\xampp\apache\conf\extra\httpd-vhosts.conf`:
+
+   ```apache
    <VirtualHost *:80>
        DocumentRoot "C:/path/to/data-gateway/public"
        ServerName gw.internal
        <Directory "C:/path/to/data-gateway/public">
+           Options -Indexes +FollowSymLinks
+           AllowOverride All
            Require all granted
        </Directory>
    </VirtualHost>
    ```
 
    Add `127.0.0.1 gw.internal` to `C:\Windows\System32\drivers\etc\hosts`.
-   The root `.htaccess` denies everything as a safety net; `storage/`
-   (result files) sits outside the web root and is only reachable through
-   the authenticated API.
+
+   **Option B: Subpath Alias (Shared Domain alongside another project, e.g. `https://rbb.palood.ir/gateway/`):**
+   If the domain already serves another application at the root (`/`) with its own `/admin` panel:
+
+   ```apache
+   <VirtualHost *:443>
+       ServerName rbb.palood.ir
+       DocumentRoot "C:/xampp/htdocs/main-app"
+
+       <Directory "C:/xampp/htdocs/main-app">
+           Options Indexes FollowSymLinks
+           AllowOverride All
+           Require all granted
+       </Directory>
+
+       # Route /gateway to Data Gateway public/ (Always use forward slashes on Windows!)
+       Alias "/gateway" "C:/xampp/htdocs/new-data-gateway/public"
+       <Directory "C:/xampp/htdocs/new-data-gateway/public">
+           Options -Indexes +FollowSymLinks
+           AllowOverride All
+           Require all granted
+       </Directory>
+   </VirtualHost>
+   ```
+
+   When deployed under a subpath:
+   - Set `GATEWAY_BASE_URL=https://rbb.palood.ir/gateway` in `config/.env`.
+   - The gateway automatically scopes session cookies to `/gateway`, normalizes internal route paths, and isolates from any existing `/admin` on the domain.
+   - The root `.htaccess` denies everything as a safety net; `storage/` (result files) sits outside the web root and is only reachable through the authenticated API.
 
 5. **Create the first admin**
 
@@ -1152,12 +1183,15 @@ opens a live connection to a target and needs its actual credentials.
    ever returns the file contents, the DocumentRoot or `.htaccess` is wrong;
    fix before going live.
 3. **Set `GATEWAY_BASE_URL`** in `config/.env` to the real public URL
-   (e.g. `https://gw.internal`). It must be a valid URL and use `https` in
+   (e.g. `https://gw.internal` or `https://rbb.palood.ir/gateway`). It must be a valid URL and use `https` in
    production — `Links::base()` fails fast (and `cli/check.php` reports
    FAIL) while it is empty or non-https, instead of silently building
    download links from the incoming `Host` header (a cache-poisoning /
    phishing risk). Only with `GATEWAY_DEBUG=1` may it stay empty (links
    then fall back to the Host header, for development machines).
+   When mounted under a subpath (e.g. `/gateway`), the gateway automatically
+   derives the mount prefix, isolates session cookies to that path, and builds
+   all API download links with the subpath prefix included.
 4. **HTTPS/TLS: enabled (decided).** This deployment serves over TLS. The
    session cookie `secure` flag and the download-link scheme auto-detect from
    `HTTPS`/the base URL scheme, so once Apache terminates TLS the app sets

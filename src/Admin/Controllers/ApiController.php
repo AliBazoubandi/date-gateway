@@ -259,17 +259,17 @@ final class ApiController
         foreach ($db->rows(
             'SELECT id, code, name FROM requests ORDER BY code LIMIT 200'
         ) as $r) {
-            $items[] = ['t' => 'r/' . $r['code'] . ' — ' . $r['name'], 'h' => '/admin/requests/' . (int)$r['id'], 'g' => 'Requests'];
+            $items[] = ['t' => 'r/' . $r['code'] . ' — ' . $r['name'], 'h' => Http::url('/admin/requests/' . (int)$r['id']), 'g' => 'Requests'];
         }
         foreach ($db->rows(
             'SELECT id, name FROM clients ORDER BY name LIMIT 100'
         ) as $c) {
-            $items[] = ['t' => 'c/' . $c['name'], 'h' => '/admin/clients/' . (int)$c['id'], 'g' => 'Clients'];
+            $items[] = ['t' => 'c/' . $c['name'], 'h' => Http::url('/admin/clients/' . (int)$c['id']), 'g' => 'Clients'];
         }
         foreach ($db->rows(
             'SELECT id, name FROM connections ORDER BY name LIMIT 100'
         ) as $cn) {
-            $items[] = ['t' => 'cn/' . $cn['name'], 'h' => '/admin/connections/' . (int)$cn['id'], 'g' => 'Connections'];
+            $items[] = ['t' => 'cn/' . $cn['name'], 'h' => Http::url('/admin/connections/' . (int)$cn['id']), 'g' => 'Connections'];
         }
         return $items;
     }

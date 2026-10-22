@@ -22,8 +22,7 @@ final class Auth
     {
         $admin = self::current();
         if ($admin === null) {
-            header('Location: /admin/login' . (self::$idleExpired ? '?expired=1' : ''));
-            exit;
+            \Core\Http::redirect('/admin/login' . (self::$idleExpired ? '?expired=1' : ''));
         }
         return $admin;
     }
