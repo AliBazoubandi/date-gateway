@@ -42,9 +42,10 @@ final class Links
             throw new \RuntimeException('app.base_url is not configured; set GATEWAY_BASE_URL in config/.env');
         }
         if (self::debug()) {
-            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+            $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+                || ((string)($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') ? 'https' : 'http';
             $host = (string)($_SERVER['HTTP_HOST'] ?? 'localhost');
-            return $scheme . '://' . $host;
+            return $scheme . '://' . $host . \Core\Http::basePath();
         }
         throw new \RuntimeException(
             'app.base_url is not configured; refusing to build links from the Host header in production. '
