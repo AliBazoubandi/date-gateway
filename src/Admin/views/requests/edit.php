@@ -32,7 +32,7 @@ $changed = $changed ?? [];
     </div>
     <label class="visually-hidden" for="sql_text">SQL statement</label>
     <textarea name="sql_text" id="sql_text" rows="12" class="<?= $fc('sql_text') ?> sql" data-cm
-              required spellcheck="false" aria-label="SQL statement"
+              spellcheck="false" aria-label="SQL statement"
               placeholder="SELECT  symbol, last_price&#10;FROM    instrument_snapshots&#10;WHERE   traded_at &gt;= :since"><?= e((string)$row['sql_text']) ?></textarea>
     <?= $fe('sql_text') ?>
     <div class="hint" style="margin-block-start:10px">
@@ -90,7 +90,7 @@ $changed = $changed ?? [];
     <div class="form-ops">
       <label class="chk"><input type="checkbox" name="is_active" <?= !empty($row['is_active']) ? 'checked' : '' ?>> Active</label>
       <div class="between"></div>
-      <button class="btn btn-primary" type="submit"><?= View::icon('check', 14) ?><span>Save</span></button>
+      <button class="btn btn-primary" type="submit" form="reqform"><?= View::icon('check', 14) ?><span>Save</span></button>
       <a class="btn" href="/admin/requests">Cancel</a>
     </div>
     <div class="hint small">

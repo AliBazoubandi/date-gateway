@@ -903,7 +903,7 @@
   /* -------------------------------------------- CodeMirror (editor page) - */
   $$('textarea[data-cm]').forEach(function (ta) {
     if (typeof CodeMirror === 'undefined') { return; }   // graceful plain-textarea fallback
-    CodeMirror.fromTextArea(ta, {
+    var cm = CodeMirror.fromTextArea(ta, {
       mode: 'text/x-sql',
       theme: 'gateway',
       lineNumbers: true,
@@ -916,5 +916,10 @@
         'Shift-Tab': function (cm) { cm.indentSelection('subtract'); }
       }
     });
+    ta.removeAttribute('required');
+    cm.on('change', function () { cm.save(); });
+    if (ta.form) {
+      ta.form.addEventListener('submit', function () { cm.save(); });
+    }
   });
 })();
