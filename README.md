@@ -647,6 +647,35 @@ Upgrading: apply `sql/migrations/2026-10-20-production-hardening.sql` (it adds
 column — without the header it is simply `NULL` — so a database missing it
 breaks all submits, keyed or not.
 
+### Parameterized queries (named placeholders)
+
+Pre-approved queries can take dynamic parameters via named colon placeholders (e.g.
+`:start_time`, `:end_time`, `:company_id`). Parameters are auto-detected by the admin
+editor and can be configured with types (`string`, `int`, `float`, `bool`, `date`, `datetime`),
+`required` flags, and default values (static strings or dynamic dates like `today`, `now`,
+`start_of_month`).
+
+Clients provide parameters via URL query string or JSON request body:
+
+```powershell
+# via URL query parameters
+curl.exe -X POST -H "Authorization: Bearer CLIENT_KEY" `
+     "http://gw.internal/api/v1/request/profit.period?start_time=2026-01-01&end_time=2026-06-30"
+
+# or via JSON request body
+curl.exe -X POST -H "Authorization: Bearer CLIENT_KEY" -H "Content-Type: application/json" `
+     -d '{"start_time": "2026-01-01", "end_time": "2026-06-30"}' `
+     http://gw.internal/api/v1/request/profit.period
+```
+
+**Key guarantees:**
+1. **Full SQL Injection Safety:** Placeholders are converted to positional markers (`?` on MySQL and SQL Server, `$1, $2, ...` on PostgreSQL) and bound natively via driver prepared statements.
+2. **Dynamic Defaults:** If an optional date parameter has default `today`, omitting it automatically resolves to today's date in Tehran local time (`+03:30`).
+3. **Cache & Execution Isolation:** Executions and instant cache windows are keyed by a deterministic SHA-256 hash of the resolved parameters (`params_hash`), so queries with different parameter values run completely separately and never collide.
+4. **Self-Service Discovery:** `GET /api/v1/requests` (or `/api/v1/catalog`) returns the full `parameters` schema for each permitted request.
+
+Upgrading: apply `sql/migrations/2026-10-24-query-parameters.sql` (adds `requests.params_json`, `executions.params_json`, `executions.params_hash`, and `calls.params_json`).
+
 ### Health check (`GET /health`)
 
 `GET /health` answers whether this gateway can do its job **right now**: `200`
@@ -976,6 +1005,18 @@ stored value on its next send (`cli\encrypt_webhook_secrets.php` just closes
 that window in one step), and existing API keys keep authenticating through
 their bare SHA-256 hash until their first successful call upgrades the row.
 Apply it before deploying the code that reads the new column names.
+
+A third re-runnable migration adds query parameter support:
+
+```powershell
+& "C:\xampp\mysql\bin\mysql.exe" -u root -p data_gateway -e "source sql/migrations/2026-10-24-query-parameters.sql"
+```
+
+It adds:
+- `requests.params_json`: JSON schema defining parameters, types, and defaults.
+- `executions.params_json` and `executions.params_hash`: Records the exact parameter values and SHA-256 hash for cache isolation.
+- `calls.params_json`: Audit trail of parameters submitted per call.
+- Index `idx_exec_params (request_id, params_hash, status)`: Accelerates cache lookups for parameterized executions.
 
 A database created **before the webhook feature** needs one extra, one-off ALTER
 that the migration deliberately does not repeat (it is not part of the

@@ -100,6 +100,7 @@ $suites = [
     ['links_test', 'download / webhook link building', []],
     ['filesystem_test', 'stored path validation', []],
     ['sqlguard_test', 'read-only SQL scanner', []],
+    ['parameters_test', 'named query parameter parser and binder', []],
     ['readonly_driver_test', 'MySQL read-only transaction', []],
     ['pool_test', 'per-connection worker pool', []],
     ['resultwriter_test', 'streamed result files + byte caps', []],

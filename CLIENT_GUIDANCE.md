@@ -328,7 +328,16 @@ A self-service introspection endpoint that allows authenticated clients to disco
       "timeout_seconds": 30,
       "max_rows": 1000,
       "submit_url": "https://gateway.example.com/api/v1/request/inventory.lookup",
-      "cache_seconds": 30
+      "cache_seconds": 30,
+      "parameters": [
+        {
+          "name": "sku",
+          "type": "string",
+          "required": true,
+          "default": null,
+          "description": "Product SKU code"
+        }
+      ]
     },
     {
       "code": "sales.daily",
@@ -339,7 +348,23 @@ A self-service introspection endpoint that allows authenticated clients to disco
       "max_rows": 100000,
       "submit_url": "https://gateway.example.com/api/v1/request/sales.daily",
       "delay_minutes": 5,
-      "ttl_minutes": 15
+      "ttl_minutes": 15,
+      "parameters": [
+        {
+          "name": "start_date",
+          "type": "date",
+          "required": true,
+          "default": null,
+          "description": "Period start date (YYYY-MM-DD)"
+        },
+        {
+          "name": "end_date",
+          "type": "date",
+          "required": false,
+          "default": "today",
+          "description": "Period end date, defaults dynamically to today"
+        }
+      ]
     }
   ]
 }
@@ -381,7 +406,111 @@ An unauthenticated probe endpoint for monitoring systems and load balancers.
 
 ---
 
-## 5. Result File Format & Data Contract
+## 5. Parameterized Queries (Dynamic Input Parameters)
+
+Pre-approved queries can accept dynamic parameters defined with named colon placeholders (e.g., `:start_date`, `:end_date`, `:company_id`). This allows clients to query custom date ranges, financial periods, or specific entity filters with full database-level SQL injection prevention via native driver prepared statements.
+
+### 1. Discovering Required & Optional Parameters
+
+Call `GET /api/v1/requests` (the catalog endpoint). Every request includes a `parameters` array describing the expected inputs:
+
+```json
+{
+  "name": "start_date",
+  "type": "date",
+  "required": true,
+  "default": null,
+  "description": "Period start date (YYYY-MM-DD)"
+},
+{
+  "name": "end_date",
+  "type": "date",
+  "required": false,
+  "default": "today",
+  "description": "Period end date, defaults dynamically to today"
+}
+```
+
+### 2. Supported Parameter Types
+
+| Type | Format & Example | Description |
+| :--- | :--- | :--- |
+| `string` | `"USD"`, `"ACTIVE"` | Raw string literal. |
+| `int` | `100`, `-5`, `"100"` | Converted to integer. Rejects non-numeric strings. |
+| `float` | `1450.50`, `"1450.50"` | Converted to floating point number. |
+| `bool` | `true`, `false`, `1`, `0`, `"true"` | Converted to boolean integer (`1` or `0`). |
+| `date` | `"2026-10-24"` | Strict calendar date in `YYYY-MM-DD` format. Validated against actual calendar days. |
+| `datetime` | `"2026-10-24 14:30:00"` | Strict timestamp in `YYYY-MM-DD HH:MM:SS` format. |
+
+### 3. Dynamic Date Defaults
+
+When an optional parameter has a dynamic default configured, you can omit it in your request, and the gateway will automatically compute its value in **Tehran local time (`+03:30`)**:
+
+- `"today"`: Evaluates to today's date (`YYYY-MM-DD`). For example, if a query accepts `:start_date` and optional `:end_date` defaulting to `today`, omitting `end_date` automatically queries through today.
+- `"now"`: Evaluates to current timestamp (`YYYY-MM-DD HH:MM:SS`).
+- `"start_of_month"`: Evaluates to the first day of the current month (`YYYY-MM-01`).
+
+### 4. Sending Parameters in Submissions
+
+You can provide parameters via **URL query string** or **JSON request body** (or mix both; body values take precedence):
+
+#### Method A: URL Query String
+```bash
+curl.exe -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  "https://gateway.example.com/api/v1/request/profit.period?start_date=2026-01-01&end_date=2026-06-30"
+```
+
+#### Method B: JSON Request Body (Root Level)
+```bash
+curl.exe -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"start_date": "2026-01-01", "end_date": "2026-06-30"}' \
+  https://gateway.example.com/api/v1/request/profit.period
+```
+
+#### Method C: JSON Request Body (Nested `params` Object)
+```bash
+curl.exe -X POST \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"params": {"start_date": "2026-01-01", "end_date": "2026-06-30"}}' \
+  https://gateway.example.com/api/v1/request/profit.period
+```
+
+### 5. Validation Errors
+
+If parameters fail validation, the gateway returns `400 Bad Request` with an explanatory error envelope before executing any query:
+
+```json
+{
+  "error": {
+    "code": "missing_parameter",
+    "message": "Parameter 'start_date' is required."
+  }
+}
+```
+
+Or on invalid calendar date / format:
+```json
+{
+  "error": {
+    "code": "invalid_parameter",
+    "message": "Parameter 'start_date' contains an invalid calendar date."
+  }
+}
+```
+
+### 6. Execution & Cache Isolation
+
+The gateway isolates executions using a deterministic cryptographic hash (`params_hash`) of the resolved parameters:
+- **Zero Collision:** Submitting with `start_date=2026-01-01` runs completely separately from `start_date=2026-02-01`.
+- **Cache Sharing:** Submitting with the exact same parameters within the request's instant cache window (or delayed execution scheduling window) safely reuses the cached execution, minimizing database load.
+
+---
+
+## 6. Result File Format & Data Contract
 
 Downloaded result files (and the output of `POST ?download=1`) are structured in a consistent JSON streaming envelope:
 
@@ -427,7 +556,7 @@ Downloaded result files (and the output of `POST ?download=1`) are structured in
 
 ---
 
-## 6. Idempotent Submissions (`Idempotency-Key`)
+## 7. Idempotent Submissions (`Idempotency-Key`)
 
 To prevent accidentally running expensive queries multiple times due to network disconnects, timeouts, or retried API calls, pass an `Idempotency-Key` header with your `POST` submission.
 
@@ -447,7 +576,7 @@ Idempotency-Key: b7f6c382-7f39-4d89-9a2e-4b68ef5d8931
 
 ---
 
-## 7. Rate Limits & Concurrency
+## 8. Rate Limits & Concurrency
 
 The gateway enforces two tiers of concurrency and rate limits:
 
@@ -471,7 +600,7 @@ The gateway enforces two tiers of concurrency and rate limits:
 
 ---
 
-## 8. Webhooks Integration Guide
+## 9. Webhooks Integration Guide
 
 If your client account is configured with a **Webhook URL** and a **Webhook Secret**, the gateway automatically pushes a signed HTTP POST notification as soon as a delayed execution finishes (`ready` or `failed`).
 
@@ -539,7 +668,7 @@ To ensure the webhook genuinely originated from the gateway and was not tampered
 
 ---
 
-## 9. Error Reference & Status Codes
+## 10. Error Reference & Status Codes
 
 All API errors return standard JSON formatted as:
 ```json
@@ -555,6 +684,9 @@ All API errors return standard JSON formatted as:
 
 | HTTP Status | Error Code | Description | Client Remedy |
 | :---: | :--- | :--- | :--- |
+| `400` | `missing_parameter` | A required query parameter was omitted from the request. | Supply the required parameter in URL query string or JSON body. |
+| `400` | `invalid_parameter` | A parameter failed format or type validation (e.g. invalid calendar date). | Ensure parameter conforms to schema in `GET /api/v1/requests`. |
+| `400` | `invalid_json` | The POST request body was not valid JSON. | Format body as valid JSON or pass parameters via query string. |
 | `400` | `invalid_idempotency_key` | Idempotency-Key header is less than 8 or more than 200 characters, or contains non-printable characters. | Supply an 8–200 character ASCII key (e.g. UUIDv4). |
 | `401` | `unauthorized` | Missing or invalid `Authorization: Bearer <key>` header. | Check API key configuration. |
 | `403` | `forbidden` | Client account is deactivated, or lacks permission for this request code. | Request permission from gateway administrator. |
@@ -573,7 +705,7 @@ All API errors return standard JSON formatted as:
 
 ---
 
-## 10. Code Examples & SDK Patterns
+## 11. Code Examples & SDK Patterns
 
 ### Python 3 (`requests`)
 
@@ -834,7 +966,7 @@ echo json_encode(['status' => 'accepted']);
 
 ---
 
-## 11. Operational Best Practices & Client Checklist
+## 12. Operational Best Practices & Client Checklist
 
 - [ ] **Always Include `Idempotency-Key`:** Generate a unique key per batch/attempt (e.g. `report_20261022_001`). This ensures safe retries during network failures without generating duplicate database load.
 - [ ] **Respect Rate Limits (`Retry-After`):** If you receive HTTP `429`, always read the `Retry-After` header and wait that exact duration before re-sending.

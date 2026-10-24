@@ -31,7 +31,7 @@ final class Catalog
         $rows = $db->rows(
             'SELECT r.code, r.name, r.description, r.response_mode,
                     r.instant_cache_seconds, r.delay_minutes, r.ttl_minutes,
-                    r.timeout_seconds, r.max_rows
+                    r.timeout_seconds, r.max_rows, r.params_json, r.sql_text
              FROM requests r
              JOIN client_request_permissions p ON p.request_id = r.id
              JOIN connections c ON c.id = r.connection_id
@@ -50,6 +50,7 @@ final class Catalog
                 'timeout_seconds' => (int)$r['timeout_seconds'],
                 'max_rows' => (int)$r['max_rows'],
                 'submit_url' => $base . '/api/v1/request/' . rawurlencode((string)$r['code']),
+                'parameters' => array_values(\Services\QueryParameters::normalizeSchema($r['params_json'] ?? null, (string)($r['sql_text'] ?? ''))),
             ];
             if ($r['response_mode'] === 'instant') {
                 $item['cache_seconds'] = (int)$r['instant_cache_seconds'];

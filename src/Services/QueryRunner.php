@@ -24,7 +24,8 @@ final class QueryRunner
         string $sql,
         int $timeoutSeconds,
         int $maxRows,
-        ?callable $onRow = null
+        ?callable $onRow = null,
+        array $params = []
     ): array {
         $t0 = microtime(true);
         $out = ['ok' => false, 'row_count' => 0, 'truncated' => false,
@@ -48,9 +49,10 @@ final class QueryRunner
                 return $out;
             }
             SqlGuard::assert($sql, $dbType, $scriptsMode);
+            $prep = QueryParameters::prepare($sql, $params, $dbType);
             $driver = ConnectionFactory::fromConnectionRow($connectionRow, $timeoutSeconds);
             $driver->setQueryTimeout($timeoutSeconds);
-            $stmt = $driver->query($sql);
+            $stmt = $driver->query($prep['sql'], $prep['params']);
             // In scripts mode the batch may hand back several result sets
             // (one per SELECT in the script); stream them in order. A plain
             // single-statement run never advances past the first set.

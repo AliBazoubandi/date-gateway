@@ -21,11 +21,12 @@ interface DriverInterface
     public function setQueryTimeout(int $seconds): void;
 
     /**
-     * Execute a pre-approved query. Returns a statement/handle for fetchRow()
+     * Execute a pre-approved query with optional parameters. Returns a statement/handle for fetchRow()
      * (any type: resource, object or array). Throws DbQueryException on error.
+     * @param list<mixed> $params positional bound parameters
      * @return mixed
      */
-    public function query(string $sql): mixed;
+    public function query(string $sql, array $params = []): mixed;
 
     /**
      * Fetch the next row as an associative array (streaming-safe), or null at

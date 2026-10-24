@@ -38,6 +38,27 @@ $ok = $r['ok'] === true;
   <?php endif; ?>
 </section>
 
+<?php if (!empty($schema)): ?>
+<section class="card" style="margin-top:16px">
+  <div class="card-head">
+    <div class="card-title"><?= View::icon('play', 15) ?><h2>Parameters Used in Test</h2></div>
+  </div>
+  <form method="post" action="/admin/requests/test" style="display:flex;flex-wrap:wrap;gap:16px;align-items:flex-end">
+    <?= $csrf ?>
+    <input type="hidden" name="id" value="<?= (int)$request['id'] ?>">
+    <?php foreach ($schema as $name => $meta): ?>
+      <label style="min-width:200px;margin:0">
+        <span style="font-weight:600"><?= e($name) ?></span>
+        <small style="color:var(--text-muted)">(<?= e($meta['type'] ?? 'string') ?><?= !empty($meta['required']) ? ', required' : '' ?>)</small>
+        <input type="text" name="param_<?= e($name) ?>" value="<?= e((string)($test_params[$name] ?? '')) ?>"
+               placeholder="<?= e((string)($meta['default'] ?? '')) ?>" style="margin-top:4px">
+      </label>
+    <?php endforeach; ?>
+    <button class="btn btn-primary" type="submit"><?= View::icon('play', 14) ?><span>Re-run with values</span></button>
+  </form>
+</section>
+<?php endif; ?>
+
 <?php if ($preview !== []): ?>
 <section class="card">
   <div class="card-head">

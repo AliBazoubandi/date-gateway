@@ -295,6 +295,14 @@ final class Worker
             return false;
         }
 
+        $params = [];
+        if (!empty($exec['params_json'])) {
+            $decoded = json_decode((string)$exec['params_json'], true);
+            if (is_array($decoded)) {
+                $params = $decoded;
+            }
+        }
+
         try {
             $result = QueryRunner::run(
                 $connection,
@@ -303,7 +311,8 @@ final class Worker
                 (int)$request['max_rows'],
                 static function (array $row) use ($writer): void {
                     $writer->writeRow($row);
-                }
+                },
+                $params
             );
         } catch (ResultTooLargeException $e) {
             $writer->discard(); // remove the partial file

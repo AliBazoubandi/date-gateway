@@ -134,5 +134,10 @@ final class Http
         header('Location: ' . $target, true, 302);
         exit;
     }
+
+    public static function rawBody(): string
+    {
+        return (string)file_get_contents('php://input');
+    }
 }
 

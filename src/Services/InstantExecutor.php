@@ -62,7 +62,9 @@ final class InstantExecutor
         string $callId,
         string $ip,
         bool $asFile = false,
-        ?string $idempotencyKeyHash = null
+        ?string $idempotencyKeyHash = null,
+        array $params = [],
+        ?string $paramsHash = null
     ): void {
         $db = Db::instance();
         $connId = (int)$connection['id'];
@@ -93,11 +95,12 @@ final class InstantExecutor
         }
 
         $now = Time::now();
+        $paramsJson = $params !== [] ? json_encode($params, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) : null;
         $db->execute(
             "INSERT INTO executions
-                (request_id, mode, status, scheduled_at, started_at, row_count, truncated)
-             VALUES (?, 'instant', 'running', ?, ?, 0, 0)",
-            [$request['id'], $now, $now]
+                (request_id, mode, status, scheduled_at, started_at, row_count, truncated, params_json, params_hash)
+             VALUES (?, 'instant', 'running', ?, ?, 0, 0, ?, ?)",
+            [$request['id'], $now, $now, $paramsJson, $paramsHash]
         );
         $execId = $db->insertId();
         $db->unlock($lockName);
@@ -106,10 +109,10 @@ final class InstantExecutor
         // polling and the response envelope can expose a stable result link.
         $token = Str::hex(24); // 48 hex chars
         $db->execute(
-            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)',
+            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared, params_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)',
             [$callId, $client['id'], $request['id'], $execId, hash('sha256', $token),
-                Encryption::encrypt($token), $idempotencyKeyHash, $now, $ip]
+                Encryption::encrypt($token), $idempotencyKeyHash, $now, $ip, $paramsJson]
         );
         Logger::event('submitted', (int)$client['id'], (int)$request['id'], $callId, $execId, $ip);
 
@@ -179,7 +182,8 @@ final class InstantExecutor
                             "The inline result exceeded the instant limit of {$inlineMax} bytes."
                         );
                     }
-                }
+                },
+                $params
             );
         } catch (ResultTooLargeException $e) {
             if ($writer->touched()) {

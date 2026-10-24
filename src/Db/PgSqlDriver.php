@@ -63,7 +63,7 @@ final class PgSqlDriver implements DriverInterface
         }
     }
 
-    public function query(string $sql): mixed
+    public function query(string $sql, array $params = []): mixed
     {
         $sql = rtrim(trim($sql), ';');
         if (preg_match('/^(select|with)\b/i', $sql) === 1) {
@@ -74,7 +74,11 @@ final class PgSqlDriver implements DriverInterface
                 throw new DbQueryException($this->connError(), $this->timedOut);
             }
             $name = 'gwcur_' . ++self::$seq . '_' . bin2hex(random_bytes(4));
-            if (!@pg_query($this->conn, 'DECLARE ' . $name . ' CURSOR FOR (' . $sql . ')')) {
+            $cursorSql = 'DECLARE ' . $name . ' CURSOR FOR (' . $sql . ')';
+            $ok = $params === []
+                ? @pg_query($this->conn, $cursorSql)
+                : @pg_query_params($this->conn, $cursorSql, $params);
+            if (!$ok) {
                 @pg_query($this->conn, 'ROLLBACK');
                 throw new DbQueryException($this->connError(), $this->timedOut);
             }
@@ -89,7 +93,9 @@ final class PgSqlDriver implements DriverInterface
         if (preg_match('/^(show|explain)\b/i', $sql) !== 1) {
             throw new DbQueryException('Statement is not a read-only query or EXPLAIN/SHOW', false);
         }
-        $res = @pg_query($this->conn, $sql);
+        $res = $params === []
+            ? @pg_query($this->conn, $sql)
+            : @pg_query_params($this->conn, $sql, $params);
         if ($res === false) {
             throw new DbQueryException($this->connError(), $this->timedOut);
         }

@@ -142,11 +142,11 @@ final class RequestController
         if ($id > 0) {
             $before = $db->one('SELECT * FROM requests WHERE id = ?', [$id]);
             $db->execute(
-                'UPDATE requests SET code=?, name=?, description=?, sql_text=?, connection_id=?,
+                'UPDATE requests SET code=?, name=?, description=?, sql_text=?, params_json=?, connection_id=?,
                     response_mode=?, instant_cache_seconds=?, delay_minutes=?, ttl_minutes=?,
                     timeout_seconds=?, max_rows=?, is_active=?, updated_by=?, updated_at=?
                  WHERE id=?',
-                [$in['code'], $in['name'], $in['description'], $in['sql_text'], $in['connection_id'],
+                [$in['code'], $in['name'], $in['description'], $in['sql_text'], $in['params_json'], $in['connection_id'],
                     $in['response_mode'], $in['instant_cache_seconds'], $in['delay_minutes'],
                     $in['ttl_minutes'], $in['timeout_seconds'], $in['max_rows'], $in['is_active'],
                     $adminId, $now, $id]
@@ -156,11 +156,11 @@ final class RequestController
             Flashes::set('ok', 'Request updated. New calls use the new definition immediately.');
         } else {
             $db->execute(
-                'INSERT INTO requests (code, name, description, sql_text, connection_id, response_mode,
+                'INSERT INTO requests (code, name, description, sql_text, params_json, connection_id, response_mode,
                     instant_cache_seconds, delay_minutes, ttl_minutes, timeout_seconds, max_rows,
                     is_active, created_by, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [$in['code'], $in['name'], $in['description'], $in['sql_text'], $in['connection_id'],
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [$in['code'], $in['name'], $in['description'], $in['sql_text'], $in['params_json'], $in['connection_id'],
                     $in['response_mode'], $in['instant_cache_seconds'], $in['delay_minutes'],
                     $in['ttl_minutes'], $in['timeout_seconds'], $in['max_rows'], $in['is_active'],
                     $adminId, $now]
@@ -213,6 +213,46 @@ final class RequestController
         $limitRows = (int)Config::get('admin.test_run.max_rows', 20);
         $limitSeconds = (int)Config::get('admin.test_run.max_seconds', 10);
         $preview = [];
+
+        // Resolve test parameters if this query is parameterized
+        $schema = \Services\QueryParameters::normalizeSchema($request['params_json'] ?? null, (string)$request['sql_text']);
+        $testParams = [];
+        if (!empty($schema)) {
+            $submitted = [];
+            foreach ($_POST as $k => $v) {
+                if (str_starts_with($k, 'param_') && is_scalar($v)) {
+                    $submitted[substr($k, 6)] = (string)$v;
+                }
+            }
+            if (isset($_POST['params']) && is_array($_POST['params'])) {
+                foreach ($_POST['params'] as $k => $v) {
+                    if (is_scalar($v)) {
+                        $submitted[(string)$k] = (string)$v;
+                    }
+                }
+            }
+            // For any missing required parameters, supply sensible test fallbacks if not resolved by defaults
+            foreach ($schema as $name => $meta) {
+                if (!isset($submitted[$name]) || $submitted[$name] === '') {
+                    if ($meta['default'] === null && !empty($meta['required'])) {
+                        $submitted[$name] = match ($meta['type'] ?? 'string') {
+                            'date' => date('Y-m-d'),
+                            'datetime' => date('Y-m-d H:i:s'),
+                            'int' => '1',
+                            'float' => '1.0',
+                            'bool' => '1',
+                            default => 'test',
+                        };
+                    }
+                }
+            }
+            try {
+                $testParams = \Services\QueryParameters::resolveClientParams($schema, $submitted);
+            } catch (\Services\QueryParameterException $e) {
+                $testParams = [];
+            }
+        }
+
         $result = QueryRunner::run(
             $connection,
             (string)$request['sql_text'],
@@ -226,7 +266,8 @@ final class RequestController
                     $trimmed[$k] = Str::truncate($str, 120);
                 }
                 $preview[] = $trimmed;
-            }
+            },
+            $testParams
         );
 
         AuditLogger::record('request', 'test_run', (int)$request['id'], (string)$request['code'], null, [
@@ -245,6 +286,8 @@ final class RequestController
             'request' => $request,
             'result' => $result,
             'preview' => $preview,
+            'schema' => $schema,
+            'test_params' => $testParams,
             'limits' => 'first ' . $limitRows . ' rows, ' . $limitSeconds . 's timeout',
         ], 'Test run', 'request-test');
     }
@@ -260,7 +303,7 @@ final class RequestController
             'connection_id' => 0, 'response_mode' => 'delayed',
             'instant_cache_seconds' => 0, 'delay_minutes' => 0, 'ttl_minutes' => 15,
             'timeout_seconds' => 60, 'max_rows' => $delayedMax, 'is_active' => 1,
-            'instant_defaults' => $instant,
+            'instant_defaults' => $instant, 'params_json' => '',
         ];
     }
 
@@ -295,11 +338,18 @@ final class RequestController
         // than the sweep can keep. 86400 stays as a sanity ceiling.
         $cacheMax = min(86400, InstantExecutor::resultTtlMinutes() * 60);
         $cache = $int('instant_cache_seconds', 'p', 0, $cacheMax, 0);
+
+        $sqlText = (string)Http::param('sql_text', 'p');
+        $rawParamsJson = trim((string)Http::param('params_json', 'p'));
+        $schema = \Services\QueryParameters::normalizeSchema($rawParamsJson !== '' ? $rawParamsJson : null, $sqlText);
+        $finalParamsJson = !empty($schema) ? json_encode($schema, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT) : null;
+
         return [
             'code' => trim((string)Http::param('code', 'p')),
             'name' => trim((string)Http::param('name', 'p')),
             'description' => trim((string)Http::param('description', 'p')),
-            'sql_text' => (string)Http::param('sql_text', 'p'),
+            'sql_text' => $sqlText,
+            'params_json' => $finalParamsJson,
             // POST only: a query-string connection_id would otherwise retarget
             // the saved request behind the select the admin can see.
             'connection_id' => (int)trim((string)(Http::param('connection_id', 'p') ?? '')),
@@ -341,13 +391,6 @@ final class RequestController
             if ($conn === null) {
                 $e['connection_id'] = 'Pick a connection.';
             }
-            // Save-time gate so a forbidden statement is rejected before it
-            // can ever be scheduled (QueryRunner re-checks at execution).
-            // Scanned with the target's dialect: `#` comments, backslash
-            // escapes and `[...]` identifiers mean different things per
-            // server. A scripts-mode connection (allow_writes, SQL Server
-            // only) may carry a multi-statement batch; everything else must
-            // be provably read-only.
             if (!isset($e['connection_id'])) {
                 try {
                     \Services\SqlGuard::assert($in['sql_text'], (string)$conn['db_type'], !empty($conn['allow_writes']));

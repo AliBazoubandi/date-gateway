@@ -75,11 +75,11 @@ final class SqlServerDriver implements DriverInterface
         $this->timeout = max(1, $seconds);
     }
 
-    public function query(string $sql): mixed
+    public function query(string $sql, array $params = []): mixed
     {
         $this->columnKeys = null;
         $this->exhausted = false;
-        $stmt = @sqlsrv_query($this->conn, $sql, [], ['QueryTimeout' => $this->timeout]);
+        $stmt = @sqlsrv_query($this->conn, $sql, $params, ['QueryTimeout' => $this->timeout]);
         if ($stmt === false) {
             $msg = $this->collectErrors(null);
             $this->lastError = $msg;

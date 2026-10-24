@@ -12,6 +12,8 @@ use Services\Encryption;
 use Services\ExecutionError;
 use Services\InstantExecutor;
 use Services\Logger;
+use Services\QueryParameters;
+use Services\QueryParameterException;
 
 /**
  * POST /api/v1/request/{code} — the submission endpoint.
@@ -87,13 +89,66 @@ final class Submit
 
         self::enforceClientSubmitRate($clientId, $requestId, $ip);
 
+        // Resolve client-supplied query parameters
+        $clientInput = self::extractClientInput();
+        $schema = QueryParameters::normalizeSchema($request['params_json'] ?? null, (string)($request['sql_text'] ?? ''));
+
+        $resolvedParams = [];
+        $paramsHash = null;
+        $paramsJson = null;
+
+        if (!empty($schema)) {
+            try {
+                $resolvedParams = QueryParameters::resolveClientParams($schema, $clientInput);
+            } catch (QueryParameterException $e) {
+                Errors::emit(400, $e->getErrorCode(), $e->getMessage());
+            }
+            $paramsHash = QueryParameters::hash($resolvedParams);
+            $paramsJson = json_encode($resolvedParams, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        }
+
         $callId = self::newCallId();
 
         if ((string)$request['response_mode'] === 'instant') {
-            self::instantFlow($request, $client, $callId, $ip, $asFile, $idemHash);
+            self::instantFlow($request, $client, $callId, $ip, $asFile, $idemHash, $resolvedParams, $paramsHash, $paramsJson);
             return;
         }
-        self::delayedFlow($request, $client, $callId, $ip, $idemHash);
+        self::delayedFlow($request, $client, $callId, $ip, $idemHash, $resolvedParams, $paramsHash, $paramsJson);
+    }
+
+    private static function extractClientInput(): array
+    {
+        $input = [];
+
+        // 1. URL Query parameters (excluding internal gateway routing flags)
+        foreach ($_GET as $k => $v) {
+            if ($k === 'download' || !is_scalar($v)) {
+                continue;
+            }
+            $input[(string)$k] = (string)$v;
+        }
+
+        // 2. Request body (JSON)
+        $raw = trim(Http::rawBody());
+        if ($raw !== '') {
+            $decoded = json_decode($raw, true);
+            if (!is_array($decoded)) {
+                Errors::emit(400, 'invalid_json', 'Request body must be valid JSON.');
+            }
+            // Support both nested 'params' wrapper and root-level fields
+            if (isset($decoded['params']) && is_array($decoded['params'])) {
+                foreach ($decoded['params'] as $k => $v) {
+                    $input[(string)$k] = $v;
+                }
+            }
+            foreach ($decoded as $k => $v) {
+                if ($k !== 'params') {
+                    $input[(string)$k] = $v;
+                }
+            }
+        }
+
+        return $input;
     }
 
     /** ---------------------------------------------------------------- */
@@ -195,8 +250,17 @@ final class Submit
         ]);
     }
 
-    private static function instantFlow(array $request, array $client, string $callId, string $ip, bool $asFile, ?string $idemHash): void
-    {
+    private static function instantFlow(
+        array $request,
+        array $client,
+        string $callId,
+        string $ip,
+        bool $asFile,
+        ?string $idemHash,
+        array $params = [],
+        ?string $paramsHash = null,
+        ?string $paramsJson = null
+    ): void {
         $db = Db::instance();
 
         $cacheSeconds = InstantExecutor::cacheWindowSeconds($request);
@@ -205,19 +269,20 @@ final class Submit
                 "SELECT * FROM executions
                  WHERE request_id = ? AND mode = 'instant' AND status = 'ready'
                    AND result_path IS NOT NULL
+                   AND (params_hash <=> ?)
                    AND finished_at >= DATE_SUB(NOW(), INTERVAL ? SECOND)
                  ORDER BY id DESC
                  LIMIT 1",
-                [$request['id'], $cacheSeconds]
+                [$request['id'], $paramsHash, $cacheSeconds]
             );
             if ($cached !== null) {
                 // The call attaches to the cached execution (was_shared = true)
                 // and gets its own download token, same as delayed rule 2.
                 $token = \Core\Str::hex(24); // 48 hex chars
                 $db->execute(
-                    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
+                    'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared, params_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)',
                     [$callId, $client['id'], $request['id'], $cached['id'], hash('sha256', $token),
-                        Encryption::encrypt($token), $idemHash, Time::now(), $ip]
+                        Encryption::encrypt($token), $idemHash, Time::now(), $ip, $paramsJson]
                 );
                 Logger::event('submitted', (int)$client['id'], (int)$request['id'], $callId, (int)$cached['id'], $ip);
                 InstantExecutor::emitFromCache($request, (int)$client['id'], $callId, $cached, $ip, $asFile);
@@ -225,7 +290,7 @@ final class Submit
             }
         }
         $connection = $db->one('SELECT * FROM connections WHERE id = ?', [$request['connection_id']]);
-        InstantExecutor::handle($request, $connection, $client, $callId, $ip, $asFile, $idemHash);
+        InstantExecutor::handle($request, $connection, $client, $callId, $ip, $asFile, $idemHash, $params, $paramsHash);
     }
 
     /**
@@ -234,18 +299,24 @@ final class Submit
      *  2. ready and not expired -> attach + return link now
      *  3. else create a new execution scheduled_at = now + delay_minutes
      */
-    private static function delayedFlow(array $request, array $client, string $callId, string $ip, ?string $idemHash): void
-    {
+    private static function delayedFlow(
+        array $request,
+        array $client,
+        string $callId,
+        string $ip,
+        ?string $idemHash,
+        array $params = [],
+        ?string $paramsHash = null,
+        ?string $paramsJson = null
+    ): void {
         $db = Db::instance();
         $now = Time::nowDt();
         $requestId = (int)$request['id'];
 
-        // GET_LOCK serializes the attach-or-create decision per request: two
+        // GET_LOCK serializes the attach-or-create decision per request + params: two
         // simultaneous first submits must not both fall through to rule 3 and
-        // duplicate the run. The lock dies with the connection, so a crash
-        // cannot strand it. On lock timeout we proceed unlocked — the same
-        // race window as before, only reachable under pathological DB stalls.
-        $lockKey = 'gw_submit_' . $requestId;
+        // duplicate the run.
+        $lockKey = 'gw_submit_' . $requestId . ($paramsHash !== null ? '_' . substr($paramsHash, 0, 16) : '');
         $locked = $db->lock($lockKey, 10);
         $release = static function () use ($db, $lockKey, $locked): void {
             if ($locked) {
@@ -255,13 +326,13 @@ final class Submit
 
         $active = $db->one(
             "SELECT * FROM executions
-             WHERE request_id = ? AND status IN ('scheduled', 'running')
+             WHERE request_id = ? AND (params_hash <=> ?) AND status IN ('scheduled', 'running')
              ORDER BY id DESC
              LIMIT 1",
-            [$request['id']]
+            [$request['id'], $paramsHash]
         );
         if ($active !== null) {
-            self::attachCall($request, $client, $callId, $ip, (int)$active['id'], 1, $idemHash);
+            self::attachCall($request, $client, $callId, $ip, (int)$active['id'], 1, $idemHash, $paramsJson);
             $status = (string)$active['status'];
             Logger::event('shared', (int)$client['id'], $requestId, $callId, (int)$active['id'], $ip,
                 null, null, 'attached to ' . $status . ' execution (cache rule 1, link arrives with the webhook)');
@@ -278,10 +349,10 @@ final class Submit
 
         $ready = $db->one(
             "SELECT * FROM executions
-             WHERE request_id = ? AND status = 'ready' AND expires_at > NOW()
+             WHERE request_id = ? AND (params_hash <=> ?) AND status = 'ready' AND expires_at > NOW()
              ORDER BY id DESC
              LIMIT 1",
-            [$request['id']]
+            [$request['id'], $paramsHash]
         );
         if ($ready !== null) {
             // Rule 2: attach + return a usable link NOW. Only the SHA-256 of
@@ -290,10 +361,10 @@ final class Submit
             // same link later (hash-only would make that impossible).
             $token = Str::hex(24); // 48 hex chars
             $db->execute(
-                'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
+                'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared, params_json)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)',
                 [$callId, $client['id'], $request['id'], $ready['id'], hash('sha256', $token),
-                    Encryption::encrypt($token), $idemHash, Time::now(), $ip]
+                    Encryption::encrypt($token), $idemHash, Time::now(), $ip, $paramsJson]
             );
             Logger::event('shared', (int)$client['id'], $requestId, $callId, (int)$ready['id'], $ip,
                 null, (int)$ready['row_count'], 'attached to ready execution (cache rule 2, fresh call token)');
@@ -316,13 +387,13 @@ final class Submit
         // Execution and call commit together: a scheduled row with no call
         // attached is a real query run for nobody (and the worker claims it),
         // while a call with no execution can never be answered.
-        $execId = $db->transaction(static function () use ($db, $request, $scheduledAt, $client, $callId, $ip, $idemHash): int {
+        $execId = $db->transaction(static function () use ($db, $request, $scheduledAt, $client, $callId, $ip, $idemHash, $paramsJson, $paramsHash): int {
             $db->execute(
-                'INSERT INTO executions (request_id, mode, status, scheduled_at) VALUES (?, ?, ?, ?)',
-                [(int)$request['id'], 'delayed', 'scheduled', $scheduledAt]
+                'INSERT INTO executions (request_id, mode, status, scheduled_at, params_json, params_hash) VALUES (?, ?, ?, ?, ?, ?)',
+                [(int)$request['id'], 'delayed', 'scheduled', $scheduledAt, $paramsJson, $paramsHash]
             );
             $newId = $db->insertId();
-            self::attachCall($request, $client, $callId, $ip, $newId, 0, $idemHash);
+            self::attachCall($request, $client, $callId, $ip, $newId, 0, $idemHash, $paramsJson);
             return $newId;
         });
         Logger::event('submitted', (int)$client['id'], $requestId, $callId, $execId, $ip,
@@ -338,17 +409,25 @@ final class Submit
         ]);
     }
 
-    private static function attachCall(array $request, array $client, string $callId, string $ip, ?int $executionId, int $wasShared, ?string $idemHash): void
-    {
+    private static function attachCall(
+        array $request,
+        array $client,
+        string $callId,
+        string $ip,
+        ?int $executionId,
+        int $wasShared,
+        ?string $idemHash,
+        ?string $paramsJson = null
+    ): void {
         // Every delayed call gets its own download token at creation: the
         // SHA-256 hash for lookup, an AES-256-GCM copy so the webhook and the
         // status endpoint can rebuild a stable link once the execution is ready.
         $token = Str::hex(24); // 48 hex chars
         Db::instance()->execute(
-            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            'INSERT INTO calls (id, client_id, request_id, execution_id, token_hash, token_enc, idempotency_key_hash, created_at, ip, was_shared, params_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             [$callId, $client['id'], $request['id'], $executionId,
-                hash('sha256', $token), Encryption::encrypt($token), $idemHash, Time::now(), $ip, $wasShared]
+                hash('sha256', $token), Encryption::encrypt($token), $idemHash, Time::now(), $ip, $wasShared, $paramsJson]
         );
     }
 

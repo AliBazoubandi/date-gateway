@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS `requests` (
   `name`                 VARCHAR(150) NOT NULL,
   `description`          TEXT         NULL,
   `sql_text`             MEDIUMTEXT   NOT NULL,
+  `params_json`          MEDIUMTEXT   NULL COMMENT 'JSON array of parameter definitions: [{name, type, required, default, description}]',
   `connection_id`        INT UNSIGNED NOT NULL,
   `response_mode`        ENUM('delayed','instant') NOT NULL DEFAULT 'delayed',
   `instant_cache_seconds` INT         NOT NULL DEFAULT 0 COMMENT 'instant mode only; 0 = no cache',
@@ -168,11 +169,14 @@ CREATE TABLE IF NOT EXISTS `executions` (
   -- (timeout / execution_failed / query_rejected / result_too_large). The raw
   -- driver text stays in error_message, which is admin-only.
   `error_code`          VARCHAR(32)  NULL DEFAULT NULL,
+  `params_json`         MEDIUMTEXT   NULL,
+  `params_hash`         CHAR(64)     NULL DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `idx_exec_status_sched` (`status`, `scheduled_at`),
   KEY `idx_exec_request_status` (`request_id`, `status`),
   KEY `idx_exec_request_mode_fin` (`request_id`, `mode`, `status`, `finished_at`),
-  KEY `idx_exec_expires` (`status`, `expires_at`)
+  KEY `idx_exec_expires` (`status`, `expires_at`),
+  KEY `idx_exec_params` (`request_id`, `params_hash`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- ---------------------------------------------------------------------------
@@ -197,6 +201,7 @@ CREATE TABLE IF NOT EXISTS `calls` (
   `created_at`   DATETIME     NOT NULL,
   `ip`           VARCHAR(45)  NOT NULL DEFAULT '',
   `was_shared`   TINYINT(1)   NOT NULL DEFAULT 0,
+  `params_json`  MEDIUMTEXT   NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uq_calls_token` (`token_hash`),
   KEY `idx_calls_client` (`client_id`, `created_at`),

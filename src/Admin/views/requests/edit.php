@@ -42,6 +42,21 @@ $changed = $changed ?? [];
       <?= $isNew ? 'New definition — nothing saved yet.' : 'Not modified since creation.' ?>
 <?php endif; ?>
     </div>
+
+    <div style="margin-top:20px;border-top:1px solid var(--border);padding-top:16px">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <label for="params_json" style="font-weight:600;margin:0">Query Parameters Schema (Optional)</label>
+        <span class="badge b-key">auto-detected</span>
+      </div>
+      <textarea name="params_json" id="params_json" rows="5" class="code" spellcheck="false"
+                style="font-family:var(--font-mono);font-size:12px;line-height:1.4"
+                placeholder='{"start_date":{"type":"date","required":true},"end_date":{"type":"date","default":"today"}}'><?= e((string)($row['params_json'] ?? '')) ?></textarea>
+      <?= $fe('params_json') ?>
+      <div class="hint small" style="margin-top:6px">
+        Use named colon placeholders like <code>:start_time</code> or <code>:end_time</code> in your SQL query.
+        Parameters are auto-detected on save. You can optionally define types (<code>date</code>, <code>datetime</code>, <code>int</code>, <code>float</code>, <code>bool</code>, <code>string</code>) and defaults (e.g. <code>today</code>, <code>now</code>, <code>start_of_month</code>). Leave empty to use auto-defaults.
+      </div>
+    </div>
   </div>
 
   <!-- -------------------------------------------------------- settings --- -->

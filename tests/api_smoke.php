@@ -175,7 +175,7 @@ register_shutdown_function(static function () use ($proc): void {
 });
 usleep(500000);
 
-function api(string $method, string $path, ?string $key = null, bool $tailHeaders = false, array $extraHeaders = []): array
+function api(string $method, string $path, ?string $key = null, bool $tailHeaders = false, array $extraHeaders = [], ?string $postBody = null): array
 {
     global $port;
     $ch = curl_init('http://127.0.0.1:' . $port . $path);
@@ -193,9 +193,12 @@ function api(string $method, string $path, ?string $key = null, bool $tailHeader
     }
     if ($method === 'POST') {
         $opts[CURLOPT_POST] = true;
-        $opts[CURLOPT_POSTFIELDS] = '';
+        $opts[CURLOPT_POSTFIELDS] = $postBody ?? '';
     }
     $httpHeaders = $extraHeaders;
+    if ($postBody !== null && !preg_grep('/^Content-Type:/i', $httpHeaders)) {
+        $httpHeaders[] = 'Content-Type: application/json';
+    }
     if ($key !== null) {
         $httpHeaders[] = 'Authorization: Bearer ' . $key;
     }
@@ -916,6 +919,111 @@ $check('idempotent: a keyed retry after expiry says expired instead of schedulin
     && array_key_exists('link', $delay5) && $delay5['link'] === null
     && (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$reqIdemDelay]) === 1,
     substr((string)$body, 0, 200));
+
+// --- Parameterized queries: catalog, validation, dynamic defaults, cache isolation ---
+$codeParams = "smk{$run}.params";
+$paramsJsonDef = json_encode([
+    'start_date' => ['type' => 'date', 'required' => true, 'description' => 'Period start date'],
+    'end_date' => ['type' => 'date', 'required' => false, 'default' => 'today', 'description' => 'Period end date'],
+    'multiplier' => ['type' => 'int', 'required' => false, 'default' => 2, 'description' => 'Multiplier factor'],
+]);
+$db->execute(
+    'INSERT INTO requests (code, name, sql_text, params_json, connection_id, response_mode, instant_cache_seconds, delay_minutes, ttl_minutes, timeout_seconds, max_rows, is_active, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 0, 15, ?, ?, 1, ?)',
+    [$codeParams, $codeParams, "SELECT :start_date AS start_dt, :end_date AS end_dt, (:multiplier * 10) AS total",
+        $paramsJsonDef, $connId, 'instant', 60, 10, 100, $now]
+);
+$reqIdParams = $db->insertId();
+$requestIds[] = $reqIdParams;
+$db->execute('INSERT INTO client_request_permissions (client_id, request_id) VALUES (?, ?)', [$A['id'], $reqIdParams]);
+
+// Catalog discovery includes parameters
+[$code, $body] = api('GET', '/api/v1/requests', $A['key']);
+$catalog = json_decode($body, true);
+$catReq = null;
+foreach ($catalog['requests'] ?? [] as $r) {
+    if (($r['code'] ?? '') === $codeParams) {
+        $catReq = $r;
+        break;
+    }
+}
+$check('catalog lists parameterized request with its parameters schema', $code === 200
+    && $catReq !== null
+    && count($catReq['parameters'] ?? []) === 3
+    && $catReq['parameters'][0]['name'] === 'start_date'
+    && $catReq['parameters'][0]['required'] === true
+    && $catReq['parameters'][1]['name'] === 'end_date'
+    && $catReq['parameters'][1]['default'] === 'today'
+    && $catReq['parameters'][2]['name'] === 'multiplier'
+    && $catReq['parameters'][2]['type'] === 'int',
+    substr((string)$body, 0, 300));
+
+// Missing required parameter -> 400 missing_parameter
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams, $A['key']);
+$errMissing = json_decode($body, true);
+$check('submitting without required parameter returns 400 missing_parameter', $code === 400
+    && ($errMissing['error']['code'] ?? '') === 'missing_parameter',
+    $body);
+
+// Invalid parameter type (bad date) -> 400 invalid_parameter
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams . '?start_date=2026-99-99', $A['key']);
+$errInvalid = json_decode($body, true);
+$check('submitting invalid date format returns 400 invalid_parameter', $code === 400
+    && ($errInvalid['error']['code'] ?? '') === 'invalid_parameter',
+    $body);
+
+// Valid submit via URL query string + dynamic 'today' default
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams . '?start_date=2026-01-01', $A['key']);
+$resUrl = json_decode($body, true);
+$check('valid submit via query string returns rows with dynamic today default', $code === 200
+    && ($resUrl['status'] ?? '') === 'ready'
+    && ($resUrl['data'][0]['start_dt'] ?? '') === '2026-01-01'
+    && ($resUrl['data'][0]['end_dt'] ?? '') === date('Y-m-d')
+    && (int)($resUrl['data'][0]['total'] ?? 0) === 20,
+    $body);
+
+// Valid submit via JSON body with custom multiplier and end_date
+$jsonPayload = json_encode([
+    'params' => [
+        'start_date' => '2026-03-01',
+        'end_date' => '2026-03-31',
+        'multiplier' => 5,
+    ]
+]);
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams, $A['key'], false, [], $jsonPayload);
+$resJson = json_decode($body, true);
+$check('valid submit via JSON body parses params, end_date and multiplier', $code === 200
+    && ($resJson['status'] ?? '') === 'ready'
+    && ($resJson['data'][0]['start_dt'] ?? '') === '2026-03-01'
+    && ($resJson['data'][0]['end_dt'] ?? '') === '2026-03-31'
+    && (int)($resJson['data'][0]['total'] ?? 0) === 50,
+    $body);
+
+// Cache isolation:
+// 1. Submit with start_date=2026-05-01 -> fresh execution
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams . '?start_date=2026-05-01', $A['key']);
+$c1 = json_decode($body, true);
+$call1 = (string)($c1['call_id'] ?? '');
+$exec1 = (int)$db->value('SELECT execution_id FROM calls WHERE id = ?', [$call1]);
+
+// 2. Submit with start_date=2026-07-01 -> separate execution (different hash, no collision)
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams . '?start_date=2026-07-01', $A['key']);
+$c2 = json_decode($body, true);
+$call2 = (string)($c2['call_id'] ?? '');
+$exec2 = (int)$db->value('SELECT execution_id FROM calls WHERE id = ?', [$call2]);
+$check('different parameter values produce different executions (cache isolation)',
+    $exec1 > 0 && $exec2 > 0 && $exec1 !== $exec2,
+    "exec1={$exec1} exec2={$exec2}");
+
+// 3. Submit again with start_date=2026-05-01 within cache window -> cache hit on exec1
+[$code, $body] = api('POST', '/api/v1/request/' . $codeParams . '?start_date=2026-05-01', $A['key']);
+$c3 = json_decode($body, true);
+$call3 = (string)($c3['call_id'] ?? '');
+$exec3 = (int)$db->value('SELECT execution_id FROM calls WHERE id = ?', [$call3]);
+$wasShared3 = (int)$db->value('SELECT was_shared FROM calls WHERE id = ?', [$call3]);
+$check('identical parameters reuse cached execution within cache window',
+    $exec3 === $exec1 && $wasShared3 === 1,
+    "exec3={$exec3} was_shared={$wasShared3}");
 
 echo $pass === $total ? '=== API SMOKE PASS (' . $total . '/' . $total . ') ===' : "=== API SMOKE: {$pass}/{$total} ===", PHP_EOL;
 exit($pass === $total ? 0 : 1);

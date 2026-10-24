@@ -19,6 +19,7 @@ final class MySqlDriver implements DriverInterface
     private $result = null;
     /** @var list<string>|null deduplicated column names of the open result */
     private ?array $columnKeys = null;
+    private ?\mysqli_stmt $activeStmt = null;
     private int $timeout = 30;
     private string $lastError = '';
     private bool $timedOut = false;
@@ -95,28 +96,71 @@ final class MySqlDriver implements DriverInterface
         }
     }
 
-    public function query(string $sql): mixed
+    public function query(string $sql, array $params = []): mixed
     {
         $this->columnKeys = null;
+
+        if ($params === []) {
+            try {
+                $ok = $this->m->real_query($sql);
+            } catch (\mysqli_sql_exception $e) {
+                throw $this->queryException($e->getMessage(), (int)$this->m->errno);
+            }
+            if ($ok === false) {
+                throw $this->queryException($this->m->error, (int)$this->m->errno);
+            }
+            // Unbuffered: rows stream from the wire one by one.
+            $res = $this->m->use_result();
+            if ($res === false) {
+                if ($this->m->field_count === 0) {
+                    return null; // INSERT/UPDATE/SET ... no result set
+                }
+                $res = $this->m->store_result(); // rare fallback
+            }
+            if ($res === false) {
+                throw $this->queryException($this->m->error, (int)$this->m->errno);
+            }
+            $this->result = $res;
+            $this->columnKeys = ColumnNames::deduplicate(self::fieldNames($res));
+            return $res;
+        }
+
+        // Parameterized prepared query
         try {
-            $ok = $this->m->real_query($sql);
+            $stmt = $this->m->prepare($sql);
         } catch (\mysqli_sql_exception $e) {
             throw $this->queryException($e->getMessage(), (int)$this->m->errno);
         }
+        if ($stmt === false) {
+            throw $this->queryException($this->m->error, (int)$this->m->errno);
+        }
+
+        try {
+            $ok = $stmt->execute($params);
+        } catch (\mysqli_sql_exception $e) {
+            $stmt->close();
+            throw $this->queryException($e->getMessage(), (int)$this->m->errno);
+        }
         if ($ok === false) {
-            throw $this->queryException($this->m->error, (int)$this->m->errno);
+            $err = $stmt->error;
+            $errno = (int)$stmt->errno;
+            $stmt->close();
+            throw $this->queryException($err, $errno);
         }
-        // Unbuffered: rows stream from the wire one by one.
-        $res = $this->m->use_result();
+
+        $res = $stmt->get_result();
         if ($res === false) {
-            if ($this->m->field_count === 0) {
-                return null; // INSERT/UPDATE/SET ... no result set
+            if ($stmt->field_count === 0) {
+                $stmt->close();
+                return null;
             }
-            $res = $this->m->store_result(); // rare fallback
+            $err = $stmt->error;
+            $errno = (int)$stmt->errno;
+            $stmt->close();
+            throw $this->queryException($err, $errno);
         }
-        if ($res === false) {
-            throw $this->queryException($this->m->error, (int)$this->m->errno);
-        }
+
+        $this->activeStmt = $stmt;
         $this->result = $res;
         $this->columnKeys = ColumnNames::deduplicate(self::fieldNames($res));
         return $res;
@@ -158,6 +202,10 @@ final class MySqlDriver implements DriverInterface
         if (is_object($stmt) && method_exists($stmt, 'free')) {
             // Discards the remaining unbuffered rows; safe mid-stream.
             @$stmt->free();
+        }
+        if ($this->activeStmt !== null) {
+            @$this->activeStmt->close();
+            $this->activeStmt = null;
         }
         $this->result = null;
         $this->columnKeys = null;
