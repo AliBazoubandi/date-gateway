@@ -165,6 +165,7 @@ The file is saved under its deterministic server name (e.g., `sales.daily_202610
 > - Submit: `POST <BASE_URL>/api/v1/request/{code}` (e.g. `POST https://rbb.palood.ir/gateway/api/v1/request/{code}`)
 > - Status: `GET <BASE_URL>/api/v1/calls/{call_id}` (e.g. `GET https://rbb.palood.ir/gateway/api/v1/calls/{call_id}`)
 > - Download: `GET <BASE_URL>/api/v1/results/{token}` (e.g. `GET https://rbb.palood.ir/gateway/api/v1/results/{token}`)
+> - Discovery (Catalog): `GET <BASE_URL>/api/v1/requests` or `/api/v1/catalog` (e.g. `GET https://rbb.palood.ir/gateway/api/v1/requests`)
 > - Health: `GET <BASE_URL>/health` (e.g. `GET https://rbb.palood.ir/gateway/health`)
 
 ### 1. Submit Request
@@ -294,7 +295,66 @@ curl.exe -f -OJ -H "Authorization: Bearer YOUR_API_KEY" "https://gateway.example
 
 ---
 
-### 4. Health Check
+### 4. Discover Permitted Requests & Endpoints (Catalog)
+`GET /api/v1/requests` (or `GET /api/v1/catalog`)
+
+A self-service introspection endpoint that allows authenticated clients to discover:
+- Their client account identity (`name`, `type`).
+- Standard gateway endpoint templates (`submit`, `status`, `download`, `health`).
+- The complete list of active request codes the client is permitted to invoke, including response mode (`instant` vs `delayed`), timing promises (`cache_seconds` or `delay_minutes` / `ttl_minutes`), `max_rows`, `timeout_seconds`, and direct submission URLs.
+
+#### Request Headers
+- `Authorization: Bearer <KEY>` *(required)*
+
+#### Response (`200 OK`)
+```json
+{
+  "client": {
+    "name": "sales-service",
+    "type": "agent"
+  },
+  "endpoints": {
+    "submit": "https://gateway.example.com/api/v1/request/{code}",
+    "status": "https://gateway.example.com/api/v1/calls/{call_id}",
+    "download": "https://gateway.example.com/api/v1/results/{token}",
+    "health": "https://gateway.example.com/health"
+  },
+  "requests": [
+    {
+      "code": "inventory.lookup",
+      "name": "Real-time Inventory",
+      "description": "Stock levels by SKU",
+      "mode": "instant",
+      "timeout_seconds": 30,
+      "max_rows": 1000,
+      "submit_url": "https://gateway.example.com/api/v1/request/inventory.lookup",
+      "cache_seconds": 30
+    },
+    {
+      "code": "sales.daily",
+      "name": "Daily Sales Report",
+      "description": "Aggregated daily sales figures grouped by branch",
+      "mode": "delayed",
+      "timeout_seconds": 60,
+      "max_rows": 100000,
+      "submit_url": "https://gateway.example.com/api/v1/request/sales.daily",
+      "delay_minutes": 5,
+      "ttl_minutes": 15
+    }
+  ]
+}
+```
+
+#### Example cURL
+```bash
+curl.exe \
+  -H "Authorization: Bearer YOUR_API_KEY" \
+  https://gateway.example.com/api/v1/requests
+```
+
+---
+
+### 5. Health Check
 `GET /health`
 
 An unauthenticated probe endpoint for monitoring systems and load balancers.

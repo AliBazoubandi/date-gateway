@@ -247,6 +247,33 @@ $check('code with illegal chars -> 404', $code === 404 && $getErr($body) === 'no
 [$code, $body] = api('GET', '/api/v1/request/' . $codeDelayed, $A['key']);
 $check('GET on submit -> 405', $code === 405 && $getErr($body) === 'method_not_allowed');
 
+// ----------------- catalog / discovery endpoint -----------------
+[$code, $body] = api('GET', '/api/v1/requests');
+$check('catalog no auth -> 401', $code === 401 && $getErr($body) === 'unauthorized');
+
+[$code, $body] = api('GET', '/api/v1/requests', $C['key']);
+$check('catalog inactive client -> 403', $code === 403 && $getErr($body) === 'forbidden');
+
+[$code, $body] = api('POST', '/api/v1/requests', $A['key']);
+$check('catalog POST -> 405', $code === 405 && $getErr($body) === 'method_not_allowed');
+
+[$code, $body] = api('GET', '/api/v1/requests', $A['key']);
+$catA = json_decode($body, true);
+$check('catalog client A -> 200', $code === 200 && is_array($catA));
+$check('catalog returns client info', ($catA['client']['name'] ?? '') === "smk {$run} A" && ($catA['client']['type'] ?? '') === 'agent');
+$check('catalog returns endpoints directory',
+    isset($catA['endpoints']['submit'], $catA['endpoints']['status'], $catA['endpoints']['download'], $catA['endpoints']['health']));
+$codesA = array_column($catA['requests'] ?? [], 'code');
+$check('catalog includes granted requests for client A', in_array($codeDelayed, $codesA, true) && in_array($codeInst, $codesA, true));
+$check('catalog excludes ungranted requests for client A', !in_array($codeDeny, $codesA, true));
+
+// Test alias /api/v1/catalog
+[$code, $body] = api('GET', '/api/v1/catalog', $B['key']);
+$catB = json_decode($body, true);
+$check('catalog alias /api/v1/catalog -> 200', $code === 200 && is_array($catB));
+$codesB = array_column($catB['requests'] ?? [], 'code');
+$check('catalog client B only sees its granted request', $codesB === [$codeIdemInst]);
+
 // ----------------- delayed flow + rule 1 -----------------
 [$code, $body] = api('POST', '/api/v1/request/' . $codeDelayed, $A['key']);
 $payload = json_decode($body, true);

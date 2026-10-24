@@ -49,9 +49,11 @@ final class Http
 
         // 4. Auto-detect from SCRIPT_NAME if served under an Apache Alias or subfolder
         $script = (string)($_SERVER['SCRIPT_NAME'] ?? '');
-        $dir = str_replace('\\', '/', dirname($script));
-        if ($dir !== '' && $dir !== '/' && $dir !== '.') {
-            return '/' . trim($dir, '/');
+        if (str_ends_with(strtolower($script), '/index.php')) {
+            $dir = str_replace('\\', '/', dirname($script));
+            if ($dir !== '' && $dir !== '/' && $dir !== '.') {
+                return '/' . trim($dir, '/');
+            }
         }
 
         return '';

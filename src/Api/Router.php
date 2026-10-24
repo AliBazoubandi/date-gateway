@@ -6,6 +6,8 @@ use Core\Str;
 
 /**
  * /api/v1 routes:
+ *   GET  /api/v1/requests           Catalog (discovery: permitted requests + endpoints)
+ *   GET  /api/v1/catalog            Catalog (alias)
  *   POST /api/v1/request/{code}     Submit
  *   GET  /api/v1/calls/{call_id}    Status
  *   GET  /api/v1/results/{token}    Download
@@ -18,8 +20,22 @@ final class Router
 {
     public static function dispatch(string $path): void
     {
-        $parts = explode('/', trim($path, '/')); // [api, v1, kind, value]
-        if (($parts[1] ?? '') !== 'v1' || count($parts) !== 4) {
+        $parts = explode('/', trim($path, '/')); // [api, v1, ...]
+        if (($parts[1] ?? '') !== 'v1') {
+            Errors::notFound('Unknown API endpoint.');
+        }
+
+        // Discovery routes: /api/v1/requests and /api/v1/catalog
+        if (count($parts) === 3) {
+            $kind = $parts[2];
+            if ($kind === 'requests' || $kind === 'catalog') {
+                Catalog::handle();
+                return;
+            }
+            Errors::notFound('Unknown API endpoint.');
+        }
+
+        if (count($parts) !== 4) {
             Errors::notFound('Unknown API endpoint.');
         }
         $kind = $parts[2];
