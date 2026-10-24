@@ -17,7 +17,10 @@ final class Session
         $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
             || (Config::get('app.base_url') !== '' && str_starts_with((string)Config::get('app.base_url'), 'https'))
             || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower((string)$_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
-        $cookiePath = (string)Config::get('admin.cookie_path', (Http::basePath() ?: '/'));
+        $configuredPath = Config::get('admin.cookie_path');
+        $cookiePath = ($configuredPath !== null && $configuredPath !== '')
+            ? (string)$configuredPath
+            : (Http::basePath() ?: '/');
         session_name((string)Config::get('admin.session_name', 'datagateway_admin'));
         session_set_cookie_params([
             'lifetime' => 0,

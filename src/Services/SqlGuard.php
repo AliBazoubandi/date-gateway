@@ -74,21 +74,10 @@ final class SqlGuard
 
     /**
      * Keywords a scripts-mode connection (connections.allow_writes = 1, see
-     * README §12) still refuses. The admin-curated policy is looser on
-     * purpose — INSERT, CREATE, DROP, ALTER, GRANT, SET and friends are all
-     * allowed — but it keeps four hard stops:
-     *   - row mutation of existing data: UPDATE, DELETE, MERGE, TRUNCATE
-     *     (TRUNCATE is delete-everything either way);
-     *   - code invocation whose body the keyword scan can never see into:
-     *     EXEC, EXECUTE, CALL, MySQL's DO, PREPARE/DEALLOCATE, HANDLER;
-     *   - server escape hatches: SHUTDOWN, INSTALL/UNINSTALL (plugins),
-     *     SELECT ... INTO OUTFILE/DUMPFILE (writes files on the DB server,
-     *     outside the gateway's result contract).
+     * README §12) still refuses. Only UPDATE and DELETE statements stay blocked.
      */
     private const SCRIPT_BLOCKED = '/\b(?:'
-        . 'UPDATE|DELETE|MERGE|TRUNCATE|'
-        . 'EXEC|EXECUTE|CALL|DO|PREPARE|DEALLOCATE|HANDLER|'
-        . 'OUTFILE|DUMPFILE|SHUTDOWN|INSTALL|UNINSTALL'
+        . 'UPDATE|DELETE'
         . ')\b/i';
 
     /** Statement-level read-only introspection prefixes (never write). */

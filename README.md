@@ -1410,12 +1410,9 @@ batches under a deliberately different policy:
 - **Multi-statement is fine.** Statements split on `;` outside quotes and
   comments; every statement is scanned, and a violation names the statement
   number.
-- **Still blocked, in every statement:** `UPDATE`, `DELETE`, `MERGE`,
-  `TRUNCATE` (row mutation of existing data); code invocation the keyword scan
-  can never see into — `EXEC`, `EXECUTE`, `CALL`, `PREPARE`/`DEALLOCATE`,
-  `HANDLER`, `DO`; and the server escape hatches `SHUTDOWN`,
-  `INSTALL`/`UNINSTALL`, `SELECT … INTO OUTFILE/DUMPFILE`. Everything else —
-  `INSERT`, `CREATE`, `DROP`, `ALTER`, `GRANT`, `SET` — is allowed on purpose.
+- **Still blocked, in every statement:** `UPDATE` and `DELETE`. Everything else —
+  `INSERT`, `CREATE`, `DROP`, `ALTER`, `GRANT`, `SET`, `EXEC`, `EXECUTE`, `CALL`,
+  `TRUNCATE` — is allowed.
 - **Results:** the client receives the rows of every result set the batch
   produces, streamed in order (`sqlsrv_next_result`); a batch that returns no
   rows is a successful run with `row_count` 0. The admin test-run shows the
@@ -1430,13 +1427,9 @@ batches under a deliberately different policy:
 Two things do not change with the flag on. First, the same three layers still
 exist — but layer 2 stays read-only-shaped on SQL Server (there is no
 session-level read-only mode for `sqlsrv_*`), so scripts mode leans entirely on
-the scanner (layer 1) and on the account grants (layer 3). Second, the policy
-is intentionally narrower than "anything but UPDATE/DELETE": with a powerful
-login (up to `sa`), `EXEC`-family statements would be remote code execution on
-the database server, and the scanner cannot inspect what is inside a stored
-procedure. If a script genuinely needs a procedure call, wrap the call server
-side in a view/table-valued function the scanner can read, or reconsider the
-grant.
+the scanner (layer 1) and on the account grants (layer 3). Second, since `EXEC`
+and procedures can run code, target connection accounts should have appropriate
+least-privilege permissions configured on the database server.
 
 ## 13. Admin panel: sessions, auditing, known limitations
 

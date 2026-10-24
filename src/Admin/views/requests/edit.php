@@ -112,7 +112,7 @@ $changed = $changed ?? [];
       Instant caps from config: <?= (int)\Core\Config::get('limits.instant.max_timeout_seconds', 60) ?>s timeout,
       <?= number_format((int)\Core\Config::get('limits.instant.max_rows', 20000)) ?> rows; suggested defaults
       <?= (int)($inst['timeout_seconds'] ?? 30) ?>s / <?= number_format((int)($inst['max_rows'] ?? 5000)) ?>.
-      SQL Server connections with script batches allowed may hold DECLARE/#temp/INSERT scripts; UPDATE, DELETE and EXEC stay blocked everywhere.
+      SQL Server connections with script batches allowed may hold DECLARE/#temp/INSERT scripts; UPDATE and DELETE stay blocked everywhere.
     </div>
   </div>
 </form>

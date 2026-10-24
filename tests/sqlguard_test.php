@@ -178,14 +178,15 @@ $allowedS('keyword inside string is inert', "SELECT 'update' AS w; SELECT 'delet
 $allowedS('bracketed identifiers stay inert', 'SELECT [update], [delete] FROM #t; SELECT [exec] FROM #u;');
 $allowedS('declare with solar function call', "DECLARE @NowDate VARCHAR(10) = gnr.DateTimeToSolar(GETDATE(), ''); SELECT @NowDate AS d;");
 
+$allowedS('exec in scripts mode', 'EXEC sp_configure;');
+$allowedS('multi-statement with exec', "DECLARE @id INT = 1; EXEC dbo.sp_get_data @id;");
+$allowedS('execute in scripts mode', 'EXECUTE dbo.sp_x 1;');
+$allowedS('call in scripts mode', 'CALL do_something();');
+$allowedS('truncate in scripts mode', 'TRUNCATE TABLE #stage;');
+
 $blockedS('update anywhere in the batch', 'SELECT 1; UPDATE t SET x = 1;');
 $blockedS('delete anywhere in the batch', 'SELECT 1; DELETE FROM t WHERE id = 1;');
-$blockedS('merge', 'MERGE INTO t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET t.x = s.x;');
-$blockedS('truncate', 'TRUNCATE TABLE t;');
-$blockedS('exec', 'EXEC sp_configure;');
-$blockedS('execute', 'EXECUTE dbo.sp_x 1;');
-$blockedS('call', 'CALL do_something();');
-$blockedS('select into outfile', "SELECT * FROM t INTO OUTFILE '/tmp/x.txt';");
+$blockedS('merge with update', 'MERGE INTO t USING s ON s.id = t.id WHEN MATCHED THEN UPDATE SET t.x = s.x;');
 $blockedS('update hidden in the last statement', 'CREATE TABLE #t (id INT); SELECT 1; UPDATE #t SET id = 2;');
 $blockedS('comment-only script', '-- nothing here');
 $blockedS('empty script', '   ');

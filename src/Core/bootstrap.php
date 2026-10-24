@@ -63,6 +63,7 @@ ini_set('display_errors', $debug ? '1' : '0');
 ini_set('display_startup_errors', $debug ? '1' : '0');
 
 set_exception_handler(static function (\Throwable $e): void {
+    error_log((string)$e);
     if (PHP_SAPI === 'cli') {
         fwrite(STDERR, 'Uncaught ' . get_class($e) . ': ' . $e->getMessage() . PHP_EOL);
         exit(1);
@@ -79,7 +80,7 @@ set_exception_handler(static function (\Throwable $e): void {
     }
     http_response_code(500);
     header('Content-Type: text/html; charset=utf-8');
-    $detail = $debug ? $e->getMessage() : 'An internal error occurred. Check the PHP error log.';
+    $detail = (bool)Core\Config::get('app.debug', false) ? $e->getMessage() : 'An internal error occurred. Check the PHP error log.';
     echo '<h1>Server error</h1><p>' . Core\Str::e($detail) . '</p>';
     exit(1);
 });

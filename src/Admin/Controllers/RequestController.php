@@ -396,7 +396,7 @@ final class RequestController
                     \Services\SqlGuard::assert($in['sql_text'], (string)$conn['db_type'], !empty($conn['allow_writes']));
                 } catch (\RuntimeException $ex) {
                     $e['sql_text'] = !empty($conn['allow_writes'])
-                        ? 'SQL rejected by the script policy (UPDATE, DELETE and EXEC-style statements stay blocked): ' . $ex->getMessage()
+                        ? 'SQL rejected by the script policy (UPDATE and DELETE statements stay blocked): ' . $ex->getMessage()
                         : 'SQL must be a single read-only SELECT statement. ' . $ex->getMessage();
                 }
             }

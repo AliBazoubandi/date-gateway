@@ -42,4 +42,4 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
 </form>
 </section>
 <p class="hint">Passwords are AES-256-GCM encrypted with the master key (GATEWAY_MASTER_KEY in config/.env), never shown again.
-"Allow script batches" lets requests on this connection run multi-statement scripts (DECLARE, #temp tables, INSERT, CREATE/DROP + a final SELECT) under the relaxed SQL policy — UPDATE, DELETE and EXEC-style statements stay blocked. SQL Server connections only.</p>
+"Allow script batches" lets requests on this connection run multi-statement scripts (DECLARE, #temp tables, INSERT, CREATE/DROP + a final SELECT) under the relaxed SQL policy — UPDATE and DELETE statements stay blocked. SQL Server connections only.</p>
