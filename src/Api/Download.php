@@ -131,14 +131,90 @@ final class Download
             (string)$exec['expires_at']
         );
 
+        // Prevent PHP script execution timeout on slow internet connections
+        if (function_exists('set_time_limit')) {
+            @set_time_limit(0);
+        }
+        @ini_set('max_execution_time', '0');
+
+        // Clear any active output buffers to allow immediate chunk streaming
+        while (ob_get_level() > 0) {
+            @ob_end_clean();
+        }
+
+        $format = strtolower(trim((string)(\Core\Http::param('format', 'g') ?? '')));
+        $isZip = $format === 'zip'
+            || \Core\Http::param('zip', 'g') === '1'
+            || str_contains((string)($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/zip');
+        $isGzip = $format === 'gzip'
+            || $format === 'gz'
+            || \Core\Http::param('gzip', 'g') === '1'
+            || \Core\Http::param('gz', 'g') === '1';
+
+        Logger::event('downloaded', $clientId, (int)$exec['request_id'], $callId,
+            (int)$exec['id'], $ip, null, (int)($exec['row_count'] ?? 0), $note . ($isZip ? ' (zip)' : ($isGzip ? ' (gzip)' : '')));
+
+        if ($isZip && class_exists('\ZipArchive')) {
+            $zipTemp = tempnam(sys_get_temp_dir(), 'gw_zip_');
+            $zip = new \ZipArchive();
+            if ($zip->open($zipTemp, \ZipArchive::CREATE | \ZipArchive::OVERWRITE) === true) {
+                $zip->addFile($absolute, $filename);
+                $zip->close();
+
+                $zipFilename = preg_replace('/\.json$/i', '', $filename) . '.zip';
+                header('Content-Type: application/zip');
+                header('X-Content-Type-Options: nosniff');
+                header('Cache-Control: no-store');
+                header('Content-Disposition: attachment; filename="' . $zipFilename . '"');
+                header('Content-Length: ' . (string)filesize($zipTemp));
+
+                $fh = fopen($zipTemp, 'rb');
+                if ($fh !== false) {
+                    while (!feof($fh)) {
+                        $buf = fread($fh, 65536);
+                        if ($buf === false || $buf === '') {
+                            break;
+                        }
+                        echo $buf;
+                        flush();
+                    }
+                    fclose($fh);
+                }
+                @unlink($zipTemp);
+                exit;
+            }
+        }
+
+        if ($isGzip && function_exists('gzopen')) {
+            $gzFilename = $filename . '.gz';
+            header('Content-Type: application/gzip');
+            header('X-Content-Type-Options: nosniff');
+            header('Cache-Control: no-store');
+            header('Content-Disposition: attachment; filename="' . $gzFilename . '"');
+
+            $in = fopen($absolute, 'rb');
+            if ($in !== false) {
+                $out = gzopen('php://output', 'wb9');
+                if ($out !== false) {
+                    while (!feof($in)) {
+                        $buf = fread($in, 65536);
+                        if ($buf === false || $buf === '') {
+                            break;
+                        }
+                        gzwrite($out, $buf);
+                    }
+                    gzclose($out);
+                }
+                fclose($in);
+            }
+            exit;
+        }
+
         header('Content-Type: application/json; charset=utf-8');
         header('X-Content-Type-Options: nosniff');
         header('Cache-Control: no-store');
         header('Content-Disposition: attachment; filename="' . $filename . '"');
         header('Content-Length: ' . (string)filesize($absolute));
-
-        Logger::event('downloaded', $clientId, (int)$exec['request_id'], $callId,
-            (int)$exec['id'], $ip, null, (int)($exec['row_count'] ?? 0), $note);
 
         $chunk = max(1024, (int)Config::get('downloads.chunk_size', 65536));
         $fh = fopen($absolute, 'rb');

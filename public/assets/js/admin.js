@@ -150,8 +150,13 @@
     tabBtns.forEach(function (b, i) {
       b.addEventListener('click', function () { focusTab(i); });
     });
-    var saved = parseInt(load('gw-tab:' + container.id), 10);
-    if (!isNaN(saved) && saved > 0 && saved < tabBtns.length) { focusTab(saved); }
+    var defaultTab = container.getAttribute('data-default-tab');
+    if (defaultTab === 'search') {
+      focusTab(1);
+    } else {
+      var saved = parseInt(load('gw-tab:' + container.id), 10);
+      if (!isNaN(saved) && saved > 0 && saved < tabBtns.length) { focusTab(saved); }
+    }
   }
   $$('.tabs[id]').forEach(tabs);
 
@@ -190,6 +195,53 @@
           if (cb) { cb.checked = check; }
         }
       });
+    });
+  }
+
+  /* --------------------------------- modal permissions checklist filter -- */
+  var modalPermFilter = $('#modal-perm-filter');
+  var modalPermAll = $('#modal-perm-all');
+  var modalPermRows = $$('#modal-perm-list .perm-row');
+  var modalPermCount = $('#modal-perm-count');
+
+  if (modalPermFilter && modalPermRows.length > 0) {
+    modalPermFilter.addEventListener('input', function () {
+      var q = (modalPermFilter.value || '').trim().toLowerCase();
+      var visible = 0;
+      modalPermRows.forEach(function (row) {
+        var term = row.getAttribute('data-search') || '';
+        var match = !q || term.indexOf(q) !== -1;
+        row.style.display = match ? 'flex' : 'none';
+        if (match) { visible++; }
+      });
+      if (modalPermCount) { modalPermCount.textContent = visible + ' client' + (visible === 1 ? '' : 's'); }
+      if (modalPermAll) {
+        var visibleBoxes = modalPermRows.filter(function (r) { return r.style.display !== 'none'; })
+          .map(function (r) { return $('input[type="checkbox"]', r); })
+          .filter(Boolean);
+        modalPermAll.checked = visibleBoxes.length > 0 && visibleBoxes.every(function (cb) { return cb.checked; });
+      }
+    });
+  }
+
+  if (modalPermAll && modalPermRows.length > 0) {
+    modalPermAll.addEventListener('change', function () {
+      var check = modalPermAll.checked;
+      modalPermRows.forEach(function (row) {
+        if (row.style.display !== 'none') {
+          var cb = $('input[type="checkbox"]', row);
+          if (cb) { cb.checked = check; }
+        }
+      });
+    });
+  }
+
+  var permModal = $('#perm-modal');
+  if (permModal) {
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !permModal.hidden) {
+        window.location.href = '/admin/requests';
+      }
     });
   }
 

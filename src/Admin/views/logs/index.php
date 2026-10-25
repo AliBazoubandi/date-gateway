@@ -2,6 +2,14 @@
   @var array $requests @var int $total @var int $page @var int $pages @var string $qs */
 use Admin\View;
 use Core\Str;
+
+$isFiltered = ((int)($f['client_id'] ?? 0) !== 0)
+    || ((int)($f['request_id'] ?? 0) !== 0)
+    || ((string)($f['event'] ?? '') !== '')
+    || ((string)($f['mode'] ?? '') !== '')
+    || ((string)($f['date_from'] ?? '') !== '')
+    || ((string)($f['date_to'] ?? '') !== '')
+    || (isset($_GET['page']) && (int)$_GET['page'] > 1);
 ?>
 <div class="page-head">
   <div>
@@ -11,13 +19,13 @@ use Core\Str;
   <div class="page-tools"><span class="badge b-info"><?= number_format($total) ?> rows total</span></div>
 </div>
 
-<div class="tabs" role="tablist" id="logs-tabs">
-  <button class="tab on" role="tab" data-tab="tail" aria-selected="true"><?= View::icon('terminal', 15) ?>Live tail</button>
-  <button class="tab" role="tab" data-tab="search" aria-selected="false"><?= View::icon('search', 15) ?>Search &amp; filter</button>
+<div class="tabs" role="tablist" id="logs-tabs" data-default-tab="<?= $isFiltered ? 'search' : 'tail' ?>">
+  <button class="tab <?= !$isFiltered ? 'on' : '' ?>" role="tab" data-tab="tail" aria-selected="<?= !$isFiltered ? 'true' : 'false' ?>"><?= View::icon('terminal', 15) ?>Live tail</button>
+  <button class="tab <?= $isFiltered ? 'on' : '' ?>" role="tab" data-tab="search" aria-selected="<?= $isFiltered ? 'true' : 'false' ?>"><?= View::icon('search', 15) ?>Search &amp; filter</button>
 </div>
 
 <!-- =============================== LIVE TAIL ================================ -->
-<section id="logs-pane-tail" role="tabpanel">
+<section id="logs-pane-tail" role="tabpanel" <?= $isFiltered ? 'hidden' : '' ?>>
   <div class="term">
     <div class="term-head">
       <span class="term-dot" id="term-dot" aria-hidden="true"></span>
@@ -48,7 +56,7 @@ use Core\Str;
 </section>
 
 <!-- ============================ SEARCH & FILTER ============================= -->
-<section id="logs-pane-search" role="tabpanel" hidden>
+<section id="logs-pane-search" role="tabpanel" <?= !$isFiltered ? 'hidden' : '' ?>>
   <form method="get" action="/admin/logs" class="form filters">
     <label>Client
       <select name="client_id">
@@ -107,28 +115,28 @@ use Core\Str;
 <?php foreach ($rows as $r): $cid = (string)($r['call_id'] ?? ''); ?>
         <tr data-call="<?= e($cid) ?>" class="<?= $cid !== '' ? 'row-openable' : '' ?>" title="<?= $cid !== '' ? 'Open inspector' : '' ?>">
           <td class="nowrap mono"><?= e(substr((string)$r['timestamp'], 0, 19)) ?></td>
-          <td><?= Admin\View::badge((string)$r['event'], (string)$r['event']) ?></td>
+          <td class="nowrap"><?= Admin\View::badge((string)$r['event'], (string)$r['event']) ?></td>
           <td class="nowrap"><?= $r['request_code'] !== null ? '<strong>' . e((string)$r['request_code']) . '</strong>' : '<span class="hint">-</span>' ?></td>
-          <td><?= $r['mode'] !== null ? e((string)$r['mode']) : '-' ?></td>
-          <td><?= $r['client_name'] !== null ? e((string)$r['client_name']) : '-' ?></td>
-          <td class="msg" title="<?= e($cid) ?>"><?= $cid !== '' ? '<code>' . e(substr($cid, 0, 10)) . '…</code>' : '-' ?></td>
-          <td><?= $r['execution_id'] !== null ? '#' . (int)$r['execution_id'] : '-' ?></td>
-          <td class="msg"><?= $r['ip'] !== null && $r['ip'] !== '' ? e((string)$r['ip']) : '-' ?></td>
-          <td class="num"><?= $r['duration_ms'] !== null ? (int)$r['duration_ms'] : '-' ?></td>
-          <td class="num"><?= $r['row_count'] !== null ? number_format((int)$r['row_count']) : '-' ?></td>
+          <td class="nowrap"><?= $r['mode'] !== null ? e((string)$r['mode']) : '-' ?></td>
+          <td class="nowrap"><?= $r['client_name'] !== null ? e((string)$r['client_name']) : '-' ?></td>
+          <td class="msg nowrap" title="<?= e($cid) ?>"><?= $cid !== '' ? '<code>' . e(substr($cid, 0, 10)) . '…</code>' : '-' ?></td>
+          <td class="nowrap"><?= $r['execution_id'] !== null ? '#' . (int)$r['execution_id'] : '-' ?></td>
+          <td class="msg nowrap"><?= $r['ip'] !== null && $r['ip'] !== '' ? e((string)$r['ip']) : '-' ?></td>
+          <td class="num nowrap"><?= $r['duration_ms'] !== null ? (int)$r['duration_ms'] : '-' ?></td>
+          <td class="num nowrap"><?= $r['row_count'] !== null ? number_format((int)$r['row_count']) : '-' ?></td>
           <td class="msg"><?= $r['message'] !== null ? e((string)$r['message']) : '-' ?></td>
         </tr>
 <?php endforeach; ?>
         </tbody>
       </table>
     </div>
-<?php if ($pages > 1): ?>
+<?php if ((int)$pages > 1): ?>
     <div class="form-ops pager">
-      <?php if ($page > 1): ?>
-        <a class="btn sm" href="/admin/logs?<?= e($qs) ?>page=<?= $page - 1 ?>"><?= View::icon('arrow-start', 13) ?><span>Newer</span></a>
+      <?php if ((int)$page > 1): ?>
+        <a class="btn btn-sm" href="/admin/logs?<?= e($qs) ?>page=<?= (int)$page - 1 ?>"><?= View::icon('arrow-start', 13) ?><span>Newer</span></a>
       <?php endif; ?>
-      <?php if ($page < $pages): ?>
-        <a class="btn sm" href="/admin/logs?<?= e($qs) ?>page=<?= $page + 1 ?>"><span>Older</span><?= View::icon('arrow-end', 13) ?></a>
+      <?php if ((int)$page < (int)$pages): ?>
+        <a class="btn btn-sm" href="/admin/logs?<?= e($qs) ?>page=<?= (int)$page + 1 ?>"><span>Older</span><?= View::icon('arrow-end', 13) ?></a>
       <?php endif; ?>
       <span class="hint">page <?= (int)$page ?> of <?= (int)$pages ?></span>
     </div>

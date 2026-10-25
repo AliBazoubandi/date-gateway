@@ -159,7 +159,7 @@ final class InstantExecutor
                 $sql,
                 $timeout,
                 (int)$request['max_rows'],
-                static function (array $row) use (&$rows, $writer, &$fileOk, &$fileError, &$inlineBytes, $inlineMax): void {
+                static function (array $row) use (&$rows, $writer, &$fileOk, &$fileError, &$inlineBytes, $inlineMax, $asFile): void {
                     $rows[] = $row;
                     if ($fileOk) {
                         try {
@@ -177,7 +177,7 @@ final class InstantExecutor
                     } else {
                         $inlineBytes += strlen((string)json_encode($row));
                     }
-                    if ($inlineBytes > $inlineMax) {
+                    if (!$asFile && $inlineBytes > $inlineMax) {
                         throw new ResultTooLargeException(
                             "The inline result exceeded the instant limit of {$inlineMax} bytes."
                         );
@@ -197,7 +197,7 @@ final class InstantExecutor
                 null, null, Str::truncate($e->getMessage(), 2000));
             Errors::emit(413, 'result_too_large',
                 'The result exceeded the instant size limit (' . number_format($inlineMax) . ' bytes). '
-                . 'Narrow the query or use a delayed request.');
+                . 'Use ?download=1 to stream large results directly, raise GATEWAY_INSTANT_MAX_BYTES in config/.env, or use a delayed request.');
         }
 
         if ($result['ok']) {

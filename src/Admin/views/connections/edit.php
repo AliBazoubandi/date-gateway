@@ -6,7 +6,21 @@ $isNew = ($m('id', 0) == 0);
 $fe = static fn(string $f): string => \Admin\View::ferr($errors, $f);
 $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
 ?>
-<h1><?= $isNew ? 'New connection' : 'Edit connection — ' . e((string)$m('name')) ?></h1>
+<div class="page-head">
+  <div>
+    <h1><?= $isNew ? 'New connection' : 'Edit connection — ' . e((string)$m('name')) ?></h1>
+    <div class="page-sub">Credentials stay AES-256-GCM encrypted at rest.</div>
+  </div>
+  <div class="page-tools">
+    <?php if (!$isNew): ?>
+    <form method="post" action="/admin/connections/delete" data-confirm="Delete connection “<?= e((string)$m('name')) ?>”? Its stored credentials will be removed." class="inline" style="margin:0">
+      <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$m('id') ?>">
+      <button class="btn danger" type="submit"><?= \Admin\View::icon('trash', 14) ?><span>Delete</span></button>
+    </form>
+    <?php endif; ?>
+    <a class="btn" href="/admin/connections"><?= \Admin\View::icon('arrow-start', 14) ?><span>All connections</span></a>
+  </div>
+</div>
 <section class="card slim">
 <form method="post" action="/admin/connections" class="form grid2">
   <?= $csrf ?>

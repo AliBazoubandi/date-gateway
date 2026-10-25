@@ -10,9 +10,9 @@ final class View
 {
     /**
      * @param array<string,mixed> $vars
-     * @param string $page  body[data-page] hook for per-page JS modules
+     * @param string $pageHook  body[data-page] hook for per-page JS modules
      */
-    public static function render(string $template, array $vars = [], string $title = '', string $page = ''): void
+    public static function render(string $template, array $vars = [], string $title = '', string $pageHook = ''): void
     {
         if (PHP_SAPI !== 'cli' && !headers_sent()) {
             header('X-Frame-Options: DENY');
@@ -36,7 +36,7 @@ final class View
         // pinned AFTER the loop, so a caller-provided 'title', 'csrf' or
         // 'admin' cannot forge session state or rename the template.
         $reserved = ['template' => true, 'content' => true, 'title' => true,
-            'csrf' => true, 'admin' => true, 'page' => true, 'vars' => true, 'reserved' => true];
+            'csrf' => true, 'admin' => true, 'pageHook' => true, 'bodyPage' => true, 'vars' => true, 'reserved' => true];
         foreach ($vars as $key => $value) {
             if (!is_string($key) || isset($reserved[$key])
                 || preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $key) !== 1) {
@@ -47,10 +47,12 @@ final class View
         $title = $title !== '' ? $title : 'Admin';
         $csrf = \Core\Csrf::field();
         $admin = \Admin\Auth::current();
+        $bodyPage = $pageHook !== '' ? $pageHook : (isset($vars['page']) && is_string($vars['page']) ? $vars['page'] : '');
         ob_start();
         include __DIR__ . '/views/' . $template . '.php';
         $content = (string)ob_get_clean();
         ob_start();
+        $page = $bodyPage !== '' ? $bodyPage : (isset($page) && is_string($page) ? $page : '');
         include __DIR__ . '/views/layout/header.php';
         echo $content;
         include __DIR__ . '/views/layout/footer.php';
@@ -99,7 +101,7 @@ final class View
             'sun', 'moon', 'check', 'x', 'info', 'alert', 'clock', 'activity',
             'pulse', 'download', 'send', 'plus', 'filter', 'copy', 'logout',
             'zap', 'terminal', 'pause', 'play', 'chevron-down', 'chevron-start',
-            'chevron-end', 'arrow-start', 'arrow-end', 'pin', 'key',
+            'chevron-end', 'arrow-start', 'arrow-end', 'pin', 'key', 'trash',
         ];
         if (!in_array($name, $known, true)) {
             return '';

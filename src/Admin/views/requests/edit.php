@@ -13,7 +13,16 @@ $changed = $changed ?? [];
     <h1><?= $isNew ? 'New request' : 'Edit request — ' . e((string)$row['code']) ?></h1>
     <div class="page-sub">Clients call this by code; they never see the SQL.</div>
   </div>
-  <div class="page-tools"><a class="btn" href="/admin/requests"><?= View::icon('arrow-start', 14) ?><span>All requests</span></a></div>
+  <div class="page-tools">
+    <?php if (!$isNew): ?>
+    <form method="post" action="/admin/requests/delete" data-confirm="Delete request «<?= e((string)$row['code']) ?>»? This will permanently remove the request." class="inline" style="margin:0">
+      <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
+      <button class="btn danger" type="submit"><?= View::icon('trash', 14) ?><span>Delete</span></button>
+    </form>
+    <a class="btn" href="/admin/requests?grant_permissions=<?= (int)$row['id'] ?>"><?= View::icon('shield', 14) ?><span>Permissions</span></a>
+    <?php endif; ?>
+    <a class="btn" href="/admin/requests"><?= View::icon('arrow-start', 14) ?><span>All requests</span></a>
+  </div>
 </div>
 
 <div class="editor-split">

@@ -102,12 +102,12 @@ final class ConnectionController
         }
         $inUse = (int)$db->value('SELECT COUNT(*) FROM requests WHERE connection_id = ?', [$id]);
         if ($inUse > 0) {
-            Flashes::set('error', "Connection is used by {$inUse} request(s). Deactivate it instead.");
+            Flashes::set('error', "Cannot delete connection “{$row['name']}”: it is used by {$inUse} request(s). Delete or reassign those requests first.");
             Http::redirect('/admin/connections');
         }
         $db->execute('DELETE FROM connections WHERE id = ?', [$id]);
         AuditLogger::record('connection', 'delete', $id, (string)$row['name'], self::snapshotRow($row), null);
-        Flashes::set('ok', 'Connection deleted.');
+        Flashes::set('ok', 'Connection «' . $row['name'] . '» deleted.');
         Http::redirect('/admin/connections');
     }
 

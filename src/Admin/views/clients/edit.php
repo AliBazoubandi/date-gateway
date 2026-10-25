@@ -10,7 +10,15 @@ $fc = static fn(string $f): string => \Admin\View::fcls($errors, $f);
     <h1><?= $isNew ? 'New client' : 'Edit client — ' . e((string)$row['name']) ?></h1>
     <div class="page-sub">Agents authenticate with an API key; humans get a portal token.</div>
   </div>
-  <div class="page-tools"><a class="btn" href="/admin/clients"><?= View::icon('arrow-start', 14) ?><span>All clients</span></a></div>
+  <div class="page-tools">
+    <?php if (!$isNew): ?>
+    <form method="post" action="/admin/clients/delete" data-confirm="Delete client “<?= e((string)$row['name']) ?>”? This will permanently remove the client." class="inline" style="margin:0">
+      <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$row['id'] ?>">
+      <button class="btn danger" type="submit"><?= View::icon('trash', 14) ?><span>Delete</span></button>
+    </form>
+    <?php endif; ?>
+    <a class="btn" href="/admin/clients"><?= View::icon('arrow-start', 14) ?><span>All clients</span></a>
+  </div>
 </div>
 
 <div class="tabs" id="client-tabs" role="tablist"<?= $isNew ? ' hidden' : '' ?>>

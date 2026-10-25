@@ -2,9 +2,11 @@
 declare(strict_types=1);
 namespace Admin\Controllers;
 
+use Admin\Auth;
 use Admin\Flashes;
 use Admin\View;
 use Core\Config;
+use Core\Csrf;
 use Core\Db;
 use Core\Http;
 use Core\Str;
@@ -87,6 +89,18 @@ final class RequestController
             );
         }
 
+        $clients = $db->rows('SELECT id, name, type, is_active FROM clients WHERE is_active = 1 ORDER BY name');
+        $grantReqId = (int)(Http::param('grant_permissions', 'g') ?? 0);
+        $grantReq = null;
+        $grantedClientIds = [];
+        if ($grantReqId > 0) {
+            $grantReq = $db->one('SELECT id, code, name FROM requests WHERE id = ?', [$grantReqId]);
+            if ($grantReq !== null) {
+                $perms = $db->rows('SELECT client_id FROM client_request_permissions WHERE request_id = ?', [$grantReqId]);
+                $grantedClientIds = array_map(static fn(array $p): int => (int)$p['client_id'], $perms);
+            }
+        }
+
         // "last changed by X at Y" names come through $rows.updated_by; the
         // page resolves them to usernames in a single pass if wanted.
         View::render('requests/list', [
@@ -94,6 +108,9 @@ final class RequestController
             'sparks' => $sparks,
             'f' => $f,
             'connections' => $connections,
+            'clients' => $clients,
+            'grantReq' => $grantReq,
+            'grantedClientIds' => $grantedClientIds,
         ], 'Requests', 'requests-list');
     }
 
@@ -154,6 +171,7 @@ final class RequestController
             $after = $db->one('SELECT * FROM requests WHERE id = ?', [$id]);
             AuditLogger::record('request', 'update', $id, $in['code'], $before, $after);
             Flashes::set('ok', 'Request updated. New calls use the new definition immediately.');
+            Http::redirect('/admin/requests');
         } else {
             $db->execute(
                 'INSERT INTO requests (code, name, description, sql_text, params_json, connection_id, response_mode,
@@ -165,11 +183,79 @@ final class RequestController
                     $in['ttl_minutes'], $in['timeout_seconds'], $in['max_rows'], $in['is_active'],
                     $adminId, $now]
             );
-            $id = $db->insertId();
-            $after = $db->one('SELECT * FROM requests WHERE id = ?', [$id]);
-            AuditLogger::record('request', 'create', $id, $in['code'], null, $after);
-            Flashes::set('ok', 'Request created. Grant permissions to clients next.');
+            $newId = $db->insertId();
+            $after = $db->one('SELECT * FROM requests WHERE id = ?', [$newId]);
+            AuditLogger::record('request', 'create', $newId, $in['code'], null, $after);
+            Flashes::set('ok', 'Request created. Select the clients you want to grant permission to.');
+            Http::redirect('/admin/requests?grant_permissions=' . $newId);
         }
+    }
+
+    /** Grant/revoke permissions for one request across multiple clients; audited as a summary diff. */
+    public static function savePermissions(int $id = 0): void
+    {
+        $db = Db::instance();
+        if ($id <= 0) {
+            $id = (int)(Http::param('id', 'p') ?? 0);
+        }
+        $request = $db->one('SELECT id, code, name FROM requests WHERE id = ?', [$id]);
+        if ($request === null) {
+            Flashes::set('error', 'Request not found.');
+            Http::redirect('/admin/requests');
+        }
+
+        $adminId = (int)(Auth::current()['id'] ?? 0);
+        $posted = [];
+        if (is_array($_POST['client_ids'] ?? null)) {
+            foreach ($_POST['client_ids'] as $cid) {
+                if (ctype_digit((string)$cid)) {
+                    $posted[(int)$cid] = true;
+                }
+            }
+        }
+
+        // Only active, existing clients are grantable
+        $validClients = [];
+        foreach ($db->rows('SELECT id, name FROM clients WHERE is_active = 1') as $c) {
+            $validClients[(int)$c['id']] = (string)$c['name'];
+        }
+
+        // Current clients granted for this request
+        $current = [];
+        foreach ($db->rows('SELECT client_id FROM client_request_permissions WHERE request_id = ?', [$id]) as $g) {
+            $current[(int)$g['client_id']] = true;
+        }
+
+        $added = [];
+        $removed = [];
+        $now = Time::now();
+
+        foreach ($posted as $cid => $_) {
+            if (!isset($validClients[$cid])) {
+                continue;
+            }
+            if (!isset($current[$cid])) {
+                $db->execute(
+                    'INSERT INTO client_request_permissions (client_id, request_id, granted_by, granted_at) VALUES (?, ?, ?, ?)',
+                    [$cid, $id, $adminId, $now]
+                );
+                $added[] = $validClients[$cid];
+            }
+        }
+
+        foreach ($current as $cid => $_) {
+            if (!isset($posted[$cid])) {
+                $db->execute('DELETE FROM client_request_permissions WHERE client_id = ? AND request_id = ?', [$cid, $id]);
+                $removed[] = $validClients[$cid] ?? ('#' . $cid);
+            }
+        }
+
+        $beforeClients = array_values(array_map(static fn($cid) => $validClients[$cid] ?? ('#' . $cid), array_keys($current)));
+        AuditLogger::record('permission', 'update', $id, (string)$request['code'],
+            ['granted_clients' => $beforeClients],
+            ['added' => $added, 'removed' => $removed]);
+
+        Flashes::set('ok', 'Permissions updated for ' . $request['code'] . ' (' . count($added) . ' granted, ' . count($removed) . ' revoked).');
         Http::redirect('/admin/requests');
     }
 
@@ -181,14 +267,19 @@ final class RequestController
             Flashes::set('error', 'Request not found.');
             Http::redirect('/admin/requests');
         }
-        $history = (int)$db->value('SELECT COUNT(*) FROM executions WHERE request_id = ?', [$id]);
-        if ($history > 0) {
-            Flashes::set('error', "Request has {$history} execution(s) of history. Deactivate it instead of deleting.");
+        $running = (int)$db->value("SELECT COUNT(*) FROM executions WHERE request_id = ? AND status = 'running'", [$id]);
+        if ($running > 0) {
+            Flashes::set('error', 'Cannot delete request: a query execution is currently running.');
             Http::redirect('/admin/requests');
         }
+        $db->execute('DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE request_id = ?)', [$id]);
+        $db->execute('DELETE FROM calls WHERE request_id = ?', [$id]);
+        $db->execute('DELETE FROM executions WHERE request_id = ?', [$id]);
+        $db->execute('DELETE FROM client_request_permissions WHERE request_id = ?', [$id]);
+        $db->execute('DELETE FROM request_logs WHERE request_id = ?', [$id]);
         $db->execute('DELETE FROM requests WHERE id = ?', [$id]);
         AuditLogger::record('request', 'delete', $id, (string)$row['code'], self::snapshot($row), null);
-        Flashes::set('ok', 'Request deleted.');
+        Flashes::set('ok', 'Request «' . $row['code'] . '» deleted.');
         Http::redirect('/admin/requests');
     }
 

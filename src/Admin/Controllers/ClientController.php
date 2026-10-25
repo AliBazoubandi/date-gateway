@@ -113,14 +113,22 @@ final class ClientController
             Flashes::set('error', 'Client not found.');
             Http::redirect('/admin/clients');
         }
-        $calls = (int)$db->value('SELECT COUNT(*) FROM calls WHERE client_id = ?', [$id]);
-        if ($calls > 0) {
-            Flashes::set('error', "Client has {$calls} call(s) of history. Deactivate it instead of deleting.");
+        $running = (int)$db->value(
+            "SELECT COUNT(*) FROM executions e JOIN calls c ON c.execution_id = e.id WHERE c.client_id = ? AND e.status = 'running'",
+            [$id]
+        );
+        if ($running > 0) {
+            Flashes::set('error', 'Cannot delete client: active queries are currently executing for this client.');
             Http::redirect('/admin/clients');
         }
-        $db->execute('DELETE FROM clients WHERE id = ?', [$id]); // permissions cascade
+        $db->execute('DELETE FROM webhook_deliveries WHERE call_id IN (SELECT id FROM calls WHERE client_id = ?)', [$id]);
+        $db->execute('DELETE FROM calls WHERE client_id = ?', [$id]);
+        $db->execute('DELETE FROM client_rate_limits WHERE client_id = ?', [$id]);
+        $db->execute('DELETE FROM client_request_permissions WHERE client_id = ?', [$id]);
+        $db->execute('DELETE FROM request_logs WHERE client_id = ?', [$id]);
+        $db->execute('DELETE FROM clients WHERE id = ?', [$id]);
         AuditLogger::record('client', 'delete', $id, (string)$row['name'], self::mask($row, false, false), null);
-        Flashes::set('ok', 'Client deleted.');
+        Flashes::set('ok', 'Client «' . $row['name'] . '» deleted.');
         Http::redirect('/admin/clients');
     }
 

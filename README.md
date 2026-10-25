@@ -56,9 +56,10 @@ Two response modes:
 
 - **`memory_limit` >= 256M** in `php.ini`. Instant mode buffers result rows in
   memory to build the inline JSON response; the gateway caps that payload at
-  `limits.instant.max_result_bytes` (default 16 MiB, 413 `result_too_large`
-  past it) and caps streamed result files at `limits.max_result_bytes`
-  (default 512 MiB), but the process still needs headroom above the inline cap.
+  `limits.instant.max_result_bytes` (default 64 MiB, or overridden via
+  `GATEWAY_INSTANT_MAX_BYTES` in `.env` e.g. 128 MiB; 413 `result_too_large`
+  past it). When called with `?download=1`, the gateway bypasses the inline memory
+  cap and streams the file directly up to the 512 MiB file limit (`limits.max_result_bytes`).
   `php cli\check.php` warns when `memory_limit` is below 256M.
 
 **Startup failures.** An unusable `GATEWAY_MASTER_KEY` or an unreadable config
@@ -133,6 +134,10 @@ policy never blocks them.
      and webhook payloads are built from it. Required in production
      (`cli\check.php` fails while it is empty); may stay empty in development
      with `GATEWAY_DEBUG=1`, where links fall back to the `Host` header.
+    - `GATEWAY_INSTANT_MAX_BYTES` — optional override for the maximum byte size
+      of inline instant results (default 64 MiB = 67108864; e.g. 128 MiB =
+      134217728). When an instant query is called with `?download=1`, this
+      inline memory cap is bypassed and only the 512 MiB file limit applies.
 
    Everything else (`limits.*`, `worker.*`, `cleanup.*`, `storage.*`,
    `metadata_db` host/port/database) has committed defaults in
@@ -220,12 +225,16 @@ policy never blocks them.
      **Test** button to validate.
    - *Requests*: create each approved query — unique `code` (the URL
      fragment clients call), SQL text, connection, mode (delayed/instant),
-     TTL, timeout, max rows. Test-run it before activating.
+     TTL, timeout, max rows. Test-run it before activating. Saving a new
+     request automatically opens a fast permission granting modal to select
+     clients allowed to call it, and an on-demand "Permissions" button is
+     available on each request row in the list and edit view.
    - *Clients*: create an API client per consumer. The API key is shown
      **exactly once**; only hashes are stored — an HMAC-SHA256 keyed by
      `GATEWAY_MASTER_KEY`, plus the legacy bare SHA-256 for keys that have
      not authenticated since that upgrade. Grant per-request
-     permissions on the client page.
+     permissions on the client page, or manage permissions in bulk from
+     the requests list.
    - *Logs / Audit*: request log with filters (client, request, event,
      mode, date range) and the admin audit trail with field-level
      before/after diffs.
@@ -488,7 +497,33 @@ curl.exe -f -OJ -D - -H "Authorization: Bearer CLIENT_KEY" LINK
 # a name of your own is equally safe — a refusal writes no bytes, so this
 # never clobbers result.json either (see "Expired-link downloads" below):
 curl.exe -H "Authorization: Bearer CLIENT_KEY" LINK -o result.json
+
+# COMPRESSED DOWNLOADS (ZIP & GZIP) — for fast transfers & slow connections:
+# Append ?format=zip or ?zip=1 (or send Accept: application/zip) to download
+# the result packaged into a ZIP archive on the fly (Content-Type: application/zip,
+# saved as {name}.zip). JSON compresses by 85% to 95% (e.g. 50 MB shrinks to ~3 MB):
+curl.exe -f -OJ -H "Authorization: Bearer CLIENT_KEY" "LINK?format=zip"
+
+# Or append ?format=gzip or ?gz=1 to stream gzip-compressed JSON:
+curl.exe -f -OJ -H "Authorization: Bearer CLIENT_KEY" "LINK?format=gzip"
 ```
+
+**Compressed downloads and slow connections (2026-10).** JSON result files are
+highly repetitive text. On slow or congested internet connections, downloading
+uncompressed multi-megabyte JSON can take several minutes. Adding `?format=zip`
+or `?zip=1` (or sending `Accept: application/zip`) compresses the result file
+on the fly using standard ZipArchive. A 50 MB JSON file typically shrinks to
+2–4 MB, speeding up downloads by up to 10×. Alternatively, `?format=gzip`
+or `?gz=1` streams GZIP data (`Content-Type: application/gzip`).
+
+**No download execution timeout (2026-10).** The gateway imposes **no execution
+timeout** on active downloads. `Download::handle()` sets `set_time_limit(0)`
+and `ini_set('max_execution_time', '0')`, and ends active output buffers so
+each chunk flushes immediately over the socket. If clients experience connection
+drops on slow lines, ensure reverse proxies in front of PHP (such as Nginx)
+have sufficient timeouts (`proxy_read_timeout 600s;` / `fastcgi_read_timeout 600s;`)
+and that client HTTP libraries are configured with stream mode (e.g. Python
+`requests.get(url, stream=True, timeout=(15, None))`).
 
 **Expired-link downloads are a failure, not a download (2026-10).** Once
 `expires_at` has passed, a download attempt is refused with the `410 Gone`
@@ -523,8 +558,10 @@ the same query immediately will not help. Error *responses* carry `{"error":{"co
 `query_rejected` (502, saved SQL is not
 read-only), `execution_failed` (502), `result_unavailable` (502, the stored
 result file is missing or unreadable — an empty 200 is never returned),
-`result_too_large` (413, instant result past
-`limits.instant.max_result_bytes`), `timeout`
+`result_too_large` (413, instant inline result past
+`limits.instant.max_result_bytes`, default 64 MiB or `GATEWAY_INSTANT_MAX_BYTES`;
+pass `?download=1` to stream directly up to the 512 MiB file limit without
+inline memory capping), `timeout`
 (504), `rate_limited` (429, with `Retry-After`), `submission_in_progress`
 (409, the `Idempotency-Key`'s first submission is still running — with
 `Retry-After`; added in 2026-10, see the idempotency section below),

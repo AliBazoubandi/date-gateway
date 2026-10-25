@@ -133,6 +133,8 @@ final class Router
                 Controllers\RequestController::delete($id);
             } elseif ($action === 'test') {
                 Controllers\RequestController::testRun($id);
+            } elseif ($action === 'permissions') {
+                Controllers\RequestController::savePermissions($id);
             } else {
                 Controllers\RequestController::save($id);
             }

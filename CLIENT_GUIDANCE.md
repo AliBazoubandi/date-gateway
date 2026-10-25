@@ -266,15 +266,29 @@ Streams the JSON result file.
 #### URL Parameters
 - `token` *(string, required)*: The 48-character hexadecimal download token extracted from the `link` URL.
 
+#### Query Parameters
+- `format=zip` or `zip=1` *(optional)*: Packages the result JSON into a `.zip` archive on the fly (`Content-Type: application/zip`, named `{original_filename}.zip`). Compresses typical JSON files by **85%–95%**, drastically reducing download times over slow or mobile internet connections. Alternatively, send the request header `Accept: application/zip`.
+- `format=gzip` or `gz=1` *(optional)*: Streams raw gzip-compressed JSON data (`Content-Type: application/gzip`, named `{original_filename}.gz`).
+
 #### Request Headers
 - `Authorization: Bearer <KEY>` *(required)*: The downloading client must own the call associated with this token.
+- `Accept: application/zip` *(optional)*: Requests the file compressed as a ZIP archive.
 
-#### Response Headers
+#### Response Headers (Standard JSON)
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/json; charset=utf-8
 Content-Disposition: attachment; filename="sales.daily_20261022_113000_client3_e4512.json"
 Content-Length: 1048576
+Cache-Control: no-store
+```
+
+#### Response Headers (ZIP Compression)
+```http
+HTTP/1.1 200 OK
+Content-Type: application/zip
+Content-Disposition: attachment; filename="sales.daily_20261022_113000_client3_e4512.zip"
+Content-Length: 84310
 Cache-Control: no-store
 ```
 
@@ -288,10 +302,20 @@ When a result has expired (`now >= expires_at`):
 #### Recommended Download Command
 To take full advantage of client safety features, use:
 ```bash
+# Standard JSON download:
 curl.exe -f -OJ -H "Authorization: Bearer YOUR_API_KEY" "https://gateway.example.com/api/v1/results/<TOKEN>"
+
+# High-speed compressed ZIP download (85-95% smaller, ideal for slow connections):
+curl.exe -f -OJ -H "Authorization: Bearer YOUR_API_KEY" "https://gateway.example.com/api/v1/results/<TOKEN>?format=zip"
 ```
 - `-f`: Fails immediately on HTTP errors (e.g., 404, 409, 410) without writing anything.
 - `-O -J`: Automatically uses the filename provided in the server's `Content-Disposition` header, and refuses to overwrite existing local files if already downloaded.
+
+#### Slow Internet Connections & Preventing Timeouts
+If you or your users experience slow internet connectivity or large file transfers:
+1. **Server-side execution timeout is disabled:** The gateway script disables execution timeouts (`set_time_limit(0)`) during downloads. The gateway will never drop a download stream due to long download duration.
+2. **Use compressed downloads:** Add `?format=zip` or `?zip=1` to shrink files by up to 95% (e.g. 50 MB becomes ~3 MB), preventing connection timeouts and completing up to 10× faster.
+3. **Configure client-side timeouts:** Ensure your HTTP client library does not abort prematurely. In Python `requests`, configure read timeout to `None` or a generous value: `requests.get(url, stream=True, timeout=(15, None))`. In `curl`, avoid setting tight `--max-time` limits.
 
 ---
 
@@ -695,7 +719,7 @@ All API errors return standard JSON formatted as:
 | `409` | `submission_in_progress` | An idempotent submission with this key is currently executing. | Wait the duration specified in `Retry-After: 5` and retry. |
 | `409` | `result_not_ready` | Result finished early; download window opens at `ready_at`. | Wait the duration in `Retry-After` seconds before downloading. |
 | `410` | `expired` | The requested result has expired from gateway storage. | Submit a new request. |
-| `413` | `result_too_large` | Instant query result exceeded maximum memory limit (default 16 MiB). | Use a delayed request or request administrator to narrow query. |
+| `413` | `result_too_large` | Instant query inline result exceeded maximum memory limit (default 64 MiB, or server `GATEWAY_INSTANT_MAX_BYTES`). | Call with `?download=1` to stream file directly without inline buffering (up to 512 MiB), switch request to delayed mode, or request administrator to raise limit. |
 | `429` | `rate_limited` | Client submission limit reached, or target DB connection busy. | Pause for the duration given in the `Retry-After` header. |
 | `502` | `execution_failed` | Database query failed on the target database engine. | Gateway logs record details; contact administrator if persistent. |
 | `502` | `query_rejected` | Stored query was rejected by read-only policy. | Administrative configuration error; contact administrator. |
@@ -730,8 +754,8 @@ def run_instant_query(request_code: str):
     print(f"Executed in {payload.get('executed_at')}, rows: {payload.get('row_count')}")
     return payload["data"]
 
-def run_delayed_query_and_download(request_code: str, output_filepath: str):
-    """Submits a delayed query, polls until ready, and saves result."""
+def run_delayed_query_and_download(request_code: str, output_filepath: str, use_zip: bool = True):
+    """Submits a delayed query, polls until ready, and saves result (optionally as ZIP)."""
     submit_url = f"{GATEWAY_BASE}/api/v1/request/{request_code}"
     # Use an idempotency key to prevent accidental duplicate runs
     submit_headers = {**HEADERS, "Idempotency-Key": f"py_job_{int(time.time())}"}
@@ -753,8 +777,12 @@ def run_delayed_query_and_download(request_code: str, output_filepath: str):
 
         if status == "ready":
             download_link = info["link"]
-            print(f"Downloading from {download_link}...")
-            dl_resp = requests.get(download_link, headers=HEADERS, stream=True, timeout=120)
+            params = {"format": "zip"} if use_zip else {}
+            if use_zip and not output_filepath.endswith(".zip"):
+                output_filepath += ".zip"
+            print(f"Downloading from {download_link} (ZIP={use_zip})...")
+            # Connect timeout 15s, read timeout None so slow connections never abort
+            dl_resp = requests.get(download_link, headers=HEADERS, params=params, stream=True, timeout=(15, None))
             dl_resp.raise_for_status()
             with open(output_filepath, "wb") as f:
                 for chunk in dl_resp.iter_content(chunk_size=65536):

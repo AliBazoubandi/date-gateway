@@ -18,8 +18,8 @@ use Core\Str;
     <td><?= $r['is_active'] ? Admin\View::badge('ok', 'active') : Admin\View::badge('off', 'inactive') ?></td>
     <td class="ops">
       <a class="btn sm" href="/admin/clients/<?= (int)$r['id'] ?>">Edit / permissions</a>
-      <form method="post" action="/admin/clients/delete" class="inline" onsubmit="return confirm('Delete client “<?= e((string)$r['name']) ?>” ?')">
-        <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn sm danger">Delete</button>
+      <form method="post" action="/admin/clients/delete" class="inline" onsubmit="return confirm('Delete client “<?= e((string)$r['name']) ?>”?')">
+        <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$r['id'] ?>"><button class="btn sm danger"><?= Admin\View::icon('trash', 12) ?> Delete</button>
       </form>
     </td>
   </tr>

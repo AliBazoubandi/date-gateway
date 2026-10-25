@@ -95,7 +95,7 @@ return [
             // OOM the PHP process. Exceeding it fails the run with 413
             // result_too_large. The streamed result FILE is capped separately
             // by limits.max_result_bytes.
-            'max_result_bytes' => (int)\Core\Env::get('GATEWAY_INSTANT_MAX_BYTES', 16 * 1024 * 1024),
+            'max_result_bytes' => (int)\Core\Env::get('GATEWAY_INSTANT_MAX_BYTES', 64 * 1024 * 1024),
         ],
         // Hard cap on a streamed result file (delayed worker and instant
         // file). ResultWriter aborts the run past this size instead of

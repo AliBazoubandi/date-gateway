@@ -52,12 +52,10 @@ use Admin\View;
       <span class="hint small">password: stored encrypted</span>
       <span class="ops">
         <a class="btn btn-sm" href="/admin/connections/<?= (int)$r['id'] ?>">Edit</a>
-        <?php if ((int)$r['requests_count'] === 0): ?>
-        <form method="post" action="/admin/connections/delete" data-confirm="Delete connection “<?= e((string)$r['name']) ?>”? Its stored credentials are removed with it." class="inline">
+        <form method="post" action="/admin/connections/delete" data-confirm="Delete connection “<?= e((string)$r['name']) ?>”? Its stored credentials will be removed." class="inline">
           <?= $csrf ?><input type="hidden" name="id" value="<?= (int)$r['id'] ?>">
-          <button class="btn btn-sm danger" type="submit"><?= View::icon('x', 12) ?></button>
+          <button class="btn btn-sm danger" type="submit"><?= View::icon('trash', 12) ?> Delete</button>
         </form>
-        <?php endif; ?>
       </span>
     </div>
   </article>
