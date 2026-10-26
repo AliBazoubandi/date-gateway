@@ -1104,6 +1104,21 @@ td.msg { font-size: 12px; color: var(--muted); }
 .ex-conn { display: inline-flex; align-items: center; gap: 5px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ex-conn .i { width: 12px; height: 12px; color: var(--faint); flex: none; }
 .ex-badges { display: flex; gap: 5px; flex-wrap: wrap; }
+.ex-actions { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.btn-expire {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 7px; border-radius: var(--radius-sm);
+  border: 1px solid var(--hairline); background: var(--bg);
+  color: var(--muted); font: 550 11px var(--font-ui);
+  cursor: pointer; line-height: 1.3;
+  transition: all var(--t-fast) var(--ease);
+}
+.btn-expire:hover {
+  border-color: var(--danger); background: var(--danger-soft);
+  color: var(--danger-ink);
+}
+.btn-expire .i { width: 11px; height: 11px; }
+.btn-expire:disabled, .btn-expire.btn-busy { opacity: 0.55; cursor: not-allowed; pointer-events: none; }
 
 /* countdown ring */
 .ring { position: relative; width: 28px; height: 28px; flex: none; }

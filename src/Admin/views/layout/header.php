@@ -40,12 +40,13 @@ if ($authed) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark light">
+<meta name="csrf-token" content="<?= Str::e(\Core\Csrf::token()) ?>">
 <title><?= Str::e($title) ?> · <?= Str::e((string)Config::get('app.name', 'Data Gateway')) ?></title>
 <link rel="icon" type="image/svg+xml" href="<?= \Admin\View::url('/assets/favicon.svg') ?>">
 <link rel="preload" href="<?= \Admin\View::url('/assets/fonts/Geist-Variable.woff2') ?>" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="<?= \Admin\View::url('/assets/fonts/GeistMono-Variable.woff2') ?>" as="font" type="font/woff2" crossorigin>
-<link rel="stylesheet" href="<?= \Admin\View::url('/assets/css/tokens.css') ?>">
-<link rel="stylesheet" href="<?= \Admin\View::url('/assets/css/components.css') ?>">
+<link rel="stylesheet" href="<?= \Admin\View::asset('/assets/css/tokens.css') ?>">
+<link rel="stylesheet" href="<?= \Admin\View::asset('/assets/css/components.css') ?>">
 <script>
 /* Theme before first paint: stored choice wins; else prefers-color-scheme;
    else the dark default. (tokens.css renders dark unless data-theme=light.) */

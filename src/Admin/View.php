@@ -78,6 +78,15 @@ final class View
         return \Core\Http::url($path);
     }
 
+    /** Resolve an asset URL with cache-busting timestamp query parameter. */
+    public static function asset(string $path): string
+    {
+        $url = \Core\Http::url($path);
+        $file = BASE_PATH . '/public' . (str_starts_with($path, '/') ? $path : '/' . $path);
+        $v = is_file($file) ? (string)filemtime($file) : '1';
+        return $url . (str_contains($url, '?') ? '&' : '?') . 'v=' . $v;
+    }
+
     /** Escape + format a MySQL datetime for display (short form). */
     public static function dt(?string $mysqlDt): string
     {

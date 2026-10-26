@@ -46,13 +46,18 @@ $card = static function (array $c) use ($ring): string {
     $badges .= ' ' . View::badge('b-' . $c['status'], ucfirst($c['status']));
     $rowsInfo = $c['rows'] !== null ? ' · ' . number_format($c['rows']) . ' rows' : '';
     $dur = $c['dur'] !== null ? ' · ' . ($c['dur'] < 1 ? '<1s' : $c['dur'] . 's') : '';
+    $expireBtn = '';
+    if ($c['status'] !== 'expired') {
+        $expireBtn = '<button type="button" class="btn-expire" data-action="expire" data-id="' . (int)$c['id'] . '" data-code="' . e((string)$c['code']) . '" title="Expire manually" aria-label="Expire manually">'
+            . View::icon('x', 11) . '<span>Expire</span></button>';
+    }
     return '<article class="ex-card' . $cls . '" data-exec="' . (int)$c['id'] . '">'
         . '<div class="ex-top"><span class="ex-code">' . e($c['code']) . '</span><span class="ex-badges">' . $badges . '</span></div>'
         . '<span class="ex-name">' . e($c['name']) . '</span>'
         . ($c['err'] !== null ? '<span class="ex-err" title="' . e(Str::truncate((string)$c['err'], 200)) . '">' . e(Str::truncate((string)$c['err'], 110)) . '</span>' : '')
         . '<div class="ex-foot">'
         . '<span class="ex-conn">' . View::icon('database', 12) . e($c['conn']) . $rowsInfo . $dur . '</span>'
-        . $ring((string)($c['ring'] ?? ''), $c['remains'], $c['span'])
+        . '<div class="ex-actions">' . $expireBtn . $ring((string)($c['ring'] ?? ''), $c['remains'], $c['span']) . '</div>'
         . '</div></article>';
 };
 
@@ -247,3 +252,115 @@ $exp = $cardsOf($s['lanes']['expired'], $card);
 <?php endforeach; endif; ?>
   </div>
 </section>
+
+<style>
+.ex-actions {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 6px !important;
+  flex: none !important;
+}
+.btn-expire {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  padding: 2px 8px !important;
+  border-radius: var(--radius-sm, 4px) !important;
+  border: 1px solid var(--hairline, rgba(255,255,255,0.14)) !important;
+  background: var(--bg, #0d1117) !important;
+  color: var(--muted, #94a3b8) !important;
+  font-family: var(--font-ui, system-ui, -apple-system, sans-serif) !important;
+  font-size: 11px !important;
+  font-weight: 550 !important;
+  cursor: pointer !important;
+  line-height: 1.3 !important;
+  white-space: nowrap !important;
+  text-decoration: none !important;
+  box-shadow: none !important;
+  vertical-align: middle !important;
+  transition: all var(--t-fast, 0.15s) var(--ease, ease) !important;
+}
+.btn-expire:hover {
+  border-color: var(--danger, #ef4444) !important;
+  background: var(--danger-soft, rgba(239,68,68,0.15)) !important;
+  color: var(--danger-ink, #fca5a5) !important;
+}
+.btn-expire svg.i {
+  width: 11px !important;
+  height: 11px !important;
+  flex: none !important;
+  display: inline-block !important;
+}
+.btn-expire:disabled,
+.btn-expire.btn-busy {
+  opacity: 0.55 !important;
+  cursor: not-allowed !important;
+  pointer-events: none !important;
+}
+</style>
+
+<script>
+(function() {
+  function getBasePath() {
+    var b = document.body ? document.body.getAttribute('data-base') : '';
+    return b ? b : '';
+  }
+
+  function renderButton(id, code) {
+    var iconUrl = getBasePath() + '/assets/icons.svg#i-x';
+    return '<button type="button" class="btn-expire" data-action="expire" data-id="' + id + '" data-code="' + code + '" title="Expire manually" aria-label="Expire manually">'
+      + '<svg class="i" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><use href="' + iconUrl + '"></use></svg>'
+      + '<span>Expire</span></button>';
+  }
+
+  function ensureButtons() {
+    var lanes = document.getElementById('lanes');
+    if (!lanes) return;
+    var cards = lanes.querySelectorAll('.lane:not(.lane-expired) .ex-card');
+    for (var i = 0; i < cards.length; i++) {
+      var card = cards[i];
+      if (card.querySelector('.btn-expire')) continue;
+      var id = card.getAttribute('data-exec');
+      if (!id) continue;
+      var codeEl = card.querySelector('.ex-code');
+      var code = codeEl ? codeEl.textContent.trim() : ('#' + id);
+      var foot = card.querySelector('.ex-foot');
+      if (!foot) continue;
+
+      var actions = foot.querySelector('.ex-actions');
+      if (!actions) {
+        actions = document.createElement('div');
+        actions.className = 'ex-actions';
+        var ring = foot.querySelector('.ring');
+        if (ring) {
+          foot.insertBefore(actions, ring);
+          actions.appendChild(ring);
+        } else {
+          foot.appendChild(actions);
+        }
+      }
+
+      var wrap = document.createElement('div');
+      wrap.innerHTML = renderButton(id, code);
+      var btn = wrap.firstElementChild;
+      if (actions.firstChild) {
+        actions.insertBefore(btn, actions.firstChild);
+      } else {
+        actions.appendChild(btn);
+      }
+    }
+  }
+
+  // Run on first paint
+  ensureButtons();
+
+  // Observe re-renders caused by polling
+  var lanes = document.getElementById('lanes');
+  if (lanes) {
+    var observer = new MutationObserver(function() {
+      ensureButtons();
+    });
+    observer.observe(lanes, { childList: true, subtree: true });
+  }
+})();
+</script>

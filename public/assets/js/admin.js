@@ -102,28 +102,48 @@
 
   /* ------------------------------------------------- styled confirm modal - */
   var confirmBox = $('#confirm');
-  var pendingForm = null;
-  function askConfirm(form, message) {
-    pendingForm = form;
+  var pendingAction = null;
+  function askConfirm(target, message) {
+    if (!confirmBox) {
+      if (typeof target === 'function') { target(); }
+      return;
+    }
+    pendingAction = target;
     $('#confirm-text').textContent = message || 'This action cannot be undone.';
     confirmBox.hidden = false;
-    $('#confirm-cancel').focus();
+    var cancelBtn = $('#confirm-cancel');
+    if (cancelBtn) { cancelBtn.focus(); }
   }
   if (confirmBox) {
     $('#confirm-ok').addEventListener('click', function () {
       confirmBox.hidden = true;
-      if (pendingForm) { pendingForm.requestSubmit ? pendingForm.requestSubmit() : pendingForm.submit(); }
-      pendingForm = null;
+      if (typeof pendingAction === 'function') {
+        var fn = pendingAction;
+        pendingAction = null;
+        fn();
+      } else if (pendingAction) {
+        var f = pendingAction;
+        pendingAction = null;
+        f.requestSubmit ? f.requestSubmit() : f.submit();
+      }
     });
-    $('#confirm-cancel').addEventListener('click', function () { confirmBox.hidden = true; pendingForm = null; });
+    $('#confirm-cancel').addEventListener('click', function () { confirmBox.hidden = true; pendingAction = null; });
     confirmBox.addEventListener('mousedown', function (e) {
-      if (e.target === confirmBox) { confirmBox.hidden = true; pendingForm = null; }
+      if (e.target === confirmBox) { confirmBox.hidden = true; pendingAction = null; }
+    });
+    window.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !confirmBox.hidden) {
+        confirmBox.hidden = true;
+        pendingAction = null;
+      }
     });
   }
+  window.askConfirm = askConfirm;
+  window.toast = toast;
   $$('form[data-confirm]').forEach(function (f) {
     if (f.getAttribute('onsubmit')) { f.removeAttribute('onsubmit'); }
     f.addEventListener('submit', function (e) {
-      if (pendingForm === f) { return; }            // re-entry from the modal's requestSubmit
+      if (pendingAction === f) { return; }            // re-entry from the modal's requestSubmit
       e.preventDefault();
       if (!confirmBox) {                            // scaffold missing → native fallback
         if (window.confirm(f.getAttribute('data-confirm'))) { f.submit(); }
@@ -430,6 +450,11 @@
           + '<circle class="fg" cx="14" cy="14" r="12" fill="none" stroke-width="2" stroke-linecap="round" stroke-dasharray="75.4" stroke-dashoffset="0"/></svg>'
           + '<b>' + (c.ring === 'elapsed' ? (c.remains || 0) : (c.remains < 60 ? c.remains + 's' : Math.floor(c.remains / 60) + 'm')) + '</b></div>';
       }
+      var expireBtn = '';
+      if (c.status !== 'expired') {
+        expireBtn = '<button type="button" class="btn-expire" data-action="expire" data-id="' + emId(c.id) + '" data-code="' + esc(c.code) + '" title="Expire manually" aria-label="Expire manually">'
+          + icon('x', 11) + '<span>Expire</span></button>';
+      }
       return '<article class="ex-card' + (c.status === 'running' ? ' running' : '') + '" data-exec="' + emId(c.id) + '">'
         + '<div class="ex-top"><span class="ex-code">' + esc(c.code) + '</span><span class="ex-badges">' + badges + '</span></div>'
         + '<span class="ex-name">' + esc(c.name) + '</span>'
@@ -437,7 +462,8 @@
         + '<div class="ex-foot"><span class="ex-conn">' + icon('database', 12) + esc(c.conn)
         + (c.rows !== null && c.rows !== undefined ? ' · ' + c.rows.toLocaleString() + ' rows' : '')
         + (c.dur !== null && c.dur !== undefined ? ' · ' + (c.dur < 1 ? '<1s' : c.dur + 's') : '') + '</span>'
-        + ring + '</div></article>';
+        + '<div class="ex-actions">' + expireBtn + ring + '</div>'
+        + '</div></article>';
     }
     function emId(n) { return String(n); }
 
@@ -579,6 +605,68 @@
     }
     setInterval(pollState, 4000);
     pollState();
+
+    var lanesContainer = $('#lanes');
+    if (lanesContainer && !lanesContainer.hasAttribute('data-expire-bound')) {
+      lanesContainer.setAttribute('data-expire-bound', '1');
+      lanesContainer.addEventListener('click', function (e) {
+        var btn = e.target.closest('.btn-expire');
+        if (!btn) { return; }
+        e.preventDefault();
+        e.stopPropagation();
+        var id = btn.getAttribute('data-id');
+        var code = btn.getAttribute('data-code') || ('#' + id);
+        if (!id) { return; }
+
+        var doExpire = function () {
+          btn.disabled = true;
+          btn.classList.add('btn-busy');
+          var card = btn.closest('.ex-card');
+          if (card) { card.style.opacity = '0.5'; }
+
+          var metaCsrf = document.querySelector('meta[name="csrf-token"]');
+          var csrf = metaCsrf ? metaCsrf.getAttribute('content') : '';
+          var params = new URLSearchParams();
+          params.append('_csrf', csrf);
+          params.append('id', id);
+
+          fetch(appUrl('/admin/executions/expire'), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Accept': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+              'X-CSRF-Token': csrf
+            },
+            body: params.toString(),
+            credentials: 'same-origin'
+          })
+          .then(function (res) {
+            if (!res.ok) {
+              return res.json().then(function (j) {
+                throw new Error(j.error || ('HTTP ' + res.status));
+              }).catch(function (parseErr) {
+                throw new Error(parseErr.message || ('HTTP ' + res.status));
+              });
+            }
+            return res.json();
+          })
+          .then(function (data) {
+            toast('ok', data.message || ('Execution #' + id + ' is expired now.'));
+            pollState();
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            btn.classList.remove('btn-busy');
+            if (card) { card.style.opacity = '1'; }
+            toast('err', 'Failed to expire execution: ' + err.message);
+          });
+        };
+
+        var promptMsg = 'Expire execution #' + id + ' (' + code + ')? Cached results will be invalidated immediately.';
+        askConfirm(doExpire, promptMsg);
+      });
+    }
   }
 
   /* ===================================================== LIVE LOG TAIL = */

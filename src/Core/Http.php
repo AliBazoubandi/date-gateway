@@ -14,6 +14,12 @@ final class Http
         return self::method() === 'POST';
     }
 
+    public static function isAjax(): bool
+    {
+        return strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest'
+            || str_contains(strtolower((string)($_SERVER['HTTP_ACCEPT'] ?? '')), 'application/json');
+    }
+
     /**
      * Subpath prefix under which the gateway is mounted (e.g. '/gateway').
      * Returns empty string '' when mounted at the domain root (e.g. http://gw.internal).

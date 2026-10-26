@@ -24,7 +24,7 @@ final class Csrf
     public static function check(): void
     {
         Session::start();
-        $sent = (string)($_POST['_csrf'] ?? '');
+        $sent = (string)($_POST['_csrf'] ?? ($_SERVER['HTTP_X_CSRF_TOKEN'] ?? ''));
         $have = (string)($_SESSION['csrf'] ?? '');
         if ($sent === '' || $have === '' || !hash_equals($have, $sent)) {
             http_response_code(419);

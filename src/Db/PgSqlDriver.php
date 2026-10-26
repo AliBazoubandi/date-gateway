@@ -43,9 +43,16 @@ final class PgSqlDriver implements DriverInterface
         if (($o['port'] ?? 0) > 0) {
             $parts[] = 'port=' . (int)$o['port'];
         }
+        $beforeErr = error_get_last();
         $conn = @pg_connect(implode(' ', $parts), PGSQL_CONNECT_FORCE_NEW);
         if ($conn === false) {
-            throw new DbConnectException('PostgreSQL connect failed: ' . $this->connError());
+            $err = error_get_last();
+            $msg = ($err !== null && $err !== $beforeErr && !empty($err['message']))
+                ? preg_replace('/^pg_connect\(\):\s*/i', '', (string)$err['message'])
+                : 'unknown PostgreSQL connection failure';
+            $this->lastError = $msg;
+            $this->timedOut = $this->isTimeoutText($msg);
+            throw new DbConnectException('PostgreSQL connect failed: ' . $msg);
         }
         $this->conn = $conn;
         $this->lastError = '';
@@ -218,7 +225,20 @@ final class PgSqlDriver implements DriverInterface
 
     private function connError(): string
     {
-        $msg = trim((string)@pg_last_error($this->conn));
+        $msg = '';
+        if ($this->conn !== null) {
+            try {
+                $msg = trim((string)@pg_last_error($this->conn));
+            } catch (\Throwable) {
+                $msg = '';
+            }
+        }
+        if ($msg === '') {
+            $err = error_get_last();
+            if ($err !== null && !empty($err['message'])) {
+                $msg = preg_replace('/^pg_[a-z0-9_]+\(\):\s*/i', '', (string)$err['message']);
+            }
+        }
         if ($msg === '') {
             $msg = 'unknown PostgreSQL error';
         }
@@ -232,6 +252,7 @@ final class PgSqlDriver implements DriverInterface
         $m = strtolower($msg);
         return str_contains($m, '57014')
             || str_contains($m, 'statement timeout')
+            || str_contains($m, 'timeout expired')
             || str_contains($m, 'timed out')
             || str_contains($m, 'canceled');
     }

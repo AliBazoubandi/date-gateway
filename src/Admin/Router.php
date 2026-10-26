@@ -104,6 +104,20 @@ final class Router
                 Controllers\AdminsController::list();
                 return;
 
+            case 'executions':
+                if (Http::isPost()) {
+                    if ($action === 'expire') {
+                        Controllers\ExecutionController::expire($id);
+                        return;
+                    }
+                    if (isset($parts[3]) && strtolower($parts[3]) === 'expire' && ctype_digit($parts[2] ?? '')) {
+                        Controllers\ExecutionController::expire((int)$parts[2]);
+                        return;
+                    }
+                }
+                self::notFound();
+                return;
+
             default:
                 self::notFound();
         }
